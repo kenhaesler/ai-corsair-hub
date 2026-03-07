@@ -1,0 +1,15 @@
+[package]
+name = "corsair-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+corsair-common = { workspace = true }
+corsair-hid = { workspace = true }
+corsair-sensors = { workspace = true }
+corsair-fancontrol = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

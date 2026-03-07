@@ -1,0 +1,13 @@
+[package]
+name = "corsair-scanner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+corsair-hid = { workspace = true }
+corsair-common = { workspace = true }
+hidapi = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

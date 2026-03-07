@@ -1,0 +1,12 @@
+[package]
+name = "corsair-fancontrol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+corsair-common = { workspace = true }
+corsair-sensors = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

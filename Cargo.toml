@@ -1,0 +1,49 @@
+[workspace]
+members = [
+    "crates/hid",
+    "crates/sensors",
+    "crates/fancontrol",
+    "crates/common",
+    "apps/service",
+    "apps/scanner",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/kenhasler/ai-corsair-hub"
+
+[workspace.dependencies]
+# USB HID
+hidapi = "2.6"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Windows APIs
+windows = { version = "0.59", features = [
+    "Win32_System_Services",
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
+
+# Internal crates
+corsair-hid = { path = "crates/hid" }
+corsair-sensors = { path = "crates/sensors" }
+corsair-fancontrol = { path = "crates/fancontrol" }
+corsair-common = { path = "crates/common" }
