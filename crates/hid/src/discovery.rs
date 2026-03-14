@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use corsair_common::{CorsairDevice, DeviceInfo, CORSAIR_VID};
 use hidapi::HidApi;
+use serde::Serialize;
 use tracing::{debug, info};
 
 pub struct DeviceScanner {
@@ -105,7 +106,7 @@ impl DeviceScanner {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DeviceGroup {
     pub device_type: CorsairDevice,
     pub vid: u16,
@@ -114,7 +115,7 @@ pub struct DeviceGroup {
     pub interfaces: Vec<InterfaceInfo>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct InterfaceInfo {
     pub number: i32,
     pub path: String,

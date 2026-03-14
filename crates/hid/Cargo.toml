@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 corsair-common = { workspace = true }
 hidapi = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

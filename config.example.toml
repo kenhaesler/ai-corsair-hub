@@ -1,0 +1,80 @@
+[general]
+poll_interval_ms = 1000
+log_level = "info"
+
+# Hub 1: top + side fans
+[[fan_groups]]
+name = "top_exhaust"
+channels = [1, 2, 3]
+hub_serial = "22DE335F6BBA065AA0653243E4BD7AFC"
+
+[fan_groups.mode]
+type = "pid"
+target_temp = 70.0
+kp = 2.0
+ki = 0.1
+kd = 0.5
+min_duty = 25.0
+max_duty = 100.0
+
+[fan_groups.mode.temp_source]
+sensors = ["cpu", "gpu"]
+weights = [0.7, 0.3]
+
+[[fan_groups]]
+name = "side_intake"
+channels = [4, 5, 6]
+hub_serial = "22DE335F6BBA065AA0653243E4BD7AFC"
+
+[fan_groups.mode]
+type = "curve"
+hysteresis = 3.0
+ramp_rate = 5.0
+
+[[fan_groups.mode.points]]
+temp = 30.0
+duty = 25.0
+
+[[fan_groups.mode.points]]
+temp = 50.0
+duty = 40.0
+
+[[fan_groups.mode.points]]
+temp = 70.0
+duty = 70.0
+
+[[fan_groups.mode.points]]
+temp = 85.0
+duty = 100.0
+
+[fan_groups.mode.temp_source]
+sensors = ["cpu"]
+weights = [1.0]
+
+# Hub 2: bottom + rear fans
+[[fan_groups]]
+name = "bottom_intake"
+channels = [1, 2, 3]
+hub_serial = "8B44BF040D45AA58B07DC6BC9E70E7EC"
+
+[fan_groups.mode]
+type = "pid"
+target_temp = 65.0
+kp = 2.5
+ki = 0.15
+kd = 0.3
+min_duty = 25.0
+max_duty = 100.0
+
+[fan_groups.mode.temp_source]
+sensors = ["gpu"]
+weights = [1.0]
+
+[[fan_groups]]
+name = "rear_exhaust"
+channels = [4]
+hub_serial = "8B44BF040D45AA58B07DC6BC9E70E7EC"
+
+[fan_groups.mode]
+type = "fixed"
+duty_percent = 40.0

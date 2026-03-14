@@ -1,0 +1,51 @@
+[general]
+poll_interval_ms = 1000
+log_level = "info"
+
+[[fan_groups]]
+name = "top_exhaust"
+channels = [
+    1,
+    13,
+    14,
+]
+hub_serial = "22DE335F6BBA065AA0653243E4BD7AFC"
+
+[fan_groups.mode]
+type = "fixed"
+duty_percent = 80.0
+
+[[fan_groups]]
+name = "rear_exhaust"
+channels = [16]
+hub_serial = "22DE335F6BBA065AA0653243E4BD7AFC"
+
+[fan_groups.mode]
+type = "fixed"
+duty_percent = 80.0
+
+[[fan_groups]]
+name = "side_intake"
+channels = [
+    1,
+    2,
+    3,
+]
+hub_serial = "8B44BF040D45AA58B07DC6BC9E70E7EC"
+
+[fan_groups.mode]
+type = "fixed"
+duty_percent = 80.0
+
+[[fan_groups]]
+name = "bottom_intake"
+channels = [
+    13,
+    14,
+    15,
+]
+hub_serial = "8B44BF040D45AA58B07DC6BC9E70E7EC"
+
+[fan_groups.mode]
+type = "fixed"
+duty_percent = 80.0

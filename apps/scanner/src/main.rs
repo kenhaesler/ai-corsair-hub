@@ -1,7 +1,10 @@
 use anyhow::Result;
-use corsair_hid::discovery::DeviceScanner;
-use corsair_hid::icue_link::IcueLinkHub;
 use corsair_common::CorsairDevice;
+use corsair_hid::discovery::DeviceScanner;
+use corsair_hid::{CorsairPsu, IcueLinkHub};
+use corsair_sensors::cpu::CpuSensor;
+use corsair_sensors::gpu::GpuSensor;
+use corsair_sensors::TemperatureSource;
 use tracing::warn;
 
 fn main() -> Result<()> {
@@ -18,6 +21,10 @@ fn main() -> Result<()> {
     println!("  ====================================");
     println!();
 
+    // --- System Temperatures ---
+    print_system_temps();
+
+    // --- USB Device Scan ---
     let scanner = DeviceScanner::new()?;
     let groups = scanner.scan_grouped();
 
@@ -47,73 +54,15 @@ fn main() -> Result<()> {
             group.pid
         );
         println!("      Serial: {}", group.serial);
-        println!(
-            "      Interfaces: {}",
-            group
-                .interfaces
-                .iter()
-                .map(|i| format!("MI_{:02}", i.number))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
 
-        // Probe iCUE LINK Hubs
+        // Probe iCUE LINK Hubs via the real protocol
         if group.device_type == CorsairDevice::IcueLinkHub {
-            println!("      Status: Attempting probe...");
+            probe_icue_link_hub(&scanner, group);
+        }
 
-            // Try each interface
-            for iface in &group.interfaces {
-                match scanner.open_device(group.pid, &group.serial, iface.number) {
-                    Ok(device) => {
-                        let hub = IcueLinkHub::new(device, group.serial.clone());
-                        match hub.probe() {
-                            Ok(result) => {
-                                println!("      Manufacturer: {}", result.manufacturer);
-                                println!("      Product: {}", result.product);
-                                println!(
-                                    "      Probe responses (MI_{:02}): {}",
-                                    iface.number,
-                                    result.responses.len()
-                                );
-                                for resp in &result.responses {
-                                    let hex: String = resp
-                                        .response
-                                        .iter()
-                                        .take(32)
-                                        .map(|b| format!("{:02X}", b))
-                                        .collect::<Vec<_>>()
-                                        .join(" ");
-                                    let suffix = if resp.response.len() > 32 {
-                                        "..."
-                                    } else {
-                                        ""
-                                    };
-                                    println!(
-                                        "        [{}] size={} -> ({} bytes) {}{}",
-                                        resp.probe_name,
-                                        resp.report_size,
-                                        resp.response.len(),
-                                        hex,
-                                        suffix
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                println!(
-                                    "      Probe failed (MI_{:02}): {}",
-                                    iface.number, e
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        println!(
-                            "      Cannot open MI_{:02}: {} (is iCUE running?)",
-                            iface.number, e
-                        );
-                    }
-                }
-            }
+        // Probe HX1500i PSU
+        if group.device_type == CorsairDevice::Hx1500i {
+            probe_psu(&scanner, group);
         }
 
         println!();
@@ -125,4 +74,152 @@ fn main() -> Result<()> {
     println!();
 
     Ok(())
+}
+
+fn print_system_temps() {
+    println!("  System Temperatures:");
+
+    // CPU temperature
+    match CpuSensor::new() {
+        Ok(cpu) => match cpu.read() {
+            Ok(temp) => println!("      CPU Tctl:  {:.1}\u{00B0}C", temp.celsius),
+            Err(e) => println!("      CPU Tctl:  error \u{2014} {}", e),
+        },
+        Err(e) => println!("      CPU Tctl:  unavailable \u{2014} {}", e),
+    }
+
+    // GPU temperature + metrics
+    match GpuSensor::new() {
+        Ok(gpu) => match gpu.read_metrics() {
+            Ok(m) => {
+                println!(
+                    "      GPU Core:  {:.1}\u{00B0}C  ({:.0}W, {} MHz, {}%)",
+                    m.temp_celsius, m.power_watts, m.clock_mhz, m.utilization_pct
+                );
+            }
+            Err(e) => println!("      GPU Core:  error \u{2014} {}", e),
+        },
+        Err(e) => println!("      GPU Core:  unavailable \u{2014} {}", e),
+    }
+
+    println!();
+}
+
+fn probe_icue_link_hub(scanner: &DeviceScanner, group: &corsair_hid::discovery::DeviceGroup) {
+    // Open only MI_00 (data interface)
+    let device = match scanner.open_device(
+        group.pid,
+        &group.serial,
+        IcueLinkHub::data_interface(),
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            println!("      Cannot open data interface: {} (is iCUE running?)", e);
+            return;
+        }
+    };
+
+    let hub = IcueLinkHub::new(device, group.serial.clone());
+
+    // Initialize: firmware + software mode + enumerate
+    let info = match hub.initialize() {
+        Ok(info) => info,
+        Err(e) => {
+            println!("      Initialization failed: {}", e);
+            return;
+        }
+    };
+
+    println!("      Firmware: {}", info.firmware);
+    println!("      Connected devices ({}):", info.devices.len());
+    for dev in &info.devices {
+        let type_label = match &dev.device_type {
+            corsair_hid::LinkDeviceType::Unknown(b) => format!("Unknown (0x{:02X})", b),
+            other => other.name().to_string(),
+        };
+        println!(
+            "        CH{}: {} \u{2014} ID: \"{}\"",
+            dev.channel, type_label, dev.device_id
+        );
+    }
+
+    // Read fan speeds
+    match hub.get_speeds() {
+        Ok(speeds) if !speeds.is_empty() => {
+            println!("      Fan speeds:");
+            for s in &speeds {
+                println!("        CH{}: {} RPM", s.channel, s.rpm);
+            }
+        }
+        Ok(_) => println!("      Fan speeds: (none reported)"),
+        Err(e) => println!("      Fan speeds: error \u{2014} {}", e),
+    }
+
+    // Read temperatures
+    match hub.get_temperatures() {
+        Ok(temps) if !temps.is_empty() => {
+            println!("      Temperatures:");
+            for t in &temps {
+                println!("        CH{}: {:.1}\u{00B0}C", t.channel, t.temp_celsius);
+            }
+        }
+        Ok(_) => println!("      Temperatures: (none reported)"),
+        Err(e) => println!("      Temperatures: error \u{2014} {}", e),
+    }
+
+    // Return to hardware mode
+    if let Err(e) = hub.enter_hardware_mode() {
+        println!("      Warning: failed to restore hardware mode: {}", e);
+    }
+}
+
+fn probe_psu(scanner: &DeviceScanner, group: &corsair_hid::discovery::DeviceGroup) {
+    let device = match scanner.open_device(
+        group.pid,
+        &group.serial,
+        CorsairPsu::data_interface(),
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            println!("      Cannot open PSU: {} (is iCUE running?)", e);
+            return;
+        }
+    };
+
+    let psu = CorsairPsu::new(device, group.serial.clone());
+
+    if let Err(e) = psu.initialize() {
+        println!("      PSU init failed: {}", e);
+        return;
+    }
+
+    match psu.read_all() {
+        Ok(status) => {
+            println!("      VRM Temp:    {:.1}\u{00B0}C", status.temp_vrm);
+            println!("      Case Temp:   {:.1}\u{00B0}C", status.temp_case);
+            let fan_label = if status.fan_rpm == 0 {
+                "0 RPM (idle)".to_string()
+            } else {
+                format!("{} RPM", status.fan_rpm)
+            };
+            println!("      Fan:         {}", fan_label);
+            println!("      AC Input:    {:.1}V", status.input_voltage);
+            println!(
+                "      12V Rail:    {:.2}V / {:.1}A / {:.1}W",
+                status.rail_12v.voltage, status.rail_12v.current, status.rail_12v.power
+            );
+            println!(
+                "       5V Rail:    {:.2}V / {:.1}A / {:.1}W",
+                status.rail_5v.voltage, status.rail_5v.current, status.rail_5v.power
+            );
+            println!(
+                "      3.3V Rail:   {:.2}V / {:.1}A / {:.1}W",
+                status.rail_3v3.voltage, status.rail_3v3.current, status.rail_3v3.power
+            );
+            println!("      Total Power: {:.1}W", status.total_power);
+        }
+        Err(e) => {
+            println!("      Failed to read PSU status: {}", e);
+        }
+    }
 }

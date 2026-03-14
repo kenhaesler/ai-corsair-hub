@@ -6,6 +6,7 @@ members = [
     "crates/common",
     "apps/service",
     "apps/scanner",
+    "apps/gui",
 ]
 resolver = "3"
 
@@ -19,6 +20,10 @@ repository = "https://github.com/kenhasler/ai-corsair-hub"
 # USB HID
 hidapi = "2.6"
 
+# System sensors
+wmi = "0.18"
+nvml-wrapper = "0.12"
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
@@ -31,9 +36,20 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Signal handling
+ctrlc = "3"
+
+# HTTP (for LibreHardwareMonitor)
+ureq = "3"
+
 # Error handling
 anyhow = "1"
 thiserror = "2"
+
+# GUI
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-build = "2"
+tauri-plugin-single-instance = "2"
 
 # Windows APIs
 windows = { version = "0.59", features = [

@@ -10,3 +10,8 @@ corsair-hid = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+wmi = { workspace = true }
+nvml-wrapper = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true }
