@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::fmt;
 use std::thread;
 use std::time::Duration;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 // Wire protocol constants
 const PACKET_SIZE: usize = 512;
@@ -18,16 +18,29 @@ const SOFTWARE_MODE_DELAY_MS: u64 = 500;
 const CMD_WAKE: [u8; 4] = [0x01, 0x03, 0x00, 0x02]; // Enter software mode
 const CMD_SLEEP: [u8; 4] = [0x01, 0x03, 0x00, 0x01]; // Enter hardware mode
 const CMD_FIRMWARE: [u8; 2] = [0x02, 0x13]; // Get firmware version
-const CMD_OPEN: [u8; 2] = [0x0D, 0x01]; // Open endpoint
-const CMD_CLOSE: [u8; 3] = [0x05, 0x01, 0x01]; // Close endpoint
-const CMD_READ: [u8; 2] = [0x08, 0x01]; // Read from endpoint
-const CMD_WRITE: [u8; 2] = [0x06, 0x01]; // Write to endpoint
+const CMD_OPEN: [u8; 2] = [0x0D, 0x01]; // Open data endpoint
+const CMD_CLOSE: [u8; 3] = [0x05, 0x01, 0x01]; // Close data endpoint
+const CMD_READ: [u8; 2] = [0x08, 0x01]; // Read from data endpoint
+const CMD_WRITE: [u8; 2] = [0x06, 0x01]; // Write to data endpoint
+
+// Color endpoint commands (separate from data endpoint)
+const CMD_OPEN_COLOR: [u8; 2] = [0x0D, 0x00]; // Open color endpoint
+const CMD_CLOSE_COLOR: [u8; 2] = [0x05, 0x01]; // Close color endpoint
+const CMD_WRITE_COLOR: [u8; 2] = [0x06, 0x00]; // First chunk of color data
+const CMD_WRITE_COLOR_CONT: [u8; 2] = [0x07, 0x00]; // Continuation chunks
+#[allow(dead_code)]
+const CMD_RESET_LED_POWER: [u8; 2] = [0x15, 0x01]; // Reset LED power state
 
 // Endpoint modes
 const MODE_SPEEDS: u8 = 0x17;
 const MODE_SET_SPEED: u8 = 0x18;
 const MODE_TEMPS: u8 = 0x21;
+const MODE_SET_COLOR: u8 = 0x22;
 const MODE_DEVICES: u8 = 0x36;
+
+// Color payload constants
+const DATA_TYPE_SET_COLOR: [u8; 2] = [0x12, 0x00];
+const MAX_COLOR_PAYLOAD: usize = 508; // max bytes per USB transfer
 
 // Data types for response matching and write payload headers
 const DATA_TYPE_DEVICES: [u8; 2] = [0x21, 0x00];
@@ -76,6 +89,7 @@ pub enum LinkDeviceType {
     RxFan,        // 0x13
     PumpXd6,      // 0x19
     CommanderDuo, // 0x1B
+    LsStrip,      // TBD — LS350 Aurora strip (type byte from enumeration)
     Unknown(u8),
 }
 
@@ -122,6 +136,7 @@ impl LinkDeviceType {
             Self::RxFan => "RX Fan",
             Self::PumpXd6 => "XD6 Pump",
             Self::CommanderDuo => "Commander DUO",
+            Self::LsStrip => "LS Strip",
             Self::Unknown(b) => {
                 // Can't return dynamic string from &'static str, use generic label
                 let _ = b;
@@ -132,6 +147,43 @@ impl LinkDeviceType {
 
     pub fn is_pump(&self) -> bool {
         matches!(self, Self::PumpXd5 | Self::PumpXd6)
+    }
+
+    /// Whether this device has addressable RGB LEDs.
+    pub fn has_rgb(&self) -> bool {
+        matches!(
+            self,
+            Self::QxFan
+                | Self::LxFan
+                | Self::RxMaxRgbFan
+                | Self::RxRgbFan
+                | Self::LsStrip
+                | Self::LinkAdapter
+                | Self::Xg7Block
+                | Self::LiquidCooler
+                | Self::TitanCooler
+        )
+    }
+
+    /// Number of addressable LEDs on this device.
+    /// Values confirmed from OpenLinkHub (github.com/jurkovic-nikola/OpenLinkHub).
+    pub fn led_count(&self) -> u16 {
+        match self {
+            Self::QxFan => 34,
+            Self::LxFan => 18,
+            Self::RxMaxRgbFan => 8,
+            Self::RxRgbFan => 8,
+            Self::LiquidCooler => 20,
+            Self::WaterBlock => 24,
+            Self::GpuBlock => 22,
+            Self::PumpXd5 => 22,
+            Self::Xg7Block => 16,
+            Self::TitanCooler => 20,
+            Self::PumpXd6 => 22,
+            Self::LinkAdapter => 21, // LS350 default; overridden by 0x1d table at runtime
+            Self::LsStrip => 21, // dynamic via LINK Adapter, 21 default for LS350
+            _ => 0,
+        }
     }
 }
 
@@ -159,6 +211,10 @@ pub struct TemperatureReading {
 pub struct HubInfo {
     pub firmware: FirmwareVersion,
     pub devices: Vec<LinkDevice>,
+    /// Per-channel LED counts read from the hub firmware.
+    /// Authoritative — accounts for LINK Adapters, strip configurations, etc.
+    #[serde(skip)]
+    pub led_counts: std::collections::HashMap<u8, u16>,
 }
 
 // --- Hub implementation ---
@@ -166,11 +222,16 @@ pub struct HubInfo {
 pub struct IcueLinkHub {
     device: HidDevice,
     serial: String,
+    color_endpoint_open: bool,
 }
 
 impl IcueLinkHub {
     pub fn new(device: HidDevice, serial: String) -> Self {
-        Self { device, serial }
+        Self {
+            device,
+            serial,
+            color_endpoint_open: false,
+        }
     }
 
     pub fn serial(&self) -> &str {
@@ -273,29 +334,213 @@ impl IcueLinkHub {
     }
 
     /// Return hub to hardware (firmware) control mode.
-    pub fn enter_hardware_mode(&self) -> Result<()> {
+    /// Closes the color endpoint if open, then sends the sleep command.
+    pub fn enter_hardware_mode(&mut self) -> Result<()> {
         debug!(serial = self.serial.as_str(), "Entering hardware mode");
+        if self.color_endpoint_open {
+            if let Err(e) = self.close_color_endpoint() {
+                warn!(serial = self.serial.as_str(), error = %e, "Failed to close color EP before hardware mode");
+            }
+        }
         self.transfer(&CMD_SLEEP, &[])?;
         Ok(())
     }
 
-    /// Enumerate connected iCUE LINK devices on the daisy chain.
-    pub fn enumerate_devices(&self) -> Result<Vec<LinkDevice>> {
-        let resp = self.read_endpoint(MODE_DEVICES)?;
+    // --- Color endpoint API ---
 
-        // Check for continuation: if response[4:6] matches DATA_TYPE_DEVICES, read more
-        let mut payload = Vec::new();
-        if resp.len() > 6 {
-            payload.extend_from_slice(&resp[4..]);
+    /// Open the color endpoint. Must be called before `write_color()`.
+    /// Closes any stale endpoint first, then opens with mode 0x22.
+    pub fn open_color_endpoint(&mut self) -> Result<()> {
+        debug!(serial = self.serial.as_str(), "Opening color endpoint");
+        // Close any stale data endpoint first
+        self.transfer(&CMD_CLOSE, &[])?;
+        // Open color endpoint (0x0D, 0x00) with mode 0x22
+        self.transfer(&CMD_OPEN_COLOR, &[MODE_SET_COLOR])?;
+        self.color_endpoint_open = true;
+        Ok(())
+    }
+
+    /// Close the color endpoint.
+    pub fn close_color_endpoint(&mut self) -> Result<()> {
+        debug!(serial = self.serial.as_str(), "Closing color endpoint");
+        self.transfer(&CMD_CLOSE_COLOR, &[])?;
+        self.color_endpoint_open = false;
+        Ok(())
+    }
+
+    /// Send raw RGB data to the hub's color endpoint.
+    /// Handles payload framing (length prefix + dataTypeSetColor header)
+    /// and chunking at 508-byte boundaries.
+    pub fn write_color(&self, rgb_data: &[u8]) -> Result<()> {
+        let payload = build_rgb_payload(rgb_data);
+
+        // Send in chunks of MAX_COLOR_PAYLOAD bytes
+        for (i, chunk) in payload.chunks(MAX_COLOR_PAYLOAD).enumerate() {
+            let cmd = if i == 0 {
+                &CMD_WRITE_COLOR
+            } else {
+                &CMD_WRITE_COLOR_CONT
+            };
+            self.transfer(cmd, chunk)?;
         }
 
-        // Check if we need continuation reads
-        if resp.len() > 5 && resp[4] == DATA_TYPE_DEVICES[0] && resp[5] == DATA_TYPE_DEVICES[1] {
-            // There may be more data — do another read cycle
-            let resp2 = self.read_endpoint(MODE_DEVICES)?;
-            if resp2.len() > 4 {
-                payload.extend_from_slice(&resp2[4..]);
+        Ok(())
+    }
+
+    /// High-level RGB API: takes channel→LED color mappings sorted by channel,
+    /// flattens into one contiguous RGB buffer, and sends to hardware.
+    /// Each LED is `[R, G, B]`. Auto-opens the color endpoint if not already open.
+    pub fn set_rgb(&mut self, channel_leds: &[(u8, &[[u8; 3]])]) -> Result<()> {
+        if !self.color_endpoint_open {
+            self.open_color_endpoint()?;
+        }
+
+        // Flatten all LEDs into one contiguous R,G,B byte buffer, sorted by channel
+        let mut sorted: Vec<_> = channel_leds.to_vec();
+        sorted.sort_by_key(|(ch, _)| *ch);
+
+        let total_leds: usize = sorted.iter().map(|(_, leds)| leds.len()).sum();
+        let mut rgb_bytes = Vec::with_capacity(total_leds * 3);
+        for (_, leds) in &sorted {
+            for led in *leds {
+                rgb_bytes.extend_from_slice(led);
             }
+        }
+
+        self.write_color(&rgb_bytes)
+    }
+
+    /// Whether the color endpoint is currently open.
+    pub fn color_endpoint_open(&self) -> bool {
+        self.color_endpoint_open
+    }
+
+    /// Read the hub's per-channel LED count table.
+    /// Uses the color endpoint with mode 0x1d to query the hub firmware's
+    /// knowledge of how many LEDs each channel has. This is authoritative —
+    /// it accounts for LINK Adapters with connected strips, device types
+    /// the hub auto-detected, etc.
+    ///
+    /// Returns a map of channel → LED count.
+    pub fn read_led_counts(&self) -> Result<std::collections::HashMap<u8, u16>> {
+        // Open color endpoint with LED count mode (0x1d)
+        self.transfer(&CMD_OPEN_COLOR, &[0x1d])?;
+        // Read
+        let resp = self.transfer(&[0x08, 0x00], &[])?;
+        // Close
+        self.transfer(&CMD_CLOSE_COLOR, &[])?;
+
+        if resp.len() < 8 {
+            bail!("LED count response too short: {} bytes", resp.len());
+        }
+
+        // Log raw response for protocol debugging
+        info!(
+            serial = self.serial.as_str(),
+            hex = hex_string(&resp[..resp.len().min(64)]),
+            len = resp.len(),
+            "LED count raw response (0x1d)"
+        );
+
+        // Validate response status. byte[3] is the status code:
+        // 0x00 = OK, anything else = error (e.g. 0x03 = wrong mode).
+        // When the hub returns an error, the remaining bytes are garbage.
+        let status = resp[3];
+        if status != STATUS_OK {
+            warn!(
+                serial = self.serial.as_str(),
+                status = format!("0x{:02X}", status),
+                "0x1d LED count query returned non-OK status — falling back to device type defaults"
+            );
+            return Ok(std::collections::HashMap::new());
+        }
+
+        let channel_count = resp[6] as usize;
+        let mut counts = std::collections::HashMap::new();
+
+        // Sanity check: no hub has more than ~20 physical channels
+        if channel_count > 20 {
+            warn!(
+                serial = self.serial.as_str(),
+                channel_count,
+                "0x1d channel count unreasonable — falling back to device type defaults"
+            );
+            return Ok(counts);
+        }
+
+        // Per-channel data starts at byte 8, each channel is 2 bytes:
+        // [device_type_code, led_count]
+        for ch in 1..=channel_count {
+            let idx = 6 + ch * 2; // index of device_type byte for this channel
+            if idx + 1 >= resp.len() {
+                break;
+            }
+            let dev_type = resp[idx];
+            let led_count = resp[idx + 1] as u16;
+            // Sanity: max 255 LEDs per channel (single-byte encoding limit).
+            // LINK Adapters with multiple strips can report 80+ LEDs.
+            if led_count > 0 && led_count <= 255 {
+                debug!(
+                    serial = self.serial.as_str(),
+                    channel = ch,
+                    dev_type = format!("0x{:02X}", dev_type),
+                    led_count,
+                    "  LED table entry"
+                );
+                counts.insert(ch as u8, led_count);
+            }
+        }
+
+        info!(
+            serial = self.serial.as_str(),
+            channels = ?counts,
+            "Read LED counts from hub"
+        );
+
+        Ok(counts)
+    }
+
+    /// Enumerate connected iCUE LINK devices on the daisy chain.
+    pub fn enumerate_devices(&self) -> Result<Vec<LinkDevice>> {
+        // Retry up to 3 times — hubs sometimes return stale data from a previous mode
+        let mut resp = Vec::new();
+        for attempt in 0..3 {
+            resp = self.read_endpoint(MODE_DEVICES)?;
+
+            debug!(
+                serial = self.serial.as_str(),
+                hex = hex_string(&resp[..resp.len().min(128)]),
+                len = resp.len(),
+                attempt = attempt + 1,
+                "Device enumeration raw response"
+            );
+
+            // Validate data type header: bytes [4:6] must be DATA_TYPE_DEVICES (0x21, 0x00)
+            if resp.len() > 5
+                && resp[4] == DATA_TYPE_DEVICES[0]
+                && resp[5] == DATA_TYPE_DEVICES[1]
+            {
+                break; // Got valid device data
+            }
+
+            warn!(
+                serial = self.serial.as_str(),
+                got_hi = resp.get(4).copied().unwrap_or(0),
+                got_lo = resp.get(5).copied().unwrap_or(0),
+                attempt = attempt + 1,
+                "Device enumeration got wrong data type, retrying"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        // Final validation
+        if resp.len() > 5
+            && (resp[4] != DATA_TYPE_DEVICES[0] || resp[5] != DATA_TYPE_DEVICES[1])
+        {
+            bail!(
+                "Device enumeration returned wrong data type after 3 attempts: {:02X} {:02X} (expected {:02X} {:02X})",
+                resp[4], resp[5], DATA_TYPE_DEVICES[0], DATA_TYPE_DEVICES[1]
+            );
         }
 
         parse_device_entries(&resp)
@@ -335,10 +580,11 @@ impl IcueLinkHub {
                 }
             }
         }
-        Err(last_err.unwrap())
+        Err(last_err.expect("retry loop must execute at least once"))
     }
 
-    /// Full initialization: get firmware, enter software mode, enumerate devices.
+    /// Full initialization: get firmware, enter software mode, enumerate devices,
+    /// and read the LED count table.
     pub fn initialize(&self) -> Result<HubInfo> {
         let firmware = self.get_firmware_version()?;
         debug!(
@@ -349,6 +595,19 @@ impl IcueLinkHub {
 
         self.enter_software_mode()?;
 
+        // Read LED count table before device enumeration (matches OpenLinkHub init order)
+        let led_counts = match self.read_led_counts() {
+            Ok(counts) => counts,
+            Err(e) => {
+                warn!(
+                    serial = self.serial.as_str(),
+                    error = %e,
+                    "Failed to read LED counts — will fall back to device type defaults"
+                );
+                std::collections::HashMap::new()
+            }
+        };
+
         let devices = self.enumerate_devices()?;
         debug!(
             serial = self.serial.as_str(),
@@ -356,7 +615,11 @@ impl IcueLinkHub {
             "Enumerated devices"
         );
 
-        Ok(HubInfo { firmware, devices })
+        Ok(HubInfo {
+            firmware,
+            devices,
+            led_counts,
+        })
     }
 }
 
@@ -543,12 +806,34 @@ fn build_speed_payload(targets: &[(u8, u8)]) -> Vec<u8> {
     data
 }
 
-fn hex_string(data: &[u8]) -> String {
-    data.iter()
-        .map(|b| format!("{:02X}", b))
-        .collect::<Vec<_>>()
-        .join(" ")
+/// Build the framed RGB payload for the color endpoint.
+/// Format: [len_lo, len_hi, 0x00, 0x00, 0x12, 0x00, R, G, B, R, G, B, ...]
+fn build_rgb_payload(rgb_data: &[u8]) -> Vec<u8> {
+    // Length prefix covers: itself (2 bytes) + reserved (2) + dataType (2) + rgb data
+    let content_len = 2 + 2 + rgb_data.len(); // reserved + dataType + data
+    let total_len = (content_len + 2) as u16; // +2 for the length field itself
+
+    let mut payload = Vec::with_capacity(total_len as usize);
+    payload.extend_from_slice(&total_len.to_le_bytes());
+    payload.push(0x00); // reserved
+    payload.push(0x00); // reserved
+    payload.extend_from_slice(&DATA_TYPE_SET_COLOR);
+    payload.extend_from_slice(rgb_data);
+    payload
 }
+
+/// Port power protection: returns a brightness scaling factor (0.0–1.0)
+/// based on total LED count to prevent USB power issues.
+pub fn port_power_factor(total_leds: u16) -> f32 {
+    match total_leds {
+        0..=238 => 1.0,
+        239..=340 => 0.66,
+        341..=442 => 0.33,
+        _ => 0.10,
+    }
+}
+
+use crate::hex_string;
 
 // --- Tests ---
 
@@ -785,5 +1070,89 @@ mod tests {
         assert!(LinkDeviceType::PumpXd5.is_pump());
         assert!(LinkDeviceType::PumpXd6.is_pump());
         assert_eq!(LinkDeviceType::PumpXd5.name(), "XD5 Pump");
+    }
+
+    #[test]
+    fn test_build_rgb_payload_format() {
+        // 3 LEDs = 9 bytes of RGB data
+        let rgb_data = [255, 0, 0, 0, 255, 0, 0, 0, 255];
+        let payload = build_rgb_payload(&rgb_data);
+
+        // Length prefix: 2(len) + 2(reserved) + 2(dataType) + 9(data) = 15
+        let expected_len: u16 = 15;
+        assert_eq!(
+            u16::from_le_bytes([payload[0], payload[1]]),
+            expected_len
+        );
+        // Reserved bytes
+        assert_eq!(payload[2], 0x00);
+        assert_eq!(payload[3], 0x00);
+        // dataTypeSetColor
+        assert_eq!(payload[4], DATA_TYPE_SET_COLOR[0]); // 0x12
+        assert_eq!(payload[5], DATA_TYPE_SET_COLOR[1]); // 0x00
+        // RGB data
+        assert_eq!(&payload[6..], &rgb_data);
+    }
+
+    #[test]
+    fn test_build_rgb_payload_empty() {
+        let payload = build_rgb_payload(&[]);
+        // Length: 2 + 2 + 2 + 0 = 6
+        assert_eq!(u16::from_le_bytes([payload[0], payload[1]]), 6);
+        assert_eq!(payload.len(), 6);
+    }
+
+    #[test]
+    fn test_rgb_payload_chunking_small() {
+        // Small payload (< 508 bytes) should fit in one chunk
+        let rgb_data = vec![0u8; 100 * 3]; // 100 LEDs
+        let payload = build_rgb_payload(&rgb_data);
+        let chunks: Vec<&[u8]> = payload.chunks(MAX_COLOR_PAYLOAD).collect();
+        assert_eq!(chunks.len(), 1);
+    }
+
+    #[test]
+    fn test_rgb_payload_chunking_large() {
+        // Large payload (> 508 bytes) should require multiple chunks
+        // 200 LEDs = 600 bytes + 6 header = 606 bytes
+        let rgb_data = vec![0u8; 200 * 3];
+        let payload = build_rgb_payload(&rgb_data);
+        assert!(payload.len() > MAX_COLOR_PAYLOAD);
+        let chunks: Vec<&[u8]> = payload.chunks(MAX_COLOR_PAYLOAD).collect();
+        assert_eq!(chunks.len(), 2);
+    }
+
+    #[test]
+    fn test_port_power_factor() {
+        assert_eq!(port_power_factor(0), 1.0);
+        assert_eq!(port_power_factor(238), 1.0);
+        assert_eq!(port_power_factor(239), 0.66);
+        assert_eq!(port_power_factor(340), 0.66);
+        assert_eq!(port_power_factor(341), 0.33);
+        assert_eq!(port_power_factor(442), 0.33);
+        assert_eq!(port_power_factor(443), 0.10);
+        assert_eq!(port_power_factor(1000), 0.10);
+    }
+
+    #[test]
+    fn test_led_counts_from_openlinkub() {
+        // Confirmed values from OpenLinkHub
+        assert_eq!(LinkDeviceType::QxFan.led_count(), 34);
+        assert_eq!(LinkDeviceType::LxFan.led_count(), 18);
+        assert_eq!(LinkDeviceType::RxMaxRgbFan.led_count(), 8);
+        assert_eq!(LinkDeviceType::RxRgbFan.led_count(), 8);
+        assert_eq!(LinkDeviceType::LiquidCooler.led_count(), 20);
+        assert_eq!(LinkDeviceType::WaterBlock.led_count(), 24);
+        assert_eq!(LinkDeviceType::GpuBlock.led_count(), 22);
+        assert_eq!(LinkDeviceType::PumpXd5.led_count(), 22);
+        assert_eq!(LinkDeviceType::Xg7Block.led_count(), 16);
+        assert_eq!(LinkDeviceType::TitanCooler.led_count(), 20);
+        assert_eq!(LinkDeviceType::PumpXd6.led_count(), 22);
+        // LinkAdapter (LS350 strips connect through this)
+        assert_eq!(LinkDeviceType::LinkAdapter.led_count(), 21);
+        assert_eq!(LinkDeviceType::LsStrip.led_count(), 21);
+        // No LEDs
+        assert_eq!(LinkDeviceType::RxMaxFan.led_count(), 0);
+        assert_eq!(LinkDeviceType::Psu.led_count(), 0);
     }
 }

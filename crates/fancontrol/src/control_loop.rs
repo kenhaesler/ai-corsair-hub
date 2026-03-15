@@ -9,7 +9,7 @@ use tracing::{error, info, warn};
 
 use corsair_common::config::{AppConfig, FanGroupConfig, FanMode, TempSourceConfig};
 use corsair_common::CorsairDevice;
-use corsair_hid::{DeviceScanner, FanSpeed, HubInfo, IcueLinkHub};
+use corsair_hid::{DeviceScanner, FanSpeed, HubInfo, IcueLinkHub, LinkDeviceType};
 use corsair_sensors::cpu::CpuSensor;
 use corsair_sensors::gpu::GpuSensor;
 use corsair_sensors::psu::{PsuReading, PsuSensor};
@@ -34,6 +34,14 @@ pub struct CycleResult {
     pub emergency: bool,
     pub any_stale: bool,
     pub fan_speeds: Vec<(String, Vec<FanSpeed>)>,
+    pub hub_health: Vec<HubHealthReport>,
+}
+
+/// Health status of a single hub after a control cycle.
+pub struct HubHealthReport {
+    pub serial: String,
+    pub healthy: bool,
+    pub consecutive_failures: u32,
 }
 
 /// Duty report for a single fan group after one cycle.
@@ -41,6 +49,13 @@ pub struct GroupDutyReport {
     pub name: String,
     pub hub_serial: String,
     pub channels: Vec<(u8, u8)>, // (channel, duty_u8)
+}
+
+/// RGB frame data for sending to hardware (no dependency on corsair-rgb crate).
+pub struct RgbFrameRef<'a> {
+    pub hub_serial: &'a str,
+    pub channel: u8,
+    pub leds: &'a [[u8; 3]],
 }
 
 pub struct ControlLoop {
@@ -63,8 +78,11 @@ struct HubConnection {
     #[allow(dead_code)]
     serial: String,
     healthy: bool,
+    consecutive_failures: u32,
+    last_recovery_attempt: Instant,
     pump_channels: Vec<u8>,
     info: HubInfo,
+    color_logged: bool,
 }
 
 struct FanGroup {
@@ -250,6 +268,19 @@ impl ControlLoop {
                 pumps = pump_channels.len(),
                 "Hub initialized"
             );
+            for dev in &hub_info.devices {
+                let hub_leds = hub_info.led_counts.get(&dev.channel).copied();
+                let effective = hub_leds.unwrap_or_else(|| dev.device_type.led_count());
+                info!(
+                    serial = serial.as_str(),
+                    channel = dev.channel,
+                    device_type = dev.device_type.name(),
+                    type_leds = dev.device_type.led_count(),
+                    hub_leds = ?hub_leds,
+                    effective_leds = effective,
+                    "  Device"
+                );
+            }
 
             hubs.insert(
                 serial.clone(),
@@ -257,8 +288,11 @@ impl ControlLoop {
                     hub,
                     serial: serial.clone(),
                     healthy: true,
+                    consecutive_failures: 0,
+                    last_recovery_attempt: Instant::now(),
                     pump_channels,
                     info: hub_info,
+                    color_logged: false,
                 },
             );
         }
@@ -363,27 +397,52 @@ impl ControlLoop {
         for (serial, commands) in &hub_commands {
             if let Some(hub_conn) = self.hubs.get_mut(serial) {
                 match hub_conn.hub.set_speeds(commands) {
-                    Ok(()) => hub_conn.healthy = true,
+                    Ok(()) => {
+                        if hub_conn.consecutive_failures > 0 {
+                            info!(
+                                serial = serial.as_str(),
+                                prev_failures = hub_conn.consecutive_failures,
+                                "Hub recovered — set_speeds succeeded"
+                            );
+                        }
+                        hub_conn.healthy = true;
+                        hub_conn.consecutive_failures = 0;
+                    }
                     Err(e) => {
-                        error!(serial = serial.as_str(), error = %e, "Failed to set fan speeds");
+                        hub_conn.consecutive_failures += 1;
                         hub_conn.healthy = false;
+                        error!(
+                            serial = serial.as_str(),
+                            consecutive = hub_conn.consecutive_failures,
+                            error = %e,
+                            "Failed to set fan speeds"
+                        );
                     }
                 }
             }
         }
 
-        // 6. Read back fan speeds from all hubs
+        // 6. Read back fan speeds from all hubs (always attempt — serves as keepalive)
         let mut fan_speeds = Vec::new();
         for (serial, hub_conn) in &self.hubs {
-            if hub_conn.healthy {
-                match hub_conn.hub.get_speeds() {
-                    Ok(speeds) => fan_speeds.push((serial.clone(), speeds)),
-                    Err(e) => {
-                        warn!(serial = serial.as_str(), error = %e, "Failed to read fan speeds");
-                    }
+            match hub_conn.hub.get_speeds() {
+                Ok(speeds) => fan_speeds.push((serial.clone(), speeds)),
+                Err(e) => {
+                    warn!(serial = serial.as_str(), error = %e, "Failed to read fan speeds");
                 }
             }
         }
+
+        // 7. Build hub health reports
+        let hub_health: Vec<HubHealthReport> = self
+            .hubs
+            .iter()
+            .map(|(serial, conn)| HubHealthReport {
+                serial: serial.clone(),
+                healthy: conn.healthy,
+                consecutive_failures: conn.consecutive_failures,
+            })
+            .collect();
 
         CycleResult {
             readings,
@@ -391,6 +450,7 @@ impl ControlLoop {
             emergency,
             any_stale,
             fan_speeds,
+            hub_health,
         }
     }
 
@@ -431,6 +491,29 @@ impl ControlLoop {
         result
     }
 
+    /// Return a map of (hub_serial, channel) → (device_type, effective_led_count)
+    /// for all enumerated devices across all hubs. Uses the 0x1d LED count table
+    /// when available, otherwise falls back to `device_type.led_count()`.
+    pub fn device_type_map(&self) -> HashMap<(String, u8), (LinkDeviceType, u16)> {
+        let mut map = HashMap::new();
+        for (serial, hub_conn) in &self.hubs {
+            for dev in &hub_conn.info.devices {
+                let effective_leds = hub_conn
+                    .info
+                    .led_counts
+                    .get(&dev.channel)
+                    .copied()
+                    .filter(|&c| c > 0)
+                    .unwrap_or_else(|| dev.device_type.led_count());
+                map.insert(
+                    (serial.clone(), dev.channel),
+                    (dev.device_type.clone(), effective_leds),
+                );
+            }
+        }
+        map
+    }
+
     /// Set manual duty on a specific hub using its existing initialized handle.
     pub fn set_manual_duty(&self, hub_serial: &str, channels: &[u8], duty: u8) -> Result<()> {
         let hub_conn = self
@@ -442,14 +525,161 @@ impl ControlLoop {
         Ok(())
     }
 
+    /// Return serials of hubs with 5+ consecutive failures and 10s+ since last recovery attempt.
+    pub fn hubs_needing_recovery(&self) -> Vec<String> {
+        const FAILURE_THRESHOLD: u32 = 5;
+        const RECOVERY_COOLDOWN: Duration = Duration::from_secs(10);
+
+        self.hubs
+            .iter()
+            .filter(|(_, conn)| {
+                conn.consecutive_failures >= FAILURE_THRESHOLD
+                    && conn.last_recovery_attempt.elapsed() >= RECOVERY_COOLDOWN
+            })
+            .map(|(serial, _)| serial.clone())
+            .collect()
+    }
+
+    /// Swap in a freshly initialized hub after successful recovery.
+    pub fn replace_hub(&mut self, serial: &str, new_hub: IcueLinkHub, new_info: HubInfo) {
+        if let Some(conn) = self.hubs.get_mut(serial) {
+            let pump_channels: Vec<u8> = new_info
+                .devices
+                .iter()
+                .filter(|d| d.device_type.is_pump())
+                .map(|d| d.channel)
+                .collect();
+
+            conn.hub = new_hub;
+            conn.info = new_info;
+            conn.healthy = true;
+            conn.consecutive_failures = 0;
+            conn.last_recovery_attempt = Instant::now();
+            conn.pump_channels = pump_channels;
+            conn.color_logged = false;
+
+            info!(serial, "Hub handle replaced after recovery");
+        }
+    }
+
+    /// Mark that a recovery attempt was made (even if it failed) to enforce cooldown.
+    pub fn mark_recovery_attempted(&mut self, serial: &str) {
+        if let Some(conn) = self.hubs.get_mut(serial) {
+            conn.last_recovery_attempt = Instant::now();
+        }
+    }
+
     /// Restore all hubs to hardware control mode.
-    pub fn shutdown_hardware(&self) {
+    pub fn shutdown_hardware(&mut self) {
         info!("Restoring hardware mode on all hubs");
-        for (serial, hub_conn) in &self.hubs {
+        for (serial, hub_conn) in &mut self.hubs {
             if let Err(e) = hub_conn.hub.enter_hardware_mode() {
                 warn!(serial = serial.as_str(), error = %e, "Failed to restore hardware mode");
             }
         }
+    }
+
+    /// Send RGB frames to hardware hubs.
+    ///
+    /// The iCUE LINK protocol requires a flat buffer covering ALL enumerated devices
+    /// on each hub, in ascending channel order. The hub parses the buffer using each
+    /// device's actual LED count. We must match those counts exactly, or subsequent
+    /// devices receive misaligned data.
+    ///
+    /// This method uses the hub's cached device enumeration to build a correctly-sized
+    /// buffer for each hub: truncating/padding frame data to match the actual LED count,
+    /// and inserting black for devices without frames.
+    pub fn send_rgb_frames(&mut self, frames: &[RgbFrameRef]) -> usize {
+        use std::collections::BTreeMap;
+
+        const BLACK: [u8; 3] = [0, 0, 0];
+
+        // Group frames by hub serial, sort by channel within each hub
+        let mut by_hub: HashMap<&str, BTreeMap<u8, &[[u8; 3]]>> = HashMap::new();
+        for frame in frames {
+            by_hub
+                .entry(&frame.hub_serial)
+                .or_default()
+                .insert(frame.channel, &frame.leds);
+        }
+
+        let mut sent = 0;
+        for (serial, frame_channels) in &by_hub {
+            let hub_conn = match self.hubs.get_mut(*serial) {
+                Some(c) if c.healthy => c,
+                _ => continue,
+            };
+
+            // Build LED arrays for ALL enumerated devices, using the hub's actual LED counts.
+            // The hub parses the flat buffer sequentially using each device's known LED count.
+            // We MUST match those counts exactly. The hub's LED count table (read via 0x1d)
+            // is authoritative — it accounts for LINK Adapters with strips, etc.
+            let mut device_leds: Vec<(u8, Vec<[u8; 3]>)> = Vec::new();
+
+            for dev in &hub_conn.info.devices {
+                // Use hub firmware's LED count (from 0x1d table) if available,
+                // otherwise fall back to device type default.
+                // The 0x1d table is authoritative for LINK Adapters with connected strips.
+                let actual_count = hub_conn
+                    .info
+                    .led_counts
+                    .get(&dev.channel)
+                    .copied()
+                    .map(|c| c as usize)
+                    .filter(|&c| c > 0)
+                    .unwrap_or(dev.device_type.led_count() as usize);
+
+                if actual_count == 0 {
+                    continue; // truly no LEDs
+                }
+
+                let frame_data = frame_channels.get(&dev.channel);
+
+                let leds = if let Some(data) = frame_data {
+                    // Truncate or pad to actual LED count
+                    let mut buf = Vec::with_capacity(actual_count);
+                    for i in 0..actual_count {
+                        buf.push(data.get(i).copied().unwrap_or(BLACK));
+                    }
+                    buf
+                } else {
+                    // No frame for this device: fill with black
+                    vec![BLACK; actual_count]
+                };
+
+                device_leds.push((dev.channel, leds));
+            }
+
+            let refs: Vec<(u8, &[[u8; 3]])> = device_leds
+                .iter()
+                .map(|(ch, leds)| (*ch, leds.as_slice()))
+                .collect();
+
+            if !hub_conn.color_logged {
+                let total_bytes: usize = refs.iter().map(|(_, leds)| leds.len() * 3).sum();
+                let channels: Vec<(u8, usize)> = refs.iter().map(|(ch, leds)| (*ch, leds.len())).collect();
+                info!(
+                    serial = *serial,
+                    devices = refs.len(),
+                    total_bytes,
+                    channels = ?channels,
+                    "RGB first write"
+                );
+                hub_conn.color_logged = true;
+            }
+
+            match hub_conn.hub.set_rgb(&refs) {
+                Ok(()) => sent += refs.len(),
+                Err(e) => {
+                    warn!(
+                        serial = *serial,
+                        error = %e,
+                        "RGB write failed (non-fatal)"
+                    );
+                }
+            }
+        }
+        sent
     }
 
     /// Run the control loop until shutdown signal.
@@ -597,13 +827,7 @@ fn apply_acoustic_filter(
     dt_secs: f64,
 ) -> f64 {
     match acoustic {
-        Some(filter) => {
-            if filter.should_update(temp) {
-                filter.filter(raw_duty, dt_secs)
-            } else {
-                filter.current_duty()
-            }
-        }
+        Some(filter) => filter.update(raw_duty, temp, dt_secs),
         None => raw_duty,
     }
 }
@@ -866,6 +1090,7 @@ mod tests {
             general: GeneralConfig {
                 poll_interval_ms: 1000,
                 log_level: "info".to_string(),
+                lhm_exe_path: None,
             },
             fan_groups: vec![FanGroupConfig {
                 name: "test".to_string(),
@@ -873,6 +1098,7 @@ mod tests {
                 hub_serial: Some("ABCD1234".to_string()),
                 mode: FanMode::Fixed { duty_percent: 50.0 },
             }],
+            rgb: Default::default(),
         }
     }
 
