@@ -542,6 +542,7 @@ name = "corsair-common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "corsair-rgb",
  "serde",
  "thiserror 2.0.18",
  "toml 0.8.2",
@@ -582,6 +583,7 @@ dependencies = [
  "corsair-common",
  "corsair-fancontrol",
  "corsair-hid",
+ "corsair-rgb",
  "corsair-sensors",
  "serde",
  "serde_json",
@@ -590,6 +592,25 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tokio",
  "toml 0.8.2",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "corsair-rgb"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tracing",
+]
+
+[[package]]
+name = "corsair-rgb-test"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "corsair-common",
+ "corsair-hid",
  "tracing",
  "tracing-subscriber",
 ]

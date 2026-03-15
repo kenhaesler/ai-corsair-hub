@@ -1,6 +1,6 @@
 use std::sync::mpsc;
 
-use corsair_common::config::AppConfig;
+use corsair_common::config::{AppConfig, RgbConfig};
 
 use crate::dto::{DeviceTree, SystemSnapshot};
 
@@ -27,6 +27,14 @@ pub enum HwCommand {
         hub_serial: String,
         channels: Vec<u8>,
         duty: u8,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    SetRgbConfig {
+        config: RgbConfig,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    SetRgbEnabled {
+        enabled: bool,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
     Shutdown,

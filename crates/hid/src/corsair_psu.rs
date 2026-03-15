@@ -217,12 +217,7 @@ fn linear11_to_f64(raw: u16) -> f64 {
     man as f64 * 2.0_f64.powi(exp as i32)
 }
 
-fn hex_string(data: &[u8]) -> String {
-    data.iter()
-        .map(|b| format!("{:02X}", b))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
+use crate::hex_string;
 
 // --- Tests ---
 

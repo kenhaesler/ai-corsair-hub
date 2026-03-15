@@ -1,6 +1,6 @@
 use tauri::State;
 
-use corsair_common::config::AppConfig;
+use corsair_common::config::{AppConfig, RgbConfig};
 use corsair_fancontrol::control_loop;
 
 use crate::dto::{DeviceTree, SystemSnapshot};
@@ -74,6 +74,9 @@ pub async fn set_manual_duty(
     channels: Vec<u8>,
     duty: u8,
 ) -> Result<(), String> {
+    if duty > 100 {
+        return Err("duty must be 0-100".into());
+    }
     let (tx, rx) = tokio::sync::oneshot::channel();
     state
         .hw_sender
@@ -91,4 +94,32 @@ pub async fn set_manual_duty(
 #[tauri::command]
 pub fn validate_config(config: AppConfig) -> Result<(), String> {
     control_loop::validate_config(&config).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_rgb_config(
+    state: State<'_, AppState>,
+    config: RgbConfig,
+) -> Result<(), String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state
+        .hw_sender
+        .send(HwCommand::SetRgbConfig { config, reply: tx })
+        .map_err(|_| "Hardware thread unavailable".to_string())?;
+    rx.await
+        .map_err(|_| "Hardware thread dropped".to_string())?
+}
+
+#[tauri::command]
+pub async fn set_rgb_enabled(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state
+        .hw_sender
+        .send(HwCommand::SetRgbEnabled { enabled, reply: tx })
+        .map_err(|_| "Hardware thread unavailable".to_string())?;
+    rx.await
+        .map_err(|_| "Hardware thread dropped".to_string())?
 }

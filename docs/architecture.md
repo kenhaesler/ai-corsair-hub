@@ -17,7 +17,7 @@ full control.
 | Pump | EK-Loop D5 G3 PWM | Motherboard PWM header |
 | Radiators | 3x EK 420mm (2x P420M + 1x S420) | Passive |
 | Motherboard | MSI MEG X870E Godlike | SuperIO / WMI |
-| RGB (later) | iCUE LINK LS350 strips, Dominator Titanium | iCUE LINK Hub |
+| RGB | iCUE LINK LS350 strips, Dominator Titanium | iCUE LINK Hub (color endpoint) |
 
 ## USB Device Map
 
@@ -62,50 +62,58 @@ ai-corsair-hub/
 ├── crates/
 │   ├── common/                # Shared types, config, device definitions
 │   │   ├── types.rs           # CorsairDevice, DeviceInfo, Temperature, FanReading
-│   │   └── config.rs          # AppConfig, FanGroupConfig, FanMode, CurvePoint
+│   │   └── config.rs          # AppConfig, FanGroupConfig, FanMode, RgbConfig
 │   ├── hid/                   # USB HID communication layer
 │   │   ├── discovery.rs       # DeviceScanner: enumerate & group Corsair devices
-│   │   └── icue_link.rs       # IcueLinkHub: raw protocol, probe, send/receive
+│   │   ├── icue_link.rs       # IcueLinkHub: data + color endpoint protocol
+│   │   └── corsair_psu.rs     # HX1500i PSU protocol (via liquidctl docs)
 │   ├── sensors/               # Temperature source abstractions
-│   │   ├── cpu.rs             # CpuSensor (WMI/LHWM) [stub]
-│   │   └── gpu.rs             # GpuSensor (NVML) [stub]
-│   └── fancontrol/            # Fan control algorithms
-│       └── pid.rs             # PID controller with anti-windup (tested)
+│   │   ├── cpu.rs             # CpuSensor (WMI/LibreHardwareMonitor)
+│   │   ├── gpu.rs             # GpuSensor (NVML)
+│   │   └── lhm.rs             # LibreHardwareMonitor HTTP API bridge
+│   ├── fancontrol/            # Fan control algorithms + control loop
+│   │   ├── pid.rs             # PID controller with anti-windup
+│   │   ├── curve.rs           # Fan curve interpolation
+│   │   ├── acoustic.rs        # Acoustic filter (ramp rates, hysteresis)
+│   │   └── control_loop.rs    # Main control loop + RGB frame routing
+│   └── rgb/                   # RGB effect engine
+│       ├── color.rs           # Rgb, Hsv, BlendMode
+│       ├── effect.rs          # EffectConfig, EffectContext, RgbEffect trait
+│       ├── effects/           # Built-in effects (static, rainbow, breathing, etc.)
+│       ├── renderer.rs        # Zone-based multi-layer renderer
+│       ├── layout.rs          # LedLayout (FanRing, LinearStrip)
+│       └── frame.rs           # RgbFrame output type
 ├── apps/
+│   ├── gui/                   # Tauri 2.0 + Svelte 5 desktop app
 │   ├── scanner/               # CLI: USB device scanner + protocol probe
+│   ├── rgb-test/              # CLI: RGB protocol validation tool
 │   └── service/               # Windows Service daemon [stub]
-├── ui/                        # Svelte 5 frontend [future]
 ├── docs/
-│   └── architecture.md        # This file
+│   ├── architecture.md        # This file
+│   └── rgb-protocol.md        # iCUE LINK RGB protocol reference
 └── scripts/
     └── scan_usb.ps1           # PowerShell USB device enumerator
 ```
 
 ## Protocol Status
 
-### iCUE LINK System Hub (PID 0x0C3F) — REVERSE ENGINEERING IN PROGRESS
+### iCUE LINK System Hub (PID 0x0C3F) — IMPLEMENTED
 
-**What we know:**
-- MI_00 is the bidirectional data interface
-- MI_01 is read-only (writes fail with "Incorrect function")
-- All responses are exactly 512 bytes
-- Device echoes the command byte in response[0]
-- response[1] = 0x0F for all commands tested (likely "not initialized")
-- Protocol is related to Commander Core but distinct
+Protocol reverse-engineered using [OpenLinkHub](https://github.com/jurkovic-nikola/OpenLinkHub) as reference.
 
-**Probe results (2026-03-07):**
-```
-TX: [0x00, 0x01, ...pad...]  →  RX: [0x01, 0x0F, 0x00, ...]  (512 bytes)
-TX: [0x00, 0x05, ...pad...]  →  RX: [0x05, 0x0F, 0x00, ...]  (512 bytes)
-TX: [0x00, 0x04, 0x01, 0x00] →  RX: [0x04, 0x0F, 0x00, ...]  (512 bytes)
-```
+**Data endpoint** (`0x0D 0x01`): fan/temp/device operations
+- Software/hardware mode switching
+- Device enumeration (daisy chain)
+- Fan/pump RPM reading + speed control
+- Temperature reading from connected devices
 
-**Hypothesis:** The 0x0F status means the device hasn't received a proper
-handshake/init sequence. The Commander Core uses an open→configure→query flow.
-The iCUE LINK Hub likely has a similar but different initialization.
+**Color endpoint** (`0x0D 0x00`): RGB LED control
+- Separate from data endpoint, opened with mode `0x22`
+- Hub-global writes: one flat RGB buffer for ALL devices
+- 508-byte chunking with continuation commands
+- Port power protection for high LED counts
 
-**Next step:** Capture iCUE's USB traffic with USBPcap + Wireshark to discover
-the initialization handshake.
+See [`docs/rgb-protocol.md`](rgb-protocol.md) for detailed byte-level protocol reference.
 
 ### HX1500i PSU (PID 0x1C1F) — DOCUMENTED
 
@@ -168,49 +176,48 @@ Fan Groups (per-group PID):
 - [x] Config types (TOML-based)
 - [x] HX1500i PSU detection
 
-### Phase 1: Protocol Reverse Engineering
-- [ ] Install USBPcap on the system
-- [ ] Capture iCUE's USB traffic with Wireshark (filter: usb.idVendor == 0x1B1C)
-- [ ] Decode initialization handshake for iCUE LINK Hub
-- [ ] Implement open/init sequence in Rust
-- [ ] Discover and implement: read fan RPM
-- [ ] Discover and implement: set fan duty cycle
-- [ ] Discover and implement: read connected device count
-- [ ] Discover and implement: read temperature sensors (if hub has any)
+### Phase 1: Protocol Reverse Engineering (COMPLETE)
+- [x] Decoded iCUE LINK Hub initialization handshake
+- [x] Implemented open/init sequence in Rust
+- [x] Read fan RPM, set fan duty cycle
+- [x] Read connected device count (device enumeration)
+- [x] Read temperature sensors from connected devices
 
-### Phase 2: Sensor Integration
-- [ ] CPU temperature via WMI or LibreHardwareMonitor
-- [ ] GPU temperature via NVML (nvidia-ml-sys crate)
-- [ ] HX1500i PSU monitoring (power, temp, fan)
+### Phase 2: Sensor Integration (COMPLETE)
+- [x] CPU temperature via LibreHardwareMonitor HTTP API
+- [x] GPU temperature via NVML
+- [x] HX1500i PSU monitoring (power, temp, fan) via HID + LHM
 - [ ] Motherboard sensors (VRM, chipset) via WMI
 - [ ] Water temperature (when user adds inline sensor)
 
-### Phase 3: Fan Control Service
-- [ ] Wire PID controller to real sensor inputs
-- [ ] Wire fan output to iCUE LINK Hub set-duty commands
-- [ ] Implement fan groups with per-group PID
-- [ ] Implement acoustic filter (ramp rates, hysteresis, zero-RPM)
-- [ ] TOML config file loading/watching
+### Phase 3: Fan Control Service (COMPLETE)
+- [x] Wire PID controller to real sensor inputs
+- [x] Wire fan output to iCUE LINK Hub set-duty commands
+- [x] Implement fan groups with per-group PID
+- [x] Implement acoustic filter (ramp rates, hysteresis)
+- [x] TOML config file loading + live reload
+- [x] Hub health monitoring and automatic recovery
 - [ ] Windows Service registration and lifecycle
-- [ ] System tray integration (temperature display)
 - [ ] Auto-start on boot
 
-### Phase 4: Tauri UI
-- [ ] Scaffold Tauri 2.0 + Svelte 5 project
-- [ ] Dashboard: real-time temp/fan/power graphs
-- [ ] Fan curve editor (draggable points on a graph)
-- [ ] PID tuning interface
-- [ ] Fan group configuration
-- [ ] Device info panel (serial, firmware, connected fans)
-- [ ] System tray with quick presets (Silent/Balanced/Performance)
-- [ ] Dark theme, modern design
+### Phase 4: Tauri UI (COMPLETE)
+- [x] Tauri 2.0 + Svelte 5 desktop app
+- [x] Dashboard: real-time temp/fan/power monitoring
+- [x] Fan curve editor (draggable SVG points)
+- [x] Fan group configuration
+- [x] Device info panel (serial, firmware, connected fans)
+- [x] Preset system (Silent/Balanced/Performance)
+- [x] Settings panel
+- [x] Dark theme
 
-### Phase 5: RGB Control (Future)
-- [ ] Reverse-engineer RGB commands from iCUE LINK protocol
-- [ ] Static color control for QX fans
-- [ ] Static color for LS350 Aurora strips
-- [ ] Basic effects (breathing, color cycle)
-- [ ] Per-fan color configuration in UI
+### Phase 5: RGB Control (COMPLETE)
+- [x] Phase 5A: RGB effect engine (effects, layers, blending)
+- [x] Phase 5B: Backend integration (renderer, zone configs, IPC)
+- [x] Phase 5C: Lighting UI tab (preview, zone config, presets)
+- [x] Phase 5D: Hardware protocol (color endpoint, chunking, power protection)
+    - Protocol sourced from OpenLinkHub (github.com/jurkovic-nikola/OpenLinkHub)
+    - See `docs/rgb-protocol.md` for byte-level reference
+    - RGB test binary: `cargo run --bin corsair-rgb-test`
 
 ### Phase 6: Polish & Community
 - [ ] Installer (WiX or NSIS)
@@ -228,8 +235,8 @@ Fan Groups (per-group PID):
 | Fan algorithm | PID + acoustic filter | Best thermal performance with noise optimization |
 | Architecture | Service + UI separated | Service runs 24/7 at ~3MB, UI only when needed |
 | Config format | TOML | Human-readable, good Rust ecosystem support |
-| Protocol approach | Reverse-engineer from scratch | iCUE LINK not in any OSS tool, we're first |
-| RGB | Deferred | Focus on thermal first, RGB adds complexity |
+| Protocol approach | OpenLinkHub reference + own RE | Protocol sourced from Go OSS project, ported to Rust |
+| RGB | Implemented (Phase 5) | Effect engine + hardware output via color endpoint |
 
 ## Development Environment
 

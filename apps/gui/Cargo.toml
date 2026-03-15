@@ -10,6 +10,7 @@ tauri-build = { workspace = true }
 [dependencies]
 corsair-common = { workspace = true }
 corsair-hid = { workspace = true }
+corsair-rgb = { workspace = true }
 corsair-sensors = { workspace = true }
 corsair-fancontrol = { workspace = true }
 tauri = { workspace = true }

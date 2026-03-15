@@ -2,6 +2,7 @@ use serde::Serialize;
 
 use corsair_fancontrol::CycleResult;
 use corsair_hid::{DeviceGroup, FanSpeed, HubInfo, PsuStatus};
+use corsair_rgb::RgbFrame;
 
 /// Complete system state snapshot — emitted to frontend every poll cycle.
 #[derive(Debug, Clone, Serialize)]
@@ -13,6 +14,14 @@ pub struct SystemSnapshot {
     pub group_duties: Vec<GroupDuty>,
     pub emergency: bool,
     pub any_stale: bool,
+    pub hub_health: Vec<HubHealth>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HubHealth {
+    pub serial: String,
+    pub healthy: bool,
+    pub consecutive_failures: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,6 +90,24 @@ pub struct HubDeviceEntry {
 pub struct PsuDeviceInfo {
     pub serial: String,
     pub model: String,
+}
+
+/// Compact RGB frame for IPC — emitted as Tauri event at 30 FPS.
+#[derive(Debug, Clone, Serialize)]
+pub struct RgbFrameDto {
+    pub hub_serial: String,
+    pub channel: u8,
+    pub leds: Vec<[u8; 3]>,
+}
+
+impl RgbFrameDto {
+    pub fn from_frame(frame: &RgbFrame) -> Self {
+        Self {
+            hub_serial: frame.hub_serial.clone(),
+            channel: frame.channel,
+            leds: frame.leds.iter().map(|c| [c.r, c.g, c.b]).collect(),
+        }
+    }
 }
 
 // --- Conversion helpers ---
@@ -181,6 +208,16 @@ impl SystemSnapshot {
             total_power: s.total_power,
         });
 
+        let hub_health: Vec<HubHealth> = result
+            .hub_health
+            .iter()
+            .map(|h| HubHealth {
+                serial: h.serial.clone(),
+                healthy: h.healthy,
+                consecutive_failures: h.consecutive_failures,
+            })
+            .collect();
+
         SystemSnapshot {
             timestamp_ms,
             temperatures,
@@ -189,6 +226,7 @@ impl SystemSnapshot {
             group_duties,
             emergency: result.emergency,
             any_stale: result.any_stale,
+            hub_health,
         }
     }
 }

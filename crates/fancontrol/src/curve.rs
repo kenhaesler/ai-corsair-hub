@@ -12,7 +12,7 @@ impl FanCurve {
         if points.len() < 2 {
             bail!("Fan curve requires at least 2 points, got {}", points.len());
         }
-        points.sort_by(|a, b| a.temp.partial_cmp(&b.temp).unwrap());
+        points.sort_by(|a, b| a.temp.partial_cmp(&b.temp).unwrap_or(std::cmp::Ordering::Equal));
         Ok(Self { points })
     }
 
@@ -87,5 +87,16 @@ mod tests {
     fn test_single_point_error() {
         let result = FanCurve::new(vec![CurvePoint { temp: 50.0, duty: 50.0 }]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_nan_temperature_no_panic() {
+        let points = vec![
+            CurvePoint { temp: 30.0, duty: 25.0 },
+            CurvePoint { temp: f64::NAN, duty: 50.0 },
+            CurvePoint { temp: 70.0, duty: 100.0 },
+        ];
+        // Should not panic — NaN sorts stably via unwrap_or(Equal)
+        let _curve = FanCurve::new(points);
     }
 }

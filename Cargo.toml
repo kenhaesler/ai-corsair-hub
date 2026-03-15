@@ -4,9 +4,11 @@ members = [
     "crates/sensors",
     "crates/fancontrol",
     "crates/common",
+    "crates/rgb",
     "apps/service",
     "apps/scanner",
     "apps/gui",
+    "apps/rgb-test",
 ]
 resolver = "3"
 
@@ -63,3 +65,4 @@ corsair-hid = { path = "crates/hid" }
 corsair-sensors = { path = "crates/sensors" }
 corsair-fancontrol = { path = "crates/fancontrol" }
 corsair-common = { path = "crates/common" }
+corsair-rgb = { path = "crates/rgb" }

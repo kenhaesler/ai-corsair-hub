@@ -18,6 +18,12 @@
   /* Accent */
   --accent: #60a5fa;
   --accent-glow: rgba(96, 165, 250, 0.15);
+  --accent-dim: rgba(96, 165, 250, 0.6);
+
+  /* Card states */
+  --bg-card-active: rgba(96, 165, 250, 0.08);
+  --bg-card-inset: rgba(0, 0, 0, 0.15);
+  --shadow-glow: 0 0 20px rgba(96, 165, 250, 0.1);
 
   /* Status */
   --success: #34d399;
@@ -41,6 +47,11 @@
   --glass-blur: blur(20px) saturate(150%);
   --glass-shadow: 0 1px 3px rgba(0, 0, 0, 0.3),
                   inset 0 1px 0 rgba(255, 255, 255, 0.05);
+
+  /* RGB preview */
+  --rgb-preview-bg: rgba(0, 0, 0, 0.4);
+  --rgb-glow-spread: 12px;
+  --rgb-bloom-opacity: 0.25;
 }
 
 html, body {
@@ -77,6 +88,13 @@ body {
 }
 .card:hover {
   background: var(--bg-card-hover);
+  transform: translateY(-1px);
+  box-shadow: var(--glass-shadow), 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+.card.active {
+  border-color: var(--accent-dim);
+  background: var(--bg-card-active);
+  box-shadow: var(--glass-shadow), var(--shadow-glow);
 }
 
 /* Scrollable content areas */
@@ -207,4 +225,36 @@ input[type="range"]::-webkit-slider-thumb {
   background: rgba(248, 113, 113, 0.1);
   border-color: rgba(248, 113, 113, 0.3);
   color: var(--danger);
+}
+.banner.success {
+  background: rgba(52, 211, 153, 0.1);
+  border-color: rgba(52, 211, 153, 0.3);
+  color: var(--success);
+}
+
+/* Global section title */
+.section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-secondary);
+  margin: 0 0 12px 0;
+}
+
+/* Page transition */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Pulse animation for live indicators */
+@keyframes pulse {
+  0%, 100% { opacity: 0.8; }
+  50% { opacity: 1; }
+}
+
+/* Press feedback for interactive cards */
+.card:active {
+  transform: scale(0.98);
 }

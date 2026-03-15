@@ -1,0 +1,14 @@
+pub mod aurora;
+pub mod breathing;
+pub mod candle;
+pub mod color_cycle;
+pub mod duty_meter;
+pub mod fire;
+pub mod gradient;
+pub mod rain;
+pub mod rainbow_wave;
+pub mod spectrum_shift;
+pub mod starfield;
+pub mod static_color;
+pub mod temperature_map;
+pub mod thermal_pulse;

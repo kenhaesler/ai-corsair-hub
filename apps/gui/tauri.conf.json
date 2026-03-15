@@ -15,10 +15,10 @@
       {
         "label": "main",
         "title": "Corsair Hub",
-        "width": 1100,
-        "height": 750,
-        "minWidth": 900,
-        "minHeight": 600,
+        "width": 1320,
+        "height": 850,
+        "minWidth": 1000,
+        "minHeight": 700,
         "center": true,
         "decorations": false,
         "transparent": true,
@@ -28,9 +28,6 @@
           "state": "followsWindowActiveState"
         }
       }
-    ],
-    "security": {
-      "capabilities": []
-    }
+    ]
   }
 }

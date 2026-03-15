@@ -14,6 +14,14 @@ impl DeviceScanner {
         Ok(Self { api })
     }
 
+    /// Re-enumerate the USB bus so newly (re-)connected devices become visible.
+    pub fn refresh(&mut self) -> Result<()> {
+        self.api
+            .refresh_devices()
+            .context("Failed to refresh HID device list")?;
+        Ok(())
+    }
+
     pub fn scan(&self) -> Vec<DeviceInfo> {
         let mut devices = Vec::new();
 

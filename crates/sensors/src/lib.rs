@@ -1,5 +1,6 @@
 pub mod cpu;
 pub mod gpu;
+pub mod lhm;
 pub mod psu;
 
 use corsair_common::Temperature;

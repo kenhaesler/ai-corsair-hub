@@ -4,12 +4,18 @@ use serde::{Deserialize, Serialize};
 pub struct AppConfig {
     pub general: GeneralConfig,
     pub fan_groups: Vec<FanGroupConfig>,
+    #[serde(default)]
+    pub rgb: RgbConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneralConfig {
     pub poll_interval_ms: u64,
     pub log_level: String,
+    /// Optional path to LibreHardwareMonitor.exe for non-standard/portable installs.
+    /// If `None`, auto-detects at the standard Program Files location.
+    #[serde(default)]
+    pub lhm_exe_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,8 +70,72 @@ impl Default for AppConfig {
             general: GeneralConfig {
                 poll_interval_ms: 1000,
                 log_level: "info".to_string(),
+                lhm_exe_path: None,
             },
             fan_groups: vec![],
+            rgb: RgbConfig::default(),
         }
     }
 }
+
+// --- RGB Configuration ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RgbConfig {
+    pub enabled: bool,
+    /// Master brightness (0–100).
+    pub brightness: u8,
+    /// Frames per second (30 or 60).
+    pub fps: u8,
+    /// If true, send RGB data to hardware. If false, preview-only.
+    pub hardware_output: bool,
+    pub zones: Vec<RgbZoneConfig>,
+    #[serde(default)]
+    pub presets: Vec<RgbPreset>,
+}
+
+impl Default for RgbConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            brightness: 80,
+            fps: 30,
+            hardware_output: false,
+            zones: vec![],
+            presets: vec![],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RgbZoneConfig {
+    pub name: String,
+    pub devices: Vec<RgbDeviceRef>,
+    pub layers: Vec<LayerConfig>,
+    pub brightness: u8,
+    #[serde(default)]
+    pub flow: Option<FlowConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerConfig {
+    pub effect: EffectConfig,
+    pub blend_mode: BlendMode,
+    pub opacity: f32,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RgbDeviceRef {
+    pub hub_serial: String,
+    pub channel: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RgbPreset {
+    pub name: String,
+    pub zones: Vec<RgbZoneConfig>,
+}
+
+// Re-export the types from corsair-rgb that config needs
+pub use corsair_rgb::{BlendMode, EffectConfig, FlowConfig, FlowDirection, Rgb as RgbColor};

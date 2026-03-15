@@ -1,0 +1,16 @@
+[package]
+name = "corsair-rgb-test"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "corsair-rgb-test"
+path = "src/main.rs"
+
+[dependencies]
+corsair-common = { workspace = true }
+corsair-hid = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

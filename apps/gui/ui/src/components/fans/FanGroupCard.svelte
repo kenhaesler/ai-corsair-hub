@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { FanGroupConfig, FanMode, CurvePoint } from '../../lib/types';
+  import type { FanGroupConfig, FanMode } from '../../lib/types';
   import ModeSelector from './ModeSelector.svelte';
   import CurveEditor from './CurveEditor.svelte';
   import PidTuner from './PidTuner.svelte';
@@ -8,9 +8,10 @@
     group: FanGroupConfig;
     currentTemp?: number;
     onchange: (group: FanGroupConfig) => void;
+    expanded?: boolean;
   }
 
-  let { group, currentTemp, onchange }: Props = $props();
+  let { group, currentTemp, onchange, expanded = false }: Props = $props();
 
   const modeType = $derived(group.mode.type);
 
@@ -49,9 +50,19 @@
     }
     onchange({ ...group, mode });
   }
+
+  function updateHysteresis(val: number) {
+    if (group.mode.type !== 'curve') return;
+    onchange({ ...group, mode: { ...group.mode, hysteresis: val } as FanMode & { type: 'curve' } });
+  }
+
+  function updateRampRate(val: number) {
+    if (group.mode.type !== 'curve') return;
+    onchange({ ...group, mode: { ...group.mode, ramp_rate: val } as FanMode & { type: 'curve' } });
+  }
 </script>
 
-<div class="card fan-group-card">
+<div class="fan-group-card" class:expanded>
   <div class="header">
     <h4 class="group-name">{group.name}</h4>
     <span class="channels">Ch {group.channels.join(', ')}</span>
@@ -77,7 +88,32 @@
         points={group.mode.points}
         {currentTemp}
         onchange={(points) => onchange({ ...group, mode: { ...group.mode, points } as FanMode & { type: 'curve' } })}
+        {expanded}
       />
+      <div class="curve-params">
+        <div class="param">
+          <span class="field-label">Hysteresis</span>
+          <div class="slider-row">
+            <input
+              type="range" min="1" max="10" step="1"
+              value={group.mode.hysteresis}
+              oninput={(e) => updateHysteresis(Number(e.currentTarget.value))}
+            />
+            <span class="tabular-nums">{group.mode.hysteresis}°C</span>
+          </div>
+        </div>
+        <div class="param">
+          <span class="field-label">Ramp Rate</span>
+          <div class="slider-row">
+            <input
+              type="range" min="1" max="20" step="1"
+              value={group.mode.ramp_rate}
+              oninput={(e) => updateRampRate(Number(e.currentTarget.value))}
+            />
+            <span class="tabular-nums">{group.mode.ramp_rate}%/s</span>
+          </div>
+        </div>
+      </div>
     {:else if group.mode.type === 'pid'}
       <PidTuner
         targetTemp={group.mode.target_temp}
@@ -109,6 +145,12 @@
     flex-direction: column;
     gap: 12px;
   }
+  .fan-group-card:not(.expanded) {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 16px;
+  }
   .header {
     display: flex;
     align-items: baseline;
@@ -116,16 +158,22 @@
   }
   .group-name {
     margin: 0;
-    font-size: 14px;
+    font-size: 20px;
     font-weight: 600;
   }
+  .expanded .group-name {
+    font-size: 20px;
+  }
   .channels {
-    font-size: 11px;
+    font-size: 13px;
     color: var(--text-muted);
     font-family: var(--font-mono);
   }
   .mode-content {
-    min-height: 40px;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
   .fixed-control .field-label {
     font-size: 10px;
@@ -141,9 +189,24 @@
     margin-top: 4px;
   }
   .slider-row span {
-    width: 40px;
+    width: 48px;
     text-align: right;
     font-size: 13px;
     font-weight: 500;
+  }
+  .curve-params {
+    display: flex;
+    gap: 24px;
+    margin-top: 12px;
+  }
+  .param {
+    flex: 1;
+  }
+  .param .field-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
   }
 </style>

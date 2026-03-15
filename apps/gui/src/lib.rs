@@ -123,6 +123,8 @@ pub fn run() {
             commands::apply_preset,
             commands::set_manual_duty,
             commands::validate_config,
+            commands::set_rgb_config,
+            commands::set_rgb_enabled,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
