@@ -1,4 +1,4 @@
-# ai-corsair-hub
+# corsair-hub
 
 A lightweight, open-source replacement for Corsair's iCUE software -- smart fan control, real-time sensor monitoring, and RGB lighting for custom water-cooled PCs built with Corsair iCUE LINK hardware.
 
