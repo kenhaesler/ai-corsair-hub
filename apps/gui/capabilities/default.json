@@ -15,6 +15,9 @@
     "core:app:default",
     "core:menu:default",
     "core:tray:default",
-    "core:window:allow-set-focus"
+    "core:window:allow-set-focus",
+    "updater:default",
+    "updater:allow-check",
+    "updater:allow-download-and-install"
   ]
 }

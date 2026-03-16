@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.corsair-hub.app",
   "build": {
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm --prefix ui run dev",
+    "beforeBuildCommand": "npm --prefix ui run build",
     "devUrl": "http://localhost:5173",
     "frontendDist": "ui/dist"
   },
@@ -29,5 +29,41 @@
         }
       }
     ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "resources": [],
+    "copyright": "Copyright 2025 Ken Haesler",
+    "shortDescription": "Smart fan control for Corsair iCUE LINK hardware",
+    "longDescription": "A lightweight replacement for iCUE \u2014 PID-based fan control, sensor fusion, and RGB lighting for custom water-cooled PCs with Corsair iCUE LINK hardware.",
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com",
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "installMode": "perMachine",
+        "languages": ["English"],
+        "displayLanguageSelector": false,
+        "startMenuFolder": "Corsair Hub",
+        "installerHooks": "nsis/hooks.nsi"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/kenhaesler/ai-corsair-hub/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ4MzZDMTI5REY5Mjk5QTIKUldTaW1aTGZLY0UyU0JLSDRhUFlkYlh4dUNWTmIyL3dCZ2NoZkt0a0JjQWd1c1JaK1RIYkhsWWcK"
+    }
   }
 }

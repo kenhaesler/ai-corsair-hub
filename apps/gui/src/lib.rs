@@ -35,6 +35,7 @@ pub fn run() {
                 let _ = w.set_focus();
             }
         }))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let config = load_config_or_default();
             let hw_sender = hardware_thread::spawn(config, app.handle().clone());
