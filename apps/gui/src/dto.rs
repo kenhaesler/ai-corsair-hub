@@ -76,6 +76,19 @@ pub struct DeviceTree {
     pub psu: Option<PsuDeviceInfo>,
 }
 
+/// Result of `set_manual_duty_by_device_id`. The UI uses `unresolved` to
+/// show which fans were not driven (e.g. because the device is currently
+/// unplugged) without hiding the partial-success case as a blanket error.
+#[derive(Debug, Clone, Serialize)]
+pub struct ManualDutyResult {
+    /// Device ids that were resolved and whose hub was commanded.
+    pub applied: Vec<String>,
+    /// Device ids that did not resolve via the current registry. Caller
+    /// surfaces these as a warning — the devices are not enumerated at
+    /// this moment (unplugged, moved, or renamed-out).
+    pub unresolved: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HubSnapshot {
     pub serial: String,

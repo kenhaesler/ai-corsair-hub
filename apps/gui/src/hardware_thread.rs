@@ -192,6 +192,31 @@ fn run_loop(
                             .map_err(|e| format!("Failed to set duty: {}", e));
                         let _ = reply.send(result);
                     }
+                    HwCommand::SetManualDutyByDeviceId {
+                        device_ids,
+                        duty,
+                        reply,
+                    } => {
+                        let result = apply_manual_duty_by_device_id(
+                            &control_loop,
+                            &device_ids,
+                            duty,
+                        );
+                        let _ = reply.send(result);
+                    }
+                    HwCommand::RenameDevice {
+                        device_id,
+                        name,
+                        reply,
+                    } => {
+                        let result = apply_rename_device(
+                            &mut config,
+                            &mut control_loop,
+                            &device_id,
+                            &name,
+                        );
+                        let _ = reply.send(result);
+                    }
                     HwCommand::SetRgbConfig {
                         config: rgb_config,
                         reply,
@@ -472,6 +497,12 @@ fn run_degraded(rx: mpsc::Receiver<HwCommand>) {
             Ok(HwCommand::SetManualDuty { reply, .. }) => {
                 let _ = reply.send(Err("Hardware unavailable".into()));
             }
+            Ok(HwCommand::SetManualDutyByDeviceId { reply, .. }) => {
+                let _ = reply.send(Err("Hardware unavailable".into()));
+            }
+            Ok(HwCommand::RenameDevice { reply, .. }) => {
+                let _ = reply.send(Err("Hardware unavailable".into()));
+            }
             Ok(HwCommand::SetRgbConfig { reply, .. }) => {
                 let _ = reply.send(Err("Hardware unavailable".into()));
             }
@@ -508,6 +539,12 @@ fn run_discovery_only(
                 let _ = reply.send(Err("Control loop not running".into()));
             }
             Ok(HwCommand::SetManualDuty { reply, .. }) => {
+                let _ = reply.send(Err("Control loop not running".into()));
+            }
+            Ok(HwCommand::SetManualDutyByDeviceId { reply, .. }) => {
+                let _ = reply.send(Err("Control loop not running".into()));
+            }
+            Ok(HwCommand::RenameDevice { reply, .. }) => {
                 let _ = reply.send(Err("Control loop not running".into()));
             }
             Ok(HwCommand::SetRgbConfig { reply, .. }) => {
@@ -851,6 +888,116 @@ fn apply_rgb_config(
     renderer.update_config(&zones, config.rgb.brightness as f32 / 100.0);
 }
 
+/// Resolve each device_id via the control loop's registry, bucket by hub,
+/// and issue one `set_speeds` per hub. Returns a structured result listing
+/// which ids were applied vs unresolved so the UI can surface partial-
+/// success cases (e.g. a fan was unplugged between enumeration and the
+/// user's click).
+///
+/// ## Why we group per hub
+///
+/// `ControlLoop::set_manual_duty(hub, channels, duty)` takes a slice of
+/// channels per hub — one hub call per group. A V2 fan selection can
+/// span multiple hubs, so we bucket before issuing any hub calls and
+/// treat the per-hub call as atomic (either all its channels are
+/// commanded or none — a mid-hub failure stops further channels on
+/// that hub but doesn't roll back earlier hubs). Errors from a
+/// per-hub call are propagated as a String error so the command
+/// Result captures them.
+fn apply_manual_duty_by_device_id(
+    control_loop: &ControlLoop,
+    device_ids: &[String],
+    duty: u8,
+) -> Result<crate::dto::ManualDutyResult, String> {
+    if duty > 100 {
+        return Err("duty must be 0-100".into());
+    }
+    let registry = control_loop.registry();
+    let mut per_hub: std::collections::HashMap<String, Vec<u8>> =
+        std::collections::HashMap::new();
+    let mut applied: Vec<String> = Vec::new();
+    let mut unresolved: Vec<String> = Vec::new();
+    for id in device_ids {
+        match registry.channel_for(id) {
+            Some((hub, ch)) => {
+                per_hub.entry(hub).or_default().push(ch);
+                applied.push(id.clone());
+            }
+            None => unresolved.push(id.clone()),
+        }
+    }
+    for (hub, channels) in &per_hub {
+        control_loop
+            .set_manual_duty(hub, channels, duty)
+            .map_err(|e| format!("Failed to set duty on hub '{}': {}", hub, e))?;
+    }
+    Ok(crate::dto::ManualDutyResult {
+        applied,
+        unresolved,
+    })
+}
+
+/// Mutate `config.devices` to set a friendly name for `device_id`:
+/// - An empty `name` clears the device entry (revert to system default).
+/// - A non-empty `name` upserts — existing entry's `name` is updated;
+///   absent entry gets inserted. `led_count` on an existing entry is
+///   preserved.
+///
+/// Pure mutation. The caller is responsible for persisting and for
+/// informing the control loop via `update_config`. Exposed as
+/// `pub(crate)` for unit testing without Tauri state.
+pub(crate) fn rename_device_in_config(
+    config: &mut AppConfig,
+    device_id: &str,
+    name: &str,
+) {
+    // NB: writing to `config.devices` is safe even on a V1 config —
+    // `AppConfig.devices: Vec<v2::DeviceEntry>` has `#[serde(default)]`
+    // and serializes with `#[serde(skip_serializing_if = "Option::is_none")]`
+    // on optional fields, so a V1 round-trip with one new device entry
+    // produces a file that still parses as V1 and also as V2. We do NOT
+    // bump `schema_version` here — renaming is orthogonal to schema
+    // version; Step 10 (migration wiring) owns that transition.
+    if name.is_empty() {
+        config.devices.retain(|d| d.device_id != device_id);
+        return;
+    }
+    if let Some(existing) = config.devices.iter_mut().find(|d| d.device_id == device_id) {
+        existing.name = Some(name.to_string());
+    } else {
+        config
+            .devices
+            .push(corsair_common::config::v2::DeviceEntry {
+                device_id: device_id.to_string(),
+                name: Some(name.to_string()),
+                led_count: None,
+            });
+    }
+}
+
+/// Handle `HwCommand::RenameDevice`: mutate config, persist, notify
+/// control loop. Returns a String error if persistence fails; the
+/// in-memory mutation is best-effort applied even if write fails, so the
+/// UI stays consistent with what it just committed to.
+fn apply_rename_device(
+    config: &mut AppConfig,
+    control_loop: &mut ControlLoop,
+    device_id: &str,
+    name: &str,
+) -> Result<(), String> {
+    rename_device_in_config(config, device_id, name);
+    if let Err(e) = save_config_to_disk(config) {
+        return Err(format!("Failed to persist renamed device: {}", e));
+    }
+    // Apply live so a subsequent get_config returns the new name without
+    // a round-trip through disk. update_config re-runs its device-entry
+    // pass; since we only changed `name`, no led_count rewrite happens.
+    if let Err(e) = control_loop.update_config(config.clone()) {
+        return Err(format!("Failed to apply rename to control loop: {}", e));
+    }
+    Ok(())
+}
+
 fn save_config_to_disk(config: &AppConfig) -> Result<()> {
     let toml_str = toml::to_string_pretty(config)
         .map_err(|e| anyhow::anyhow!("Failed to serialize config: {}", e))?;
@@ -862,4 +1009,135 @@ fn save_config_to_disk(config: &AppConfig) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", config_path.display(), e))?;
     info!("Config saved to {}", config_path.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use corsair_common::config::v2::DeviceEntry;
+    use corsair_common::config::{FanMode, GeneralConfig, SCHEMA_VERSION_V1};
+
+    /// Baseline V1 config used by rename tests — no schema_version bump
+    /// happens on rename so we pin the starting state explicitly.
+    fn empty_v1_config() -> AppConfig {
+        AppConfig {
+            schema_version: SCHEMA_VERSION_V1,
+            general: GeneralConfig {
+                poll_interval_ms: 1000,
+                log_level: "info".to_string(),
+                lhm_exe_path: None,
+            },
+            fan_groups: Vec::new(),
+            rgb: Default::default(),
+            device_overrides: Vec::new(),
+            devices: Vec::new(),
+        }
+    }
+
+    /// Renaming a device that has no existing entry inserts a new one
+    /// with `name` set and `led_count = None` (preserves the invariant
+    /// that renaming is orthogonal to LED-count overrides). Schema
+    /// version is left untouched — the plan says rename is orthogonal
+    /// to schema version.
+    #[test]
+    fn rename_device_inserts_new_entry() {
+        let mut cfg = empty_v1_config();
+        rename_device_in_config(&mut cfg, "ID_A1", "Top Front Left");
+        assert_eq!(cfg.devices.len(), 1);
+        assert_eq!(
+            cfg.devices[0],
+            DeviceEntry {
+                device_id: "ID_A1".to_string(),
+                name: Some("Top Front Left".to_string()),
+                led_count: None,
+            }
+        );
+        // Schema version NOT bumped by rename — orthogonal concerns.
+        assert_eq!(cfg.schema_version, SCHEMA_VERSION_V1);
+    }
+
+    /// Renaming an existing entry updates its `name` while preserving
+    /// any `led_count` override that was already set for that device.
+    #[test]
+    fn rename_device_preserves_led_count() {
+        let mut cfg = empty_v1_config();
+        cfg.devices.push(DeviceEntry {
+            device_id: "ID_A1".to_string(),
+            name: Some("Old Name".to_string()),
+            led_count: Some(30),
+        });
+
+        rename_device_in_config(&mut cfg, "ID_A1", "New Name");
+
+        assert_eq!(cfg.devices.len(), 1);
+        assert_eq!(cfg.devices[0].name.as_deref(), Some("New Name"));
+        assert_eq!(
+            cfg.devices[0].led_count,
+            Some(30),
+            "led_count override must survive a rename"
+        );
+    }
+
+    /// An empty `name` removes the device entry entirely. If the entry
+    /// also carried an led_count, the user loses it — that's the
+    /// documented contract (empty name = "revert to defaults, drop
+    /// everything"). If that's not what the user wanted, they'd keep a
+    /// placeholder name or edit the override separately.
+    #[test]
+    fn rename_device_empty_name_removes_entry() {
+        let mut cfg = empty_v1_config();
+        cfg.devices.push(DeviceEntry {
+            device_id: "ID_A1".to_string(),
+            name: Some("Old Name".to_string()),
+            led_count: Some(42),
+        });
+        cfg.devices.push(DeviceEntry {
+            device_id: "ID_B1".to_string(),
+            name: Some("Keep Me".to_string()),
+            led_count: None,
+        });
+
+        rename_device_in_config(&mut cfg, "ID_A1", "");
+
+        assert_eq!(cfg.devices.len(), 1);
+        assert_eq!(cfg.devices[0].device_id, "ID_B1");
+    }
+
+    /// Renaming a non-existent device_id while asking for an empty name
+    /// is a no-op (don't insert an entry just to immediately clear it).
+    #[test]
+    fn rename_device_empty_name_on_missing_is_noop() {
+        let mut cfg = empty_v1_config();
+        rename_device_in_config(&mut cfg, "ID_NONE", "");
+        assert!(cfg.devices.is_empty());
+    }
+
+    /// V1-shaped config round-trips cleanly with a newly-added V2
+    /// device entry. The serde skip_serializing_if attributes on
+    /// DeviceEntry.name / led_count keep the output compact and backwards
+    /// parseable.
+    #[test]
+    fn rename_device_roundtrips_through_toml_on_v1_config() {
+        let mut cfg = empty_v1_config();
+        // Add a V1 fan group so the serialized form is realistic.
+        cfg.fan_groups.push(corsair_common::config::FanGroupConfig {
+            name: "g1".to_string(),
+            channels: vec![1, 2],
+            hub_serial: Some("HUB_A".to_string()),
+            device_ids: Vec::new(),
+            mode: FanMode::Fixed { duty_percent: 50.0 },
+        });
+
+        rename_device_in_config(&mut cfg, "ID_A1", "Top Front");
+
+        let toml_str = toml::to_string(&cfg).expect("serialize");
+        let reparsed: AppConfig = toml::from_str(&toml_str).expect("reparse");
+
+        assert_eq!(reparsed.schema_version, SCHEMA_VERSION_V1);
+        assert_eq!(reparsed.devices.len(), 1);
+        assert_eq!(reparsed.devices[0].device_id, "ID_A1");
+        assert_eq!(reparsed.devices[0].name.as_deref(), Some("Top Front"));
+        assert_eq!(reparsed.fan_groups.len(), 1);
+        assert_eq!(reparsed.fan_groups[0].channels, vec![1, 2]);
+    }
 }

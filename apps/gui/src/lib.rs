@@ -130,7 +130,10 @@ pub fn run() {
             commands::get_config,
             commands::save_config,
             commands::apply_preset,
+            #[allow(deprecated)]
             commands::set_manual_duty,
+            commands::set_manual_duty_by_device_id,
+            commands::rename_device,
             commands::validate_config,
             commands::set_rgb_config,
             commands::set_rgb_enabled,
