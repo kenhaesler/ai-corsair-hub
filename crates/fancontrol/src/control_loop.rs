@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use tracing::{error, info, warn};
 
 use corsair_common::config::{AppConfig, FanGroupConfig, FanMode, TempSourceConfig};
+use corsair_common::identity::{DeviceEnumEntry, DeviceRegistry};
 use corsair_common::CorsairDevice;
 use corsair_hid::{DeviceScanner, FanSpeed, HubInfo, IcueLinkHub, IcueLinkTransport, LinkDeviceType};
 use corsair_sensors::cpu::CpuSensor;
@@ -79,9 +80,16 @@ pub struct GroupDutyReport {
 }
 
 /// RGB frame data for sending to hardware (no dependency on corsair-rgb crate).
+///
+/// Dual-key during the V1→V2 transition: either `device_id` is populated
+/// (V2 path — resolves through the registry) OR `hub_serial` + `channel`
+/// are populated (V1 path — sent directly). When `device_id` is non-empty
+/// it takes precedence. `send_rgb_frames` treats an orphan device_id
+/// (not currently enumerated) as skipped cleanly.
 pub struct RgbFrameRef<'a> {
     pub hub_serial: &'a str,
     pub channel: u8,
+    pub device_id: &'a str,
     pub leds: &'a [[u8; 3]],
 }
 
@@ -91,6 +99,12 @@ pub struct ControlLoop {
     sensor_state: HashMap<String, SensorState>,
     hubs: HashMap<String, HubConnection>,
     groups: Vec<FanGroup>,
+    /// Current device_id ↔ (hub_serial, channel) index. Rebuilt at every
+    /// hub init and every successful hub recovery. Used by the dual-key
+    /// path in `set_speeds` bucketing and `send_rgb_frames` — a fan_group
+    /// with non-empty `device_ids` resolves through the registry;
+    /// otherwise the legacy channel path runs.
+    registry: DeviceRegistry,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -121,8 +135,16 @@ struct HubConnection {
 
 struct FanGroup {
     name: String,
+    /// V1 identity: channels on `hub_serial`. Authoritative when
+    /// `device_ids` is empty (V1 config).
     channels: Vec<u8>,
+    /// V1 identity: hub serial the channels belong to. Ignored when
+    /// `device_ids` is non-empty.
     hub_serial: String,
+    /// V2 identity: stable device_ids. Authoritative when non-empty.
+    /// Resolved to (hub_serial, channel) at each cycle via the
+    /// ControlLoop's registry.
+    device_ids: Vec<String>,
     controller: FanController,
     acoustic: Option<AcousticFilter>,
     #[allow(dead_code)]
@@ -154,12 +176,23 @@ impl ControlLoop {
 
         let mut needed_serials = std::collections::HashSet::new();
 
+        // V2 configs don't have hub_serial on fan groups. In that case we
+        // can't pre-compute which hubs to open from the config alone — we
+        // open every currently-enumerated iCUE LINK hub instead. V1 configs
+        // opt in to the per-group hub_serial path below.
         for group in &config.fan_groups {
-            let serial = group
-                .hub_serial
-                .as_ref()
-                .context(format!("Fan group '{}' missing hub_serial", group.name))?;
-            needed_serials.insert(serial.clone());
+            if let Some(serial) = group.hub_serial.as_ref() {
+                needed_serials.insert(serial.clone());
+            }
+        }
+        if config.is_v2() {
+            // V2: enumerate all iCUE LINK hubs on the bus so the registry
+            // can resolve any device_id the config references.
+            for group in scanner.scan_grouped() {
+                if group.device_type == CorsairDevice::IcueLinkHub {
+                    needed_serials.insert(group.serial.clone());
+                }
+            }
         }
 
         // Always try to initialize all known sensors — makes them available
@@ -291,6 +324,11 @@ impl ControlLoop {
             // Apply user-configured device overrides. These take precedence over
             // both the hub's 0x1d LED-count table and the device-type defaults,
             // so users can fix misenumeration without waiting for a code change.
+            //
+            // V1 overrides are keyed by (hub_serial, channel). V2 per-device
+            // entries are keyed by device_id and applied below, after we've
+            // seen the hub's enumeration. V2 wins when both reference the
+            // same physical device (which shouldn't happen post-migration).
             let mut overridden_channels: Vec<u8> = Vec::new();
             for ov in &config.device_overrides {
                 if ov.hub_serial == *serial {
@@ -354,7 +392,42 @@ impl ControlLoop {
             );
         }
 
-        // Build fan groups
+        // Build the identity registry from every enumerated device across
+        // every hub. This is the runtime bridge between device_id (what
+        // persists) and (hub_serial, channel) (what the wire speaks).
+        let registry = build_registry(&hubs);
+
+        // Apply V2 per-device led_count overrides now that we have both the
+        // registry and mutable HubConnections. V2 takes precedence over the
+        // V1 (hub_serial, channel) overrides applied earlier: a user-
+        // specified led_count on a device_id wins.
+        for entry in &config.devices {
+            let Some(override_leds) = entry.led_count else {
+                continue;
+            };
+            let Some(loc) = registry.resolve(&entry.device_id) else {
+                warn!(
+                    device_id = entry.device_id.as_str(),
+                    "V2 device entry references device_id not currently enumerated — \
+                     led_count override deferred until device reappears"
+                );
+                continue;
+            };
+            if let Some(hub_conn) = hubs.get_mut(&loc.hub_serial) {
+                hub_conn.info.led_counts.insert(loc.channel, override_leds);
+                info!(
+                    device_id = entry.device_id.as_str(),
+                    hub_serial = loc.hub_serial.as_str(),
+                    channel = loc.channel,
+                    led_count = override_leds,
+                    "Applied V2 per-device led_count override"
+                );
+            }
+        }
+
+        // Build fan groups. Each group carries both (channels, hub_serial)
+        // for the V1 path and `device_ids` for the V2 path; the cycle code
+        // picks whichever is non-empty.
         let mut groups = Vec::new();
         for group_cfg in &config.fan_groups {
             let group = build_fan_group(group_cfg, &sensors)?;
@@ -385,6 +458,7 @@ impl ControlLoop {
             sensor_state,
             hubs,
             groups,
+            registry,
             shutdown,
         })
     }
@@ -441,29 +515,83 @@ impl ControlLoop {
                 compute_group_duty(group, &readings, dt_secs)
             };
 
-            // Enforce per-channel minimums and convert to u8
-            let hub = self.hubs.get(&group.hub_serial);
-            let pump_channels = hub.map(|h| &h.pump_channels);
+            // Enforce per-channel minimums and convert to u8.
+            //
+            // Dual-key bucketing: if the group has `device_ids` (V2 path),
+            // resolve each id through the registry to its current
+            // (hub_serial, channel) and bucket by the resolved hub. For
+            // orphans (device_ids not currently enumerated) we skip cleanly
+            // — the group simply doesn't drive that fan this cycle; it
+            // rejoins once the registry sees the device again. V1 groups
+            // (empty device_ids) fall through to the original
+            // channel-based path.
+            //
+            // `group_duties` reports are grouped per (resolved) hub_serial
+            // so the snapshot continues to tag RPMs correctly. A V2 group
+            // may span multiple hubs; we emit one report per hub the group
+            // touched this cycle.
+            let mut per_hub_reports: HashMap<String, Vec<(u8, u8)>> = HashMap::new();
 
-            let commands = hub_commands.entry(group.hub_serial.clone()).or_default();
-            let mut group_channels = Vec::new();
-            for &ch in &group.channels {
-                let is_pump = pump_channels
-                    .map(|pcs| pcs.contains(&ch))
-                    .unwrap_or(false);
-                let min = if is_pump { MIN_PUMP_DUTY } else { MIN_FAN_DUTY };
-                let final_duty = duty.max(min).round().clamp(0.0, 100.0) as u8;
-                commands.push((ch, final_duty));
-                group_channels.push((ch, final_duty));
+            if !group.device_ids.is_empty() {
+                // V2 path: resolve via registry.
+                for device_id in &group.device_ids {
+                    let Some(loc) = self.registry.resolve(device_id) else {
+                        // Orphan: config references a device not currently
+                        // enumerated. Skip silently each cycle — warning-
+                        // once could be added later but would add a
+                        // seen-set to the FanGroup.
+                        continue;
+                    };
+                    let hub = self.hubs.get(&loc.hub_serial);
+                    let pump_channels = hub.map(|h| &h.pump_channels);
+                    let is_pump = pump_channels
+                        .map(|pcs| pcs.contains(&loc.channel))
+                        .unwrap_or(false);
+                    let min = if is_pump { MIN_PUMP_DUTY } else { MIN_FAN_DUTY };
+                    let final_duty = duty.max(min).round().clamp(0.0, 100.0) as u8;
+
+                    hub_commands
+                        .entry(loc.hub_serial.clone())
+                        .or_default()
+                        .push((loc.channel, final_duty));
+                    per_hub_reports
+                        .entry(loc.hub_serial.clone())
+                        .or_default()
+                        .push((loc.channel, final_duty));
+                }
+            } else {
+                // V1 path: channels on a single hub_serial.
+                let hub = self.hubs.get(&group.hub_serial);
+                let pump_channels = hub.map(|h| &h.pump_channels);
+
+                let commands = hub_commands.entry(group.hub_serial.clone()).or_default();
+                let mut group_channels = Vec::new();
+                for &ch in &group.channels {
+                    let is_pump = pump_channels
+                        .map(|pcs| pcs.contains(&ch))
+                        .unwrap_or(false);
+                    let min = if is_pump { MIN_PUMP_DUTY } else { MIN_FAN_DUTY };
+                    let final_duty = duty.max(min).round().clamp(0.0, 100.0) as u8;
+                    commands.push((ch, final_duty));
+                    group_channels.push((ch, final_duty));
+                }
+                per_hub_reports.insert(group.hub_serial.clone(), group_channels);
             }
 
             group.last_duty = duty;
 
-            group_duties.push(GroupDutyReport {
-                name: group.name.clone(),
-                hub_serial: group.hub_serial.clone(),
-                channels: group_channels,
-            });
+            // Emit one GroupDutyReport per hub the group touched. For V1
+            // groups that's always a single report on group.hub_serial.
+            // For V2 groups spanning multiple hubs, we emit a report per
+            // hub — the snapshot builder keys duty by (hub_serial, channel)
+            // which makes this unambiguous.
+            for (hub_serial, group_channels) in per_hub_reports {
+                group_duties.push(GroupDutyReport {
+                    name: group.name.clone(),
+                    hub_serial,
+                    channels: group_channels,
+                });
+            }
         }
 
         // 5. Send commands to hubs
@@ -558,6 +686,21 @@ impl ControlLoop {
         for group_cfg in &config.fan_groups {
             let group = build_fan_group(group_cfg, &self.sensors)?;
             groups.push(group);
+        }
+        // Re-apply V2 per-device led_count overrides. A V1→V2 migration or a
+        // preset swap may have changed them. Restore the base hub
+        // led_counts from the previous pass is not necessary here because
+        // the hub firmware 0x1d table would require re-enumeration to
+        // refresh — the user-visible led_counts in HubConnection.info
+        // already reflect the prior overrides, and we simply lay the new
+        // ones on top.
+        for entry in &config.devices {
+            if let Some(override_leds) = entry.led_count
+                && let Some(loc) = self.registry.resolve(&entry.device_id)
+                && let Some(hub_conn) = self.hubs.get_mut(&loc.hub_serial)
+            {
+                hub_conn.info.led_counts.insert(loc.channel, override_leds);
+            }
         }
         self.config = config;
         self.groups = groups;
@@ -677,6 +820,10 @@ impl ControlLoop {
 
             info!(serial, "Hub handle replaced after recovery");
         }
+        // Registry may have shifted if channel assignments changed after
+        // re-enumeration (fans added/removed/reordered on the chain).
+        // Rebuild so subsequent cycles resolve device_ids correctly.
+        self.registry = build_registry(&self.hubs);
     }
 
     /// Mark that a recovery attempt was made (even if it failed) to enforce
@@ -782,18 +929,41 @@ impl ControlLoop {
 
         const BLACK: [u8; 3] = [0, 0, 0];
 
-        // Group frames by hub serial, sort by channel within each hub
-        let mut by_hub: HashMap<&str, BTreeMap<u8, &[[u8; 3]]>> = HashMap::new();
+        // Group frames by hub serial, sort by channel within each hub.
+        //
+        // Dual-key during the V1→V2 transition: when a frame has a non-
+        // empty device_id, resolve via the registry. Otherwise use the
+        // frame's literal (hub_serial, channel). Orphans (device_ids not
+        // currently enumerated) are skipped silently.
+        //
+        // Ownership note: we key `by_hub` on String (not &str) because
+        // the resolved hub_serial is owned by the registry, and the
+        // registry outlives this function, but not with a borrow that
+        // can be threaded all the way through the HashMap build. Cheap
+        // clones here; RGB frame rate is 30 FPS.
+        let mut by_hub: HashMap<String, BTreeMap<u8, &[[u8; 3]]>> = HashMap::new();
         for frame in frames {
-            by_hub
-                .entry(&frame.hub_serial)
-                .or_default()
-                .insert(frame.channel, &frame.leds);
+            if !frame.device_id.is_empty() {
+                // V2 path: resolve device_id → (hub_serial, channel).
+                let Some(loc) = self.registry.resolve(frame.device_id) else {
+                    // Orphan — skip.
+                    continue;
+                };
+                by_hub
+                    .entry(loc.hub_serial.clone())
+                    .or_default()
+                    .insert(loc.channel, frame.leds);
+            } else {
+                by_hub
+                    .entry(frame.hub_serial.to_string())
+                    .or_default()
+                    .insert(frame.channel, frame.leds);
+            }
         }
 
         let mut sent = 0;
         for (serial, frame_channels) in &by_hub {
-            let hub_conn = match self.hubs.get_mut(*serial) {
+            let hub_conn = match self.hubs.get_mut(serial.as_str()) {
                 Some(c) if c.healthy => c,
                 _ => continue,
             };
@@ -847,7 +1017,7 @@ impl ControlLoop {
                 let total_bytes: usize = refs.iter().map(|(_, leds)| leds.len() * 3).sum();
                 let channels: Vec<(u8, usize)> = refs.iter().map(|(ch, leds)| (*ch, leds.len())).collect();
                 info!(
-                    serial = *serial,
+                    serial = serial.as_str(),
                     devices = refs.len(),
                     total_bytes,
                     channels = ?channels,
@@ -860,7 +1030,7 @@ impl ControlLoop {
                 Ok(()) => sent += refs.len(),
                 Err(e) => {
                     warn!(
-                        serial = *serial,
+                        serial = serial.as_str(),
                         error = %e,
                         "RGB write failed (non-fatal)"
                     );
@@ -1047,10 +1217,17 @@ fn build_fan_group(
     cfg: &FanGroupConfig,
     sensors: &HashMap<String, Box<dyn TemperatureSource>>,
 ) -> Result<FanGroup> {
-    let hub_serial = cfg
-        .hub_serial
-        .clone()
-        .context(format!("Fan group '{}' missing hub_serial", cfg.name))?;
+    // V2 groups don't carry hub_serial on the config. For those we fall
+    // back to an empty string — the control-loop bucketing sees
+    // `device_ids` non-empty first and takes the registry path, never
+    // consulting hub_serial. V1 groups retain the original requirement.
+    let hub_serial = if !cfg.device_ids.is_empty() {
+        cfg.hub_serial.clone().unwrap_or_default()
+    } else {
+        cfg.hub_serial
+            .clone()
+            .context(format!("Fan group '{}' missing hub_serial", cfg.name))?
+    };
 
     let (controller, acoustic) = match &cfg.mode {
         FanMode::Fixed { duty_percent } => (FanController::Fixed(*duty_percent), None),
@@ -1114,10 +1291,93 @@ fn build_fan_group(
         name: cfg.name.clone(),
         channels: cfg.channels.clone(),
         hub_serial,
+        device_ids: cfg.device_ids.clone(),
         controller,
         acoustic,
         last_duty: 0.0,
     })
+}
+
+/// Build the identity registry from current hub state. Called at every
+/// hub init and every successful hub recovery so the registry reflects
+/// the latest channel assignments.
+///
+/// We go through the `DeviceEnumEntry` tuple shape because `DeviceRegistry`
+/// lives in `corsair-common` and must not depend on `corsair-hid`'s
+/// `LinkDevice`/`HubInfo`. The `device_type_byte` is round-tripped:
+/// effective LED count here is computed from the hub's 0x1d table with
+/// fall-back to the device-type default.
+fn build_registry(hubs: &HashMap<String, HubConnection>) -> DeviceRegistry {
+    let entries: Vec<_> = hubs
+        .iter()
+        .flat_map(|(serial, hub_conn)| {
+            hub_conn.info.devices.iter().map(move |dev| {
+                let effective_leds = hub_conn
+                    .info
+                    .led_counts
+                    .get(&dev.channel)
+                    .copied()
+                    .filter(|&c| c > 0)
+                    .unwrap_or_else(|| dev.device_type.led_count());
+                // The device_type_byte is the raw protocol byte —
+                // reconstruct it so common can store it without
+                // importing hid types. We don't have a direct byte on
+                // LinkDeviceType, so use a byte that round-trips via
+                // LinkDeviceType::from_byte. See `link_device_type_byte`.
+                let type_byte = link_device_type_byte(&dev.device_type);
+                (
+                    serial.clone(),
+                    dev.device_id.clone(),
+                    dev.channel,
+                    type_byte,
+                    effective_leds,
+                )
+            })
+        })
+        .collect();
+
+    DeviceRegistry::rebuild(entries.iter().map(|(serial, id, channel, type_byte, leds)| {
+        DeviceEnumEntry {
+            hub_serial: serial.as_str(),
+            device_id: id.as_str(),
+            channel: *channel,
+            device_type_byte: *type_byte,
+            led_count: *leds,
+        }
+    }))
+}
+
+/// Round-trip a `LinkDeviceType` back to its protocol byte. Kept local to
+/// this crate because `corsair-common` cannot depend on `corsair-hid`.
+/// A future PR that moves `LinkDeviceType` into `corsair-common` will
+/// delete this helper.
+fn link_device_type_byte(t: &LinkDeviceType) -> u8 {
+    use LinkDeviceType::*;
+    match t {
+        QxFan => 0x01,
+        LxFan => 0x02,
+        RxMaxRgbFan => 0x03,
+        RxMaxFan => 0x04,
+        LinkAdapter => 0x05,
+        LiquidCooler => 0x07,
+        WaterBlock => 0x09,
+        GpuBlock => 0x0A,
+        Psu => 0x0B,
+        PumpXd5 => 0x0C,
+        Xg7Block => 0x0D,
+        RxRgbFan => 0x0F,
+        VrmCooler => 0x10,
+        TitanCooler => 0x11,
+        RxFan => 0x13,
+        PumpXd6 => 0x19,
+        CommanderDuo => 0x1B,
+        // LsStrip is enumerated via the LINK Adapter; its wire byte
+        // isn't a standard device_type entry. Return 0x05 (LINK Adapter)
+        // as an approximation — the registry doesn't need to
+        // discriminate further; downstream consumers use the led_count.
+        LsStrip => 0x05,
+        Unknown(b) => *b,
+    }
 }
 
 /// Simple HH:MM:SS timestamp (no chrono dependency — use std).
@@ -1166,14 +1426,23 @@ pub fn validate_config(config: &AppConfig) -> Result<()> {
             bail!("Duplicate fan group name: '{}'", group.name);
         }
 
-        // Must have hub_serial
-        if group.hub_serial.is_none() {
-            bail!("Fan group '{}' missing hub_serial", group.name);
-        }
-
-        // Must have at least one channel
-        if group.channels.is_empty() {
-            bail!("Fan group '{}' has no channels", group.name);
+        // V1: must have hub_serial AND at least one channel.
+        // V2: must have at least one device_id; hub_serial / channels are
+        // optional (and expected empty post-migration).
+        let has_v2_ids = !group.device_ids.is_empty();
+        if !has_v2_ids {
+            if group.hub_serial.is_none() {
+                bail!(
+                    "Fan group '{}' missing hub_serial (and no device_ids)",
+                    group.name
+                );
+            }
+            if group.channels.is_empty() {
+                bail!(
+                    "Fan group '{}' has no channels (and no device_ids)",
+                    group.name
+                );
+            }
         }
 
         // Mode-specific validation
@@ -1288,9 +1557,30 @@ impl ControlLoop {
         groups: Vec<FanGroup>,
         sensor_state: HashMap<String, SensorState>,
     ) -> Self {
+        Self::from_parts_for_test_with_devices(
+            config,
+            hubs,
+            HashMap::new(),
+            groups,
+            sensor_state,
+        )
+    }
+
+    /// Test-only variant that also supplies enumerated devices per hub so
+    /// the identity registry has content. Used by the dual-key path tests
+    /// added in Step 4.
+    fn from_parts_for_test_with_devices(
+        config: AppConfig,
+        hubs: HashMap<String, (Arc<dyn IcueLinkTransport>, Vec<u8>)>,
+        // (hub_serial) -> Vec<LinkDevice>
+        devices_by_hub: HashMap<String, Vec<corsair_hid::LinkDevice>>,
+        groups: Vec<FanGroup>,
+        sensor_state: HashMap<String, SensorState>,
+    ) -> Self {
         let hub_conns: HashMap<String, HubConnection> = hubs
             .into_iter()
             .map(|(serial, (hub, pump_channels))| {
+                let devices = devices_by_hub.get(&serial).cloned().unwrap_or_default();
                 (
                     serial.clone(),
                     HubConnection {
@@ -1307,7 +1597,7 @@ impl ControlLoop {
                                 minor: 0,
                                 patch: 0,
                             },
-                            devices: Vec::new(),
+                            devices,
                             led_counts: std::collections::HashMap::new(),
                         },
                         color_logged: false,
@@ -1316,12 +1606,15 @@ impl ControlLoop {
             })
             .collect();
 
+        let registry = build_registry(&hub_conns);
+
         Self {
             config,
             sensors: HashMap::new(),
             sensor_state,
             hubs: hub_conns,
             groups,
+            registry,
             shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -1452,6 +1745,7 @@ mod tests {
             name: "test".to_string(),
             channels: vec![1, 2],
             hub_serial: serial.clone(),
+            device_ids: Vec::new(),
             controller,
             acoustic,
             last_duty: 0.0,
@@ -1727,5 +2021,176 @@ mod tests {
         } else {
             unreachable!();
         }
+    }
+
+    // --- Step 4: dual-key control loop tests ---
+
+    /// Mock hub that records every set_speeds call so we can verify which
+    /// (channel, duty) pairs were actually dispatched through the
+    /// dual-key path. set_rgb/enter_hardware_mode unused here.
+    struct RecordingHub {
+        speeds_sent: std::sync::Mutex<Vec<Vec<(u8, u8)>>>,
+    }
+
+    impl RecordingHub {
+        fn new() -> Self {
+            Self {
+                speeds_sent: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn last_speeds(&self) -> Option<Vec<(u8, u8)>> {
+            self.speeds_sent.lock().unwrap().last().cloned()
+        }
+    }
+
+    impl IcueLinkTransport for RecordingHub {
+        fn set_speeds(&self, targets: &[(u8, u8)]) -> Result<()> {
+            self.speeds_sent.lock().unwrap().push(targets.to_vec());
+            Ok(())
+        }
+        fn get_speeds(&self) -> Result<Vec<FanSpeed>> {
+            Ok(Vec::new())
+        }
+        fn set_rgb(&self, _channel_leds: &[(u8, &[[u8; 3]])]) -> Result<()> {
+            Ok(())
+        }
+        fn enter_hardware_mode(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn mk_link_device(channel: u8, device_id: &str) -> corsair_hid::LinkDevice {
+        corsair_hid::LinkDevice {
+            channel,
+            device_type: LinkDeviceType::QxFan,
+            model: 0x01,
+            device_id: device_id.to_string(),
+        }
+    }
+
+    fn base_v1_config() -> AppConfig {
+        AppConfig {
+            schema_version: corsair_common::config::SCHEMA_VERSION_V1,
+            general: GeneralConfig {
+                poll_interval_ms: 1000,
+                log_level: "info".to_string(),
+                lhm_exe_path: None,
+            },
+            fan_groups: Vec::new(),
+            rgb: Default::default(),
+            device_overrides: Vec::new(),
+            devices: Vec::new(),
+        }
+    }
+
+    /// A V2-style FanGroup with device_ids routes its duty through the
+    /// registry to the right hub and channel. Two devices on the same hub
+    /// at channels 1 and 2, referenced by device_id — after one tick, the
+    /// hub's recorded set_speeds call must contain both channels.
+    #[test]
+    fn device_ids_resolve_via_registry_to_correct_channel() {
+        let hub_serial = "HUB_A".to_string();
+        let mock: Arc<RecordingHub> = Arc::new(RecordingHub::new());
+        let mut hubs: HashMap<String, (Arc<dyn IcueLinkTransport>, Vec<u8>)> = HashMap::new();
+        hubs.insert(
+            hub_serial.clone(),
+            (mock.clone() as Arc<dyn IcueLinkTransport>, Vec::new()),
+        );
+
+        // Two devices on HUB_A at channels 1 and 2
+        let mut devices_by_hub: HashMap<String, Vec<corsair_hid::LinkDevice>> = HashMap::new();
+        devices_by_hub.insert(
+            hub_serial.clone(),
+            vec![
+                mk_link_device(1, "ID_A1"),
+                mk_link_device(2, "ID_A2"),
+            ],
+        );
+
+        // V2-shaped FanGroup: device_ids populated, no channels/hub_serial
+        let group = FanGroup {
+            name: "v2_group".to_string(),
+            channels: Vec::new(),
+            hub_serial: String::new(),
+            device_ids: vec!["ID_A1".to_string(), "ID_A2".to_string()],
+            controller: FanController::Fixed(55.0),
+            acoustic: None,
+            last_duty: 0.0,
+        };
+
+        let mut cl = ControlLoop::from_parts_for_test_with_devices(
+            base_v1_config(),
+            hubs,
+            devices_by_hub,
+            vec![group],
+            HashMap::new(),
+        );
+
+        // Act
+        let _ = cl.tick();
+
+        // Assert: hub received both channels with duty 55 (rounded).
+        let sent = mock
+            .last_speeds()
+            .expect("hub should have received one set_speeds call");
+        let mut sorted = sent.clone();
+        sorted.sort_by_key(|(ch, _)| *ch);
+        assert_eq!(
+            sorted,
+            vec![(1u8, 55u8), (2u8, 55u8)],
+            "V2 group should resolve both device_ids to ch 1 & 2"
+        );
+    }
+
+    /// When device_ids is empty, the legacy channel path runs — the
+    /// hub receives the FanGroup.channels as-is. Regression guard that
+    /// the V1 fallback wasn't broken by the V2 branch.
+    #[test]
+    fn empty_device_ids_falls_through_to_channel_path() {
+        let hub_serial = "HUB_A".to_string();
+        let mock: Arc<RecordingHub> = Arc::new(RecordingHub::new());
+        let mut hubs: HashMap<String, (Arc<dyn IcueLinkTransport>, Vec<u8>)> = HashMap::new();
+        hubs.insert(
+            hub_serial.clone(),
+            (mock.clone() as Arc<dyn IcueLinkTransport>, Vec::new()),
+        );
+
+        // No devices registered in the registry — the channel path must
+        // work regardless of what the registry knows (V1 doesn't use it).
+        let devices_by_hub: HashMap<String, Vec<corsair_hid::LinkDevice>> = HashMap::new();
+
+        // V1-shaped FanGroup: channels populated, device_ids empty.
+        let group = FanGroup {
+            name: "v1_group".to_string(),
+            channels: vec![7, 8],
+            hub_serial: hub_serial.clone(),
+            device_ids: Vec::new(),
+            controller: FanController::Fixed(40.0),
+            acoustic: None,
+            last_duty: 0.0,
+        };
+
+        let mut cl = ControlLoop::from_parts_for_test_with_devices(
+            base_v1_config(),
+            hubs,
+            devices_by_hub,
+            vec![group],
+            HashMap::new(),
+        );
+
+        let _ = cl.tick();
+
+        // Fan duty 40 is below MIN_FAN_DUTY (20) threshold? No, 40 > 20.
+        let sent = mock
+            .last_speeds()
+            .expect("hub should have received set_speeds");
+        let mut sorted = sent.clone();
+        sorted.sort_by_key(|(ch, _)| *ch);
+        assert_eq!(
+            sorted,
+            vec![(7u8, 40u8), (8u8, 40u8)],
+            "V1 group should keep its literal channels"
+        );
     }
 }

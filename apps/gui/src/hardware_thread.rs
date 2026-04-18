@@ -401,6 +401,11 @@ fn run_loop(
                     .map(|(f, leds)| RgbFrameRef {
                         hub_serial: &f.hub_serial,
                         channel: f.channel,
+                        // device_id passes through from the renderer;
+                        // non-empty when the zone was populated from a V2
+                        // config, empty for V1. send_rgb_frames handles
+                        // both cases.
+                        device_id: &f.device_id,
                         leds,
                     })
                     .collect();
