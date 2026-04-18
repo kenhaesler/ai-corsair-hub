@@ -1020,16 +1020,40 @@ impl ControlLoop {
             let mut device_leds: Vec<(u8, Vec<[u8; 3]>)> = Vec::new();
 
             for dev in &hub_conn.info.devices {
-                // Use hub firmware's LED count (from 0x1d table) if available,
-                // otherwise fall back to device type default.
-                // The 0x1d table is authoritative for LINK Adapters with connected strips.
-                let actual_count = hub_conn
-                    .info
-                    .led_counts
-                    .get(&dev.channel)
-                    .copied()
+                // LED count precedence (Step 6 — device_id-first):
+                //   1. V2 per-device override: `led_count_override_by_id`
+                //      keyed on the device_id (stable across topology
+                //      shifts — a fan moved to a different port keeps its
+                //      override).
+                //   2. V1 (hub, channel) override: `led_count_override`
+                //      for the current hub/channel pair.
+                //   3. Hub firmware 0x1d table (`info.led_counts`) —
+                //      authoritative for LINK Adapters with connected
+                //      strips.
+                //   4. Device-type default (e.g. QxFan = 34).
+                //
+                // In the steady state (1) and (2) are already folded
+                // into `info.led_counts` by `build()` / `update_config`,
+                // so this chain mostly documents intent. The explicit
+                // check still fires correctly in two real cases:
+                //   - a config update between an RGB tick and the
+                //     control-loop `update_config` call that folds the
+                //     new overrides into led_counts;
+                //   - test fixtures that don't seed `led_counts` but
+                //     want the override to take effect.
+                let actual_count = self
+                    .config
+                    .led_count_override_by_id(&dev.device_id)
+                    .or_else(|| self.config.led_count_override(serial.as_str(), dev.channel))
+                    .or_else(|| {
+                        hub_conn
+                            .info
+                            .led_counts
+                            .get(&dev.channel)
+                            .copied()
+                            .filter(|&c| c > 0)
+                    })
                     .map(|c| c as usize)
-                    .filter(|&c| c > 0)
                     .unwrap_or(dev.device_type.led_count() as usize);
 
                 if actual_count == 0 {
@@ -2394,6 +2418,80 @@ mod tests {
             mock_a.rgb_call_count(),
             2,
             "hub should have received two set_rgb calls overall"
+        );
+    }
+
+    // --- Step 6: LED-count override by device_id ---
+
+    /// V2 per-device-id override takes precedence over V1 (hub, channel)
+    /// override in send_rgb_frames' LED-count resolution. Both overrides
+    /// refer to the same physical device (same hub, same channel). The V2
+    /// override value must win: the flat buffer to the hub should size the
+    /// device at the V2 value.
+    #[test]
+    fn v2_led_count_override_takes_precedence_over_v1() {
+        let hub_serial = "HUB_A".to_string();
+        let mock: Arc<RecordingHub> = Arc::new(RecordingHub::new());
+        let mut hubs: HashMap<String, (Arc<dyn IcueLinkTransport>, Vec<u8>)> = HashMap::new();
+        hubs.insert(
+            hub_serial.clone(),
+            (mock.clone() as Arc<dyn IcueLinkTransport>, Vec::new()),
+        );
+
+        // A QxFan-type device with a 26-hex device_id on ch 1. The type
+        // default is 34 LEDs, but the user has overridden:
+        //   - V1 path: (HUB_A, 1) → 21 (stale/legacy)
+        //   - V2 path: device_id "ID_A1" → 30 (canonical)
+        // V2 must win.
+        let mut devices_by_hub: HashMap<String, Vec<corsair_hid::LinkDevice>> = HashMap::new();
+        devices_by_hub.insert(hub_serial.clone(), vec![mk_link_device(1, "ID_A1")]);
+
+        // Config with BOTH overrides pointing at the same physical device.
+        let config = AppConfig {
+            schema_version: corsair_common::config::SCHEMA_VERSION_V2,
+            general: GeneralConfig {
+                poll_interval_ms: 1000,
+                log_level: "info".to_string(),
+                lhm_exe_path: None,
+            },
+            fan_groups: Vec::new(),
+            rgb: Default::default(),
+            device_overrides: vec![DeviceOverride {
+                hub_serial: hub_serial.clone(),
+                channel: 1,
+                led_count: 21, // V1 — should NOT be used
+            }],
+            devices: vec![corsair_common::config::v2::DeviceEntry {
+                device_id: "ID_A1".to_string(),
+                name: None,
+                led_count: Some(30), // V2 — must win
+            }],
+        };
+
+        let mut cl = ControlLoop::from_parts_for_test_with_devices(
+            config,
+            hubs,
+            devices_by_hub,
+            Vec::new(),
+            HashMap::new(),
+        );
+
+        // Supply a long buffer (34 QxFan defaults); the flat buffer
+        // should be truncated to 30 LEDs per the V2 override.
+        let long_leds = vec![[7u8, 7, 7]; 34];
+        let frames: Vec<(String, &[[u8; 3]])> =
+            vec![("ID_A1".to_string(), long_leds.as_slice())];
+
+        let sent = cl.send_rgb_frames(&frames);
+        assert_eq!(sent, 1);
+
+        let call = mock
+            .last_rgb()
+            .expect("HUB_A should have received set_rgb");
+        assert_eq!(
+            call,
+            vec![(1u8, 30usize)],
+            "V2 per-device override (30) must win over V1 (21) and type default (34)"
         );
     }
 }
