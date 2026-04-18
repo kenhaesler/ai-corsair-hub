@@ -34,27 +34,36 @@ jobs:
         working-directory: apps/gui/ui
         run: npm ci
 
-      - name: Write signing key to file
+      - name: Export signing key to GITHUB_ENV
         shell: bash
+        # Why the dance: passing multiline secrets directly in a step's `env:` block
+        # can get newlines mangled on Windows runners (root cause of commit eb04778).
+        # Writing to a file first normalizes the encoding, then we re-export through
+        # $GITHUB_ENV using heredoc syntax so downstream steps see a clean value.
+        # The Tauri bundler reads TAURI_SIGNING_PRIVATE_KEY (not *_PATH) — see
+        # "A public key has been found, but no private key" error otherwise.
         run: |
           set -euo pipefail
-          if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+          if [[ -z "${PRIVATE_KEY:-}" ]]; then
             echo "::error::TAURI_SIGNING_PRIVATE_KEY secret is empty or unset"
             exit 1
           fi
           mkdir -p apps/gui/.tauri
-          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > apps/gui/.tauri/signing-key.txt
-          # Sanity: file must be non-empty, otherwise tauri-action silently skips
-          # latest.json generation and the updater endpoint returns 404 forever.
+          printf '%s' "$PRIVATE_KEY" > apps/gui/.tauri/signing-key.txt
           test -s apps/gui/.tauri/signing-key.txt
+          {
+            echo "TAURI_SIGNING_PRIVATE_KEY<<__TAURI_KEY_EOF__"
+            cat apps/gui/.tauri/signing-key.txt
+            echo
+            echo "__TAURI_KEY_EOF__"
+          } >> "$GITHUB_ENV"
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
       - name: Build and release
         uses: tauri-apps/tauri-action@v0.5.22
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY_PATH: ${{ github.workspace }}/apps/gui/.tauri/signing-key.txt
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
