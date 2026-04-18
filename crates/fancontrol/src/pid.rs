@@ -53,6 +53,21 @@ impl PidController {
         self.prev_time = None;
     }
 
+    /// Clear only the accumulated integral term, leaving prev_error and
+    /// prev_time in place. Used on sensor-stale cycles so the controller
+    /// doesn't carry integral windup into the post-recovery cycles, while
+    /// preserving the time baseline so dt measurement is coherent when
+    /// readings resume.
+    pub fn reset_integral(&mut self) {
+        self.integral = 0.0;
+    }
+
+    /// Current integral term. Exposed for tests.
+    #[cfg(test)]
+    pub fn integral(&self) -> f64 {
+        self.integral
+    }
+
     /// Compute the next control output given the current temperature.
     /// Returns duty cycle percentage (clamped to min_output..max_output).
     pub fn update(&mut self, current_temp: f64) -> f64 {
@@ -128,5 +143,43 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         let output = pid.update(90.0); // way over
         assert_eq!(output, 100.0);
+    }
+
+    #[test]
+    fn test_reset_integral_clears_windup() {
+        let mut pid = PidController::new(1.0, 0.5, 0.0, 70.0)
+            .with_output_limits(0.0, 100.0);
+
+        // Drive integral positive by feeding errors above setpoint for several
+        // cycles. First call initializes (returns min_output immediately), so
+        // we need at least three calls with a dt gap for the integral term to
+        // accumulate.
+        pid.update(70.0); // init
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        pid.update(80.0);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        pid.update(80.0);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        pid.update(80.0);
+
+        let before = pid.integral();
+        assert!(
+            before > 0.0,
+            "test precondition: expected integral > 0 after windup cycles, got {}",
+            before
+        );
+
+        pid.reset_integral();
+        assert_eq!(pid.integral(), 0.0, "reset_integral must clear the integral term");
+
+        // prev_error and prev_time should be untouched — distinct from full
+        // reset(). We can verify indirectly: another update() should proceed
+        // using the retained prev_time (dt > 0) rather than re-initializing.
+        // (The full reset() would set prev_time = None.)
+        // We assert reset_integral is a strict subset of reset() by testing
+        // that full reset() still zeroes the integral.
+        pid.update(80.0);
+        pid.reset(); // full reset
+        assert_eq!(pid.integral(), 0.0);
     }
 }

@@ -9,7 +9,7 @@ use tracing::{error, info, warn};
 
 use corsair_common::config::{AppConfig, FanGroupConfig, FanMode, TempSourceConfig};
 use corsair_common::CorsairDevice;
-use corsair_hid::{DeviceScanner, FanSpeed, HubInfo, IcueLinkHub, LinkDeviceType};
+use corsair_hid::{DeviceScanner, FanSpeed, HubInfo, IcueLinkHub, IcueLinkTransport, LinkDeviceType};
 use corsair_sensors::cpu::CpuSensor;
 use corsair_sensors::gpu::GpuSensor;
 use corsair_sensors::psu::{PsuReading, PsuSensor};
@@ -23,9 +23,36 @@ const FAILSAFE_DUTY: f64 = 70.0;
 const EMERGENCY_DUTY: f64 = 100.0;
 const CRITICAL_CPU_TEMP: f64 = 95.0;
 const CRITICAL_GPU_TEMP: f64 = 90.0;
-const SENSOR_STALE_TIMEOUT: Duration = Duration::from_secs(10);
+/// B3: sensor reading is considered stale after this duration of no success.
+/// Tightened from 10s to 5s so the failsafe path engages sooner when LHM or
+/// NVML stop producing readings (prevents the controller from running on
+/// arithmetic on an old frozen value for the full 10s window).
+const SENSOR_STALE_TIMEOUT: Duration = Duration::from_secs(5);
 const MIN_FAN_DUTY: f64 = 20.0;
 const MIN_PUMP_DUTY: f64 = 50.0;
+/// B5: bounded wall-clock timeout for `enter_hardware_mode()` during shutdown.
+/// If a hub is wedged (unplugged mid-operation, firmware hang) we abandon the
+/// call rather than blocking the UI thread forever. 5s is well above the
+/// normal ~50ms success path but below any user-visible "app won't quit" point.
+const SHUTDOWN_HARDWARE_MODE_TIMEOUT: Duration = Duration::from_secs(5);
+/// B2: exponential backoff base / cap for proactive hub recovery. First retry
+/// after a healthy→failed transition: ~10s; doubles each attempt up to 160s,
+/// then clamped to RECOVERY_BACKOFF_MAX.
+const RECOVERY_BACKOFF_BASE: Duration = Duration::from_secs(10);
+const RECOVERY_BACKOFF_MAX: Duration = Duration::from_secs(120);
+
+/// B2: compute the minimum cooldown between recovery attempts as a function
+/// of how many attempts have already been made. Pure function, exposed for
+/// testing.
+fn recovery_backoff(attempts: u32) -> Duration {
+    // Cap the exponent at 4 (2^4 = 16x) so we don't overflow for pathological
+    // hub states. 10s * 16 = 160s, then clamped to RECOVERY_BACKOFF_MAX (120s).
+    let exp = attempts.min(4);
+    let scaled = RECOVERY_BACKOFF_BASE
+        .checked_mul(1u32 << exp)
+        .unwrap_or(RECOVERY_BACKOFF_MAX);
+    std::cmp::min(scaled, RECOVERY_BACKOFF_MAX)
+}
 
 /// Result of one control cycle — sent to the frontend as a SystemSnapshot.
 pub struct CycleResult {
@@ -74,12 +101,19 @@ struct SensorState {
 }
 
 struct HubConnection {
-    hub: IcueLinkHub,
+    /// Concrete transport behind a trait object so tests can inject a mock hub
+    /// without a real USB device. `Arc` makes it cheap to clone into a worker
+    /// thread (used by shutdown_hardware's bounded-timeout path).
+    hub: Arc<dyn IcueLinkTransport>,
     #[allow(dead_code)]
     serial: String,
     healthy: bool,
     consecutive_failures: u32,
     last_recovery_attempt: Instant,
+    /// B2: number of recovery attempts made for this hub since it last went
+    /// healthy. Drives the exponential backoff in `recovery_backoff()`.
+    /// Reset to 0 when `set_speeds` succeeds.
+    recovery_attempts: u32,
     pump_channels: Vec<u8>,
     info: HubInfo,
     color_logged: bool,
@@ -285,11 +319,12 @@ impl ControlLoop {
             hubs.insert(
                 serial.clone(),
                 HubConnection {
-                    hub,
+                    hub: Arc::new(hub),
                     serial: serial.clone(),
                     healthy: true,
                     consecutive_failures: 0,
                     last_recovery_attempt: Instant::now(),
+                    recovery_attempts: 0,
                     pump_channels,
                     info: hub_info,
                     color_logged: false,
@@ -345,6 +380,22 @@ impl ControlLoop {
 
         // 3. Check sensor staleness
         let any_stale = self.sensor_state.values().any(|s| s.is_stale);
+
+        // B3: reset PID integral on any-stale cycle so the controller doesn't
+        // carry accumulated windup into the post-recovery cycles. Without this,
+        // a long stale period followed by a hot CPU temp on sensor recovery
+        // causes a duty spike: the integral accumulated while the sensor was
+        // frozen drives output high, then the proportional term piles on too.
+        // Resetting is safe because we're entering the failsafe duty path this
+        // tick anyway — the PID output isn't used while stale, and on the
+        // recovery tick we want to start from clean state.
+        if any_stale {
+            for group in &mut self.groups {
+                if let FanController::Pid { pid, .. } = &mut group.controller {
+                    pid.reset_integral();
+                }
+            }
+        }
 
         // 4. Compute per-hub command batches
         let mut hub_commands: HashMap<String, Vec<(u8, u8)>> = HashMap::new();
@@ -407,8 +458,12 @@ impl ControlLoop {
                         }
                         hub_conn.healthy = true;
                         hub_conn.consecutive_failures = 0;
+                        // B2: recovery complete — reset backoff so the next
+                        // failure gets immediate attention, not delayed.
+                        hub_conn.recovery_attempts = 0;
                     }
                     Err(e) => {
+                        let was_healthy = hub_conn.healthy;
                         hub_conn.consecutive_failures += 1;
                         hub_conn.healthy = false;
                         error!(
@@ -417,6 +472,17 @@ impl ControlLoop {
                             error = %e,
                             "Failed to set fan speeds"
                         );
+
+                        // B2: on the healthy→failed transition, reset the
+                        // recovery_attempts counter so the next
+                        // `hubs_needing_recovery()` call schedules an immediate
+                        // first attempt (no backoff gate at attempts == 0).
+                        // Subsequent attempts go through the exponential
+                        // backoff curve; `recovery_attempts` is bumped by
+                        // `mark_recovery_attempted()` as attempts are spent.
+                        if was_healthy {
+                            hub_conn.recovery_attempts = 0;
+                        }
                     }
                 }
             }
@@ -525,16 +591,27 @@ impl ControlLoop {
         Ok(())
     }
 
-    /// Return serials of hubs with 5+ consecutive failures and 10s+ since last recovery attempt.
+    /// Return serials of hubs that should be recovery-attempted now.
+    ///
+    /// B2: a hub qualifies when it is currently unhealthy AND either:
+    ///   - No recovery has been attempted yet in this failure episode
+    ///     (`recovery_attempts == 0`): schedule immediately. This replaces
+    ///     the prior "wait for 5 consecutive failures" heuristic — the first
+    ///     failure is now the trigger, which keeps fans responsive to a
+    ///     plugged-back-in hub within one control cycle instead of five.
+    ///   - At least one attempt has been made AND enough time has elapsed
+    ///     per the exponential backoff curve (10s, 20s, 40s, 80s, 120s cap).
     pub fn hubs_needing_recovery(&self) -> Vec<String> {
-        const FAILURE_THRESHOLD: u32 = 5;
-        const RECOVERY_COOLDOWN: Duration = Duration::from_secs(10);
-
         self.hubs
             .iter()
             .filter(|(_, conn)| {
-                conn.consecutive_failures >= FAILURE_THRESHOLD
-                    && conn.last_recovery_attempt.elapsed() >= RECOVERY_COOLDOWN
+                if conn.healthy {
+                    return false;
+                }
+                if conn.recovery_attempts == 0 {
+                    return true; // B2: immediate on healthy→failed
+                }
+                conn.last_recovery_attempt.elapsed() >= recovery_backoff(conn.recovery_attempts)
             })
             .map(|(serial, _)| serial.clone())
             .collect()
@@ -550,11 +627,12 @@ impl ControlLoop {
                 .map(|d| d.channel)
                 .collect();
 
-            conn.hub = new_hub;
+            conn.hub = Arc::new(new_hub);
             conn.info = new_info;
             conn.healthy = true;
             conn.consecutive_failures = 0;
             conn.last_recovery_attempt = Instant::now();
+            conn.recovery_attempts = 0;
             conn.pump_channels = pump_channels;
             conn.color_logged = false;
 
@@ -562,19 +640,90 @@ impl ControlLoop {
         }
     }
 
-    /// Mark that a recovery attempt was made (even if it failed) to enforce cooldown.
+    /// Mark that a recovery attempt was made (even if it failed) to enforce
+    /// the exponential backoff between subsequent attempts.
     pub fn mark_recovery_attempted(&mut self, serial: &str) {
         if let Some(conn) = self.hubs.get_mut(serial) {
             conn.last_recovery_attempt = Instant::now();
+            // Saturating: u32::MAX attempts is never reached in practice but
+            // the saturation keeps the backoff formula total.
+            conn.recovery_attempts = conn.recovery_attempts.saturating_add(1);
         }
     }
 
-    /// Restore all hubs to hardware control mode.
+    /// Restore all hubs to hardware (firmware) control mode.
+    ///
+    /// B5: each `enter_hardware_mode()` call is wrapped in a bounded-timeout
+    /// worker thread so a wedged hub (unplugged mid-operation, firmware hang,
+    /// driver stuck) can't block shutdown indefinitely. On timeout we log,
+    /// abandon the worker thread (it will finish when the I/O eventually
+    /// returns, or when the process exits), and move on to the next hub.
+    ///
+    /// The hub handle is cloned into the worker thread — cheap because
+    /// `IcueLinkHub` is `Arc<Mutex<_>>`-internal after the prep refactor.
     pub fn shutdown_hardware(&mut self) {
         info!("Restoring hardware mode on all hubs");
         for (serial, hub_conn) in &mut self.hubs {
-            if let Err(e) = hub_conn.hub.enter_hardware_mode() {
-                warn!(serial = serial.as_str(), error = %e, "Failed to restore hardware mode");
+            let hub = Arc::clone(&hub_conn.hub);
+            let serial_owned = serial.clone();
+            let (tx, rx) = std::sync::mpsc::channel::<Result<()>>();
+
+            let handle = std::thread::Builder::new()
+                .name(format!("shutdown-hub-{}", serial_owned))
+                .spawn(move || {
+                    // Channel send may fail if the receiver already timed out
+                    // and dropped the rx — we tolerate that (the main thread
+                    // has already moved on).
+                    let _ = tx.send(hub.enter_hardware_mode());
+                });
+
+            let handle = match handle {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!(
+                        serial = serial_owned.as_str(),
+                        error = %e,
+                        "Failed to spawn shutdown worker thread — skipping hub"
+                    );
+                    continue;
+                }
+            };
+
+            match rx.recv_timeout(SHUTDOWN_HARDWARE_MODE_TIMEOUT) {
+                Ok(Ok(())) => {
+                    info!(serial = serial_owned.as_str(), "hardware mode restored");
+                    // Wait for the worker to finish so we don't leak a handle
+                    // in the happy path. recv_timeout already succeeded so
+                    // the worker is moments from exiting.
+                    let _ = handle.join();
+                }
+                Ok(Err(e)) => {
+                    warn!(
+                        serial = serial_owned.as_str(),
+                        error = %e,
+                        "enter_hardware_mode failed (hub may keep last software-mode duty)"
+                    );
+                    let _ = handle.join();
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    warn!(
+                        serial = serial_owned.as_str(),
+                        timeout_secs = SHUTDOWN_HARDWARE_MODE_TIMEOUT.as_secs(),
+                        "enter_hardware_mode timed out — abandoning worker thread"
+                    );
+                    // Deliberately do NOT join: the worker is blocked on HID
+                    // I/O and joining would reinstate the hang we just
+                    // escaped from. The thread will finish when the I/O
+                    // eventually returns, or when the process exits.
+                    std::mem::forget(handle);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    warn!(
+                        serial = serial_owned.as_str(),
+                        "Shutdown worker thread panicked before sending result"
+                    );
+                    let _ = handle.join();
+                }
             }
         }
     }
@@ -1080,10 +1229,208 @@ fn validate_temp_source(group_name: &str, source: &TempSourceConfig) -> Result<(
     Ok(())
 }
 
+// --- Test-only helpers ---
+//
+// These live outside the `tests` module because they are referenced from
+// `impl ControlLoop` `#[cfg(test)]` methods that need `pub(crate)` visibility
+// for integration-style tests. Kept gated on `cfg(test)` so they have zero
+// impact on release builds.
+
+#[cfg(test)]
+impl ControlLoop {
+    /// Assemble a ControlLoop from pre-built parts for integration tests.
+    ///
+    /// Bypasses USB discovery, sensor initialization, and hub enumeration so
+    /// tests can exercise the control loop against mock transports without
+    /// real hardware. Real code path is `build()`.
+    fn from_parts_for_test(
+        config: AppConfig,
+        hubs: HashMap<String, (Arc<dyn IcueLinkTransport>, Vec<u8>)>,
+        groups: Vec<FanGroup>,
+        sensor_state: HashMap<String, SensorState>,
+    ) -> Self {
+        let hub_conns: HashMap<String, HubConnection> = hubs
+            .into_iter()
+            .map(|(serial, (hub, pump_channels))| {
+                (
+                    serial.clone(),
+                    HubConnection {
+                        hub,
+                        serial,
+                        healthy: true,
+                        consecutive_failures: 0,
+                        last_recovery_attempt: Instant::now(),
+                        recovery_attempts: 0,
+                        pump_channels,
+                        info: HubInfo {
+                            firmware: corsair_hid::FirmwareVersion {
+                                major: 0,
+                                minor: 0,
+                                patch: 0,
+                            },
+                            devices: Vec::new(),
+                            led_counts: std::collections::HashMap::new(),
+                        },
+                        color_logged: false,
+                    },
+                )
+            })
+            .collect();
+
+        Self {
+            config,
+            sensors: HashMap::new(),
+            sensor_state,
+            hubs: hub_conns,
+            groups,
+            shutdown: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use corsair_common::config::*;
+    use std::sync::atomic::AtomicU32;
+
+    // --- Mock transport helpers ---
+
+    /// Mock IcueLinkHub transport with configurable behavior. Tracks call
+    /// counts so tests can assert recovery scheduling fires.
+    struct MockHub {
+        /// When true, set_speeds returns Err. Default false (healthy).
+        fail_set_speeds: std::sync::atomic::AtomicBool,
+        set_speeds_calls: AtomicU32,
+        /// If > 0, enter_hardware_mode sleeps for this many ms before
+        /// returning Ok. Used to exercise the shutdown timeout path.
+        enter_hardware_mode_delay_ms: u64,
+        enter_hardware_mode_calls: AtomicU32,
+    }
+
+    impl MockHub {
+        fn new() -> Self {
+            Self {
+                fail_set_speeds: std::sync::atomic::AtomicBool::new(false),
+                set_speeds_calls: AtomicU32::new(0),
+                enter_hardware_mode_delay_ms: 0,
+                enter_hardware_mode_calls: AtomicU32::new(0),
+            }
+        }
+
+        fn with_slow_shutdown(ms: u64) -> Self {
+            let mut h = Self::new();
+            h.enter_hardware_mode_delay_ms = ms;
+            h
+        }
+
+        fn set_fail(&self, fail: bool) {
+            self.fail_set_speeds
+                .store(fail, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl IcueLinkTransport for MockHub {
+        fn set_speeds(&self, _targets: &[(u8, u8)]) -> Result<()> {
+            self.set_speeds_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail_set_speeds.load(std::sync::atomic::Ordering::SeqCst) {
+                bail!("mock set_speeds failure");
+            }
+            Ok(())
+        }
+        fn get_speeds(&self) -> Result<Vec<FanSpeed>> {
+            Ok(Vec::new())
+        }
+        fn set_rgb(&self, _channel_leds: &[(u8, &[[u8; 3]])]) -> Result<()> {
+            Ok(())
+        }
+        fn enter_hardware_mode(&self) -> Result<()> {
+            self.enter_hardware_mode_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.enter_hardware_mode_delay_ms > 0 {
+                std::thread::sleep(Duration::from_millis(
+                    self.enter_hardware_mode_delay_ms,
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    /// Build a minimal ControlLoop with one fan group pointing at a single
+    /// mock hub. The hub has one pump channel (1) and one fan channel (2).
+    fn loop_with_mock_hub(
+        mock: Arc<MockHub>,
+        mode: FanMode,
+    ) -> (ControlLoop, Arc<MockHub>) {
+        let serial = "TESTHUB0".to_string();
+        let mut hubs: HashMap<String, (Arc<dyn IcueLinkTransport>, Vec<u8>)> =
+            HashMap::new();
+        hubs.insert(serial.clone(), (mock.clone() as Arc<dyn IcueLinkTransport>, vec![1]));
+
+        let (controller, acoustic) = match mode {
+            FanMode::Fixed { duty_percent } => (FanController::Fixed(duty_percent), None),
+            FanMode::Curve {
+                points,
+                hysteresis,
+                ramp_rate,
+                temp_source,
+            } => {
+                let curve = FanCurve::new(points).expect("test curve");
+                let ramp_down = ramp_rate * 0.4;
+                let filter = AcousticFilter::new(ramp_rate, ramp_down, hysteresis);
+                (
+                    FanController::Curve {
+                        curve,
+                        source: temp_source,
+                    },
+                    Some(filter),
+                )
+            }
+            FanMode::Pid {
+                target_temp,
+                kp,
+                ki,
+                kd,
+                min_duty,
+                max_duty,
+                temp_source,
+            } => {
+                let pid = PidController::new(kp, ki, kd, target_temp)
+                    .with_output_limits(min_duty, max_duty);
+                let filter = AcousticFilter::new(10.0, 3.0, 2.0);
+                (
+                    FanController::Pid {
+                        pid,
+                        source: temp_source,
+                    },
+                    Some(filter),
+                )
+            }
+        };
+
+        let group = FanGroup {
+            name: "test".to_string(),
+            channels: vec![1, 2],
+            hub_serial: serial.clone(),
+            controller,
+            acoustic,
+            last_duty: 0.0,
+        };
+
+        let config = AppConfig {
+            general: GeneralConfig {
+                poll_interval_ms: 1000,
+                log_level: "info".to_string(),
+                lhm_exe_path: None,
+            },
+            fan_groups: Vec::new(), // groups supplied separately
+            rgb: Default::default(),
+        };
+
+        let cl = ControlLoop::from_parts_for_test(config, hubs, vec![group], HashMap::new());
+        (cl, mock)
+    }
 
     fn valid_config() -> AppConfig {
         AppConfig {
@@ -1180,5 +1527,159 @@ mod tests {
             },
         };
         assert!(validate_config(&config).is_err());
+    }
+
+    // --- B2: recovery_backoff pure-function curve ---
+
+    #[test]
+    fn test_recovery_backoff_curve() {
+        // attempt 0 -> 10s
+        assert_eq!(recovery_backoff(0), Duration::from_secs(10));
+        // attempt 1 -> 20s
+        assert_eq!(recovery_backoff(1), Duration::from_secs(20));
+        // attempt 2 -> 40s
+        assert_eq!(recovery_backoff(2), Duration::from_secs(40));
+        // attempt 3 -> 80s
+        assert_eq!(recovery_backoff(3), Duration::from_secs(80));
+        // attempt 4 -> 160s clamped to 120s (RECOVERY_BACKOFF_MAX)
+        assert_eq!(recovery_backoff(4), Duration::from_secs(120));
+        // attempt 5+ -> clamped
+        assert_eq!(recovery_backoff(5), Duration::from_secs(120));
+        assert_eq!(recovery_backoff(100), Duration::from_secs(120));
+        // No overflow panic at u32::MAX
+        assert_eq!(recovery_backoff(u32::MAX), Duration::from_secs(120));
+    }
+
+    // --- B2: healthy→failed transition schedules immediate recovery ---
+
+    #[test]
+    fn test_healthy_to_failed_transition_schedules_recovery() {
+        let mock = Arc::new(MockHub::new());
+        let (mut cl, mock) = loop_with_mock_hub(
+            mock,
+            FanMode::Fixed { duty_percent: 50.0 },
+        );
+
+        // Initial state: hub is healthy, no recovery scheduled.
+        assert!(cl.hubs_needing_recovery().is_empty());
+
+        // First tick — set_speeds succeeds (healthy), no recovery.
+        let _ = cl.tick();
+        assert!(cl.hubs_needing_recovery().is_empty());
+        assert_eq!(mock.set_speeds_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Simulate hub failure.
+        mock.set_fail(true);
+        let _ = cl.tick();
+
+        // B2: first failure after healthy schedules IMMEDIATE recovery, not
+        // after 5 consecutive failures. Prior behavior required 5 failures +
+        // 10s cooldown; this test pins the new contract.
+        let needing = cl.hubs_needing_recovery();
+        assert_eq!(needing.len(), 1, "expected one hub scheduled for recovery");
+        assert_eq!(needing[0], "TESTHUB0");
+
+        // Mark attempted. recovery_attempts goes to 1 → next check must wait
+        // for recovery_backoff(1) = 20s before returning the serial again.
+        cl.mark_recovery_attempted("TESTHUB0");
+        assert!(
+            cl.hubs_needing_recovery().is_empty(),
+            "after one failed attempt, backoff should gate the next"
+        );
+    }
+
+    // --- B5: shutdown timeout fires without hanging ---
+
+    #[test]
+    fn test_shutdown_hardware_times_out() {
+        // Mock hub that blocks in enter_hardware_mode for 10s (longer than
+        // the 5s SHUTDOWN_HARDWARE_MODE_TIMEOUT). The test asserts
+        // shutdown_hardware returns within ~6s — if the timeout path were
+        // broken it would hang for the full 10s.
+        let mock = Arc::new(MockHub::with_slow_shutdown(10_000));
+        let (mut cl, _mock) = loop_with_mock_hub(
+            mock,
+            FanMode::Fixed { duty_percent: 50.0 },
+        );
+
+        let start = Instant::now();
+        cl.shutdown_hardware();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(7),
+            "shutdown_hardware took {:?}, expected <7s (timeout is 5s)",
+            elapsed
+        );
+        assert!(
+            elapsed >= Duration::from_secs(5),
+            "shutdown_hardware took {:?}, expected >=5s (timeout must actually wait)",
+            elapsed
+        );
+    }
+
+    // --- B3: sensor-stale cycle resets PID integral across groups ---
+
+    #[test]
+    fn test_sensor_stale_resets_pid_integral() {
+        let mock = Arc::new(MockHub::new());
+        let pid_mode = FanMode::Pid {
+            target_temp: 70.0,
+            kp: 2.0,
+            ki: 0.5,
+            kd: 0.0,
+            min_duty: 20.0,
+            max_duty: 100.0,
+            temp_source: TempSourceConfig {
+                sensors: vec!["cpu".to_string()],
+                weights: vec![1.0],
+            },
+        };
+
+        let (mut cl, _mock) = loop_with_mock_hub(mock, pid_mode);
+
+        // Inject a stale-CPU sensor state so `any_stale` is true next tick.
+        cl.sensor_state.insert(
+            "cpu".to_string(),
+            SensorState {
+                last_value: 80.0,
+                last_success: Instant::now() - Duration::from_secs(30),
+                is_stale: true,
+            },
+        );
+
+        // Pre-load integral with non-zero value so the reset has something
+        // to clear.
+        if let FanController::Pid { pid, .. } = &mut cl.groups[0].controller {
+            // Drive integral up: feed error above setpoint for several cycles.
+            // The first update() initializes; subsequent ones accumulate.
+            pid.update(70.0);
+            std::thread::sleep(Duration::from_millis(20));
+            pid.update(90.0);
+            std::thread::sleep(Duration::from_millis(20));
+            pid.update(90.0);
+            std::thread::sleep(Duration::from_millis(20));
+            pid.update(90.0);
+            assert!(
+                pid.integral() > 0.0,
+                "test setup: expected non-zero integral before tick, got {}",
+                pid.integral()
+            );
+        } else {
+            panic!("test setup: group should be PID");
+        }
+
+        // Tick — the any_stale path must reset the integral.
+        let _ = cl.tick();
+
+        if let FanController::Pid { pid, .. } = &cl.groups[0].controller {
+            assert_eq!(
+                pid.integral(),
+                0.0,
+                "integral should have been reset on any_stale tick"
+            );
+        } else {
+            unreachable!();
+        }
     }
 }
