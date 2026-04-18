@@ -1458,6 +1458,7 @@ mod tests {
         };
 
         let config = AppConfig {
+            schema_version: corsair_common::config::SCHEMA_VERSION_V1,
             general: GeneralConfig {
                 poll_interval_ms: 1000,
                 log_level: "info".to_string(),
@@ -1466,6 +1467,7 @@ mod tests {
             fan_groups: Vec::new(), // groups supplied separately
             rgb: Default::default(),
             device_overrides: Vec::new(),
+            devices: Vec::new(),
         };
 
         let cl = ControlLoop::from_parts_for_test(config, hubs, vec![group], HashMap::new());
@@ -1474,6 +1476,7 @@ mod tests {
 
     fn valid_config() -> AppConfig {
         AppConfig {
+            schema_version: corsair_common::config::SCHEMA_VERSION_V1,
             general: GeneralConfig {
                 poll_interval_ms: 1000,
                 log_level: "info".to_string(),
@@ -1483,10 +1486,12 @@ mod tests {
                 name: "test".to_string(),
                 channels: vec![1, 2],
                 hub_serial: Some("ABCD1234".to_string()),
+                device_ids: Vec::new(),
                 mode: FanMode::Fixed { duty_percent: 50.0 },
             }],
             rgb: Default::default(),
             device_overrides: Vec::new(),
+            devices: Vec::new(),
         }
     }
 
