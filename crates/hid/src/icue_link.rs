@@ -727,7 +727,7 @@ impl IcueLinkHub {
         self.enter_software_mode()?;
 
         // Read LED count table before device enumeration (matches OpenLinkHub init order)
-        let led_counts = match self.read_led_counts() {
+        let raw_counts = match self.read_led_counts() {
             Ok(counts) => counts,
             Err(e) => {
                 warn!(
@@ -745,6 +745,43 @@ impl IcueLinkHub {
             count = devices.len(),
             "Enumerated devices"
         );
+
+        // Cross-validate 0x1d LED counts against enumerated devices. Some
+        // firmware revisions return a mostly-empty table with one or two
+        // outlier values (e.g. 80 LEDs for a LinkAdapter whose default is
+        // 21, and 0 for every real fan). Blindly trusting that response
+        // causes chain desync: the buffer for the outlier channel overshoots
+        // and the hub loses sync for downstream channels, leaving whole fan
+        // groups dark.
+        //
+        // Heuristic: the 0x1d response is only authoritative if it has a
+        // non-zero entry for EVERY enumerated device. Anything less means
+        // the firmware's table is incomplete, so fall back to device-type
+        // defaults (which the hub's chain walker does correctly even without
+        // an explicit LED-count table).
+        //
+        // Users with exotic setups (e.g. 3+ chained LS350 strips on a single
+        // LINK Adapter) can still bypass this heuristic via
+        // [[device_overrides]] in config.toml.
+        let expected_channels: std::collections::HashSet<u8> =
+            devices.iter().map(|d| d.channel).collect();
+        let covered_channels: std::collections::HashSet<u8> = raw_counts
+            .iter()
+            .filter(|entry| *entry.1 > 0 && expected_channels.contains(entry.0))
+            .map(|entry| *entry.0)
+            .collect();
+
+        let led_counts = if covered_channels == expected_channels && !raw_counts.is_empty() {
+            raw_counts
+        } else {
+            warn!(
+                serial = self.serial.as_ref(),
+                reported_channels = ?covered_channels,
+                enumerated_channels = ?expected_channels,
+                "0x1d LED-count table is incomplete — falling back to device-type defaults for all channels (configure [[device_overrides]] if a non-standard LED count is required)"
+            );
+            std::collections::HashMap::new()
+        };
 
         Ok(HubInfo {
             firmware,
