@@ -548,7 +548,7 @@ dependencies = [
 
 [[package]]
 name = "corsair-common"
-version = "0.1.0"
+version = "0.1.1-rc1"
 dependencies = [
  "anyhow",
  "corsair-rgb",
@@ -561,7 +561,7 @@ dependencies = [
 
 [[package]]
 name = "corsair-fancontrol"
-version = "0.1.0"
+version = "0.1.1-rc1"
 dependencies = [
  "anyhow",
  "corsair-common",
@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "corsair-hid"
-version = "0.1.0"
+version = "0.1.1-rc1"
 dependencies = [
  "anyhow",
  "corsair-common",
@@ -587,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "corsair-hub-gui"
-version = "0.1.0"
+version = "0.1.1-rc1"
 dependencies = [
  "anyhow",
  "corsair-common",
@@ -610,7 +610,7 @@ dependencies = [
 
 [[package]]
 name = "corsair-rgb"
-version = "0.1.0"
+version = "0.1.1-rc1"
 dependencies = [
  "serde",
  "tracing",
@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "corsair-rgb-test"
-version = "0.1.0"
+version = "0.1.1-rc1"
 dependencies = [
  "anyhow",
  "corsair-common",
@@ -629,7 +629,7 @@ dependencies = [
 
 [[package]]
 name = "corsair-scanner"
-version = "0.1.0"
+version = "0.1.1-rc1"
 dependencies = [
  "anyhow",
  "corsair-common",
@@ -642,7 +642,7 @@ dependencies = [
 
 [[package]]
 name = "corsair-sensors"
-version = "0.1.0"
+version = "0.1.1-rc1"
 dependencies = [
  "anyhow",
  "corsair-common",
@@ -658,7 +658,7 @@ dependencies = [
 
 [[package]]
 name = "corsair-service"
-version = "0.1.0"
+version = "0.1.1-rc1"
 dependencies = [
  "anyhow",
  "corsair-common",
