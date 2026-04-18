@@ -306,11 +306,15 @@ fn run_loop(
             }
         };
 
-        // Build and emit snapshot
+        // Build and emit snapshot. Pass a fresh device_id map so the DTO
+        // carries stable identity alongside (hub, channel) during the V1→V2
+        // transition.
+        let device_id_map = control_loop.device_id_map();
         let snapshot = SystemSnapshot::from_cycle(
             &cycle_result,
             &cycle_result.fan_speeds,
             psu_status.as_ref(),
+            &device_id_map,
         );
         let _ = app.emit("sensor-update", &snapshot);
 
@@ -397,6 +401,11 @@ fn run_loop(
                     .map(|(f, leds)| RgbFrameRef {
                         hub_serial: &f.hub_serial,
                         channel: f.channel,
+                        // device_id passes through from the renderer;
+                        // non-empty when the zone was populated from a V2
+                        // config, empty for V1. send_rgb_frames handles
+                        // both cases.
+                        device_id: &f.device_id,
                         leds,
                     })
                     .collect();
@@ -511,10 +520,12 @@ fn build_snapshot(
             psu_handle.and_then(|psu| psu.read_all().ok().and_then(validate_psu_status))
         })
         .or_else(|| last_good_psu.clone());
+    let device_id_map = control_loop.device_id_map();
     Ok(SystemSnapshot::from_cycle(
         &cycle_result,
         &cycle_result.fan_speeds,
         psu_status.as_ref(),
+        &device_id_map,
     ))
 }
 
@@ -738,6 +749,9 @@ fn apply_rgb_config(
                     DeviceConfig {
                         hub_serial: d.hub_serial.clone(),
                         channel: d.channel,
+                        // Step 1 transition: V1 config has no device_id.
+                        // PR2 will populate this from the registry lookup.
+                        device_id: None,
                         layout,
                     }
                 })
