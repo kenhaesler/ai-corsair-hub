@@ -1,20 +1,71 @@
 <script lang="ts">
-  import type { FanGroupConfig, FanMode } from '../../lib/types';
+  import type { FanGroupConfig, FanMode, HubSnapshot, HubDeviceEntry } from '../../lib/types';
   import { displayName, isFanGroupV2 } from '../../lib/identity';
   import { configStore } from '../../lib/stores/config.svelte';
   import { sensors } from '../../lib/stores/sensors.svelte';
   import ModeSelector from './ModeSelector.svelte';
   import CurveEditor from './CurveEditor.svelte';
   import PidTuner from './PidTuner.svelte';
+  import DevicePickerModal from '../devices/DevicePickerModal.svelte';
 
   interface Props {
     group: FanGroupConfig;
     currentTemp?: number;
     onchange: (group: FanGroupConfig) => void;
+    availableHubs?: HubSnapshot[];
     expanded?: boolean;
   }
 
-  let { group, currentTemp, onchange, expanded = false }: Props = $props();
+  let { group, currentTemp, onchange, availableHubs = [], expanded = false }: Props = $props();
+
+  let pickerOpen = $state(false);
+
+  /**
+   * When the user saves the picker, convert the group to V2 shape:
+   * device_ids becomes authoritative, channels + hub_serial are cleared.
+   * The backend's dual-key control loop honours device_ids when non-empty
+   * (see control_loop::set_speeds path).
+   */
+  function handlePickerSave(deviceIds: string[]) {
+    pickerOpen = false;
+    onchange({
+      ...group,
+      device_ids: deviceIds,
+      channels: [],
+      hub_serial: null,
+    });
+  }
+
+  /**
+   * Current device_ids for the picker seed. If the group is V1 we
+   * convert its (hub_serial, channel) pairs into device_ids at open
+   * time by walking the enumerated hubs. Unresolvable channels become
+   * orphans inside the picker so the user sees they exist.
+   */
+  function seedDeviceIds(): string[] {
+    if (isFanGroupV2(group)) {
+      return group.device_ids ?? [];
+    }
+    const ids: string[] = [];
+    const channels = group.channels ?? [];
+    const targetHub = group.hub_serial ?? null;
+    for (const hub of availableHubs) {
+      if (targetHub && hub.serial !== targetHub) continue;
+      for (const dev of hub.devices as HubDeviceEntry[]) {
+        if (channels.includes(dev.channel) && dev.device_id) {
+          ids.push(dev.device_id);
+        }
+      }
+    }
+    return ids;
+  }
+
+  let seededIds = $state<string[]>([]);
+
+  function openPicker() {
+    seededIds = seedDeviceIds();
+    pickerOpen = true;
+  }
 
   const modeType = $derived(group.mode.type);
 
@@ -86,8 +137,23 @@
 <div class="fan-group-card" class:expanded>
   <div class="header">
     <h4 class="group-name">{group.name}</h4>
-    <span class="channels" title={membershipLabel}>{membershipLabel}</span>
+    <div class="header-right">
+      <span class="channels" title={membershipLabel}>{membershipLabel}</span>
+      <button class="edit-devices" onclick={openPicker} title="Edit devices in this group">
+        Edit devices
+      </button>
+    </div>
   </div>
+
+  <DevicePickerModal
+    bind:open={pickerOpen}
+    title={`Devices in ${group.name}`}
+    selected={seededIds}
+    {availableHubs}
+    config={configStore.config}
+    onsave={handlePickerSave}
+    oncancel={() => (pickerOpen = false)}
+  />
 
   <ModeSelector value={modeType} onchange={changeMode} />
 
@@ -185,10 +251,33 @@
   .expanded .group-name {
     font-size: 20px;
   }
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
   .channels {
-    font-size: 13px;
+    font-size: 12px;
     color: var(--text-muted);
     font-family: var(--font-mono);
+    max-width: 320px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .edit-devices {
+    font-size: 11px;
+    padding: 4px 10px;
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .edit-devices:hover {
+    color: var(--accent);
+    border-color: var(--accent-dim);
   }
   .mode-content {
     flex: 1;
