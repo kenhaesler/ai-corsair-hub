@@ -1,5 +1,7 @@
 <script lang="ts">
-  import type { RgbZoneConfig, RgbDeviceRef, HubSnapshot } from '../../lib/types';
+  import type { RgbZoneConfig, RgbDeviceRef, HubSnapshot, HubDeviceEntry } from '../../lib/types';
+  import { displayNameFromTree, shortHubSerial } from '../../lib/identity';
+  import { configStore } from '../../lib/stores/config.svelte';
 
   interface Props {
     zones: RgbZoneConfig[];
@@ -29,30 +31,82 @@
     editingName = null;
   }
 
-  /** All available devices across all hubs, grouped by hub */
-  function groupedDevices(): { hubLabel: string; serial: string; devices: { channel: number; label: string }[] }[] {
+  interface PickerEntry {
+    device_id: string;
+    hub_serial: string;
+    channel: number;
+    label: string;
+    device_type: string;
+  }
+
+  /**
+   * All available devices across all hubs, grouped by hub. The label uses
+   * `displayNameFromTree` so a user-set friendly name takes precedence over
+   * the "Hub XXXX Ch N" fallback. The device_type is shown alongside so the
+   * user can tell a fan from a strip at a glance.
+   */
+  function groupedDevices(): { hubLabel: string; serial: string; devices: PickerEntry[] }[] {
     return availableHubs.map((hub, i) => ({
-      hubLabel: `Hub ${i + 1}`,
+      hubLabel: `Hub ${i + 1} · ${shortHubSerial(hub.serial)}`,
       serial: hub.serial,
-      devices: hub.devices.map(dev => ({
-        channel: dev.channel,
-        label: `${dev.device_type} — Ch ${dev.channel}`,
-      })),
+      devices: hub.devices.map((dev: HubDeviceEntry) => {
+        const name = displayNameFromTree(dev.device_id, {
+          config: configStore.config,
+          hubs: availableHubs,
+        });
+        return {
+          device_id: dev.device_id,
+          hub_serial: hub.serial,
+          channel: dev.channel,
+          device_type: dev.device_type,
+          label: `${dev.device_type} — ${name}`,
+        };
+      }),
     }));
   }
 
-  function isDeviceInZone(zone: RgbZoneConfig, hubSerial: string, channel: number): boolean {
-    return zone.devices.some(d => d.hub_serial === hubSerial && d.channel === channel);
+  /**
+   * Membership test. Prefers device_id matching (V2); falls through to
+   * (hub_serial, channel) matching for V1 entries that haven't been
+   * upgraded yet. This keeps a mixed-schema zone functional while the user
+   * is mid-migration.
+   */
+  function isDeviceInZone(zone: RgbZoneConfig, entry: PickerEntry): boolean {
+    return zone.devices.some((d) => {
+      if (d.device_id && entry.device_id && d.device_id === entry.device_id) {
+        return true;
+      }
+      return d.hub_serial === entry.hub_serial && d.channel === entry.channel;
+    });
   }
 
-  function toggleDevice(hubSerial: string, channel: number) {
+  /**
+   * Toggle membership. Adds new entries in V2 shape (device_id populated)
+   * and also carries (hub_serial, channel) so a backend loader that still
+   * honours the V1 path can resolve the device. Removal matches by either
+   * identity — whichever the stored entry was keyed by.
+   */
+  function toggleDevice(entry: PickerEntry) {
     const zone = zones[selectedZone];
     if (!zone) return;
 
-    if (isDeviceInZone(zone, hubSerial, channel)) {
-      zone.devices = zone.devices.filter(d => !(d.hub_serial === hubSerial && d.channel === channel));
+    if (isDeviceInZone(zone, entry)) {
+      zone.devices = zone.devices.filter((d) => {
+        const idMatch =
+          !!d.device_id && !!entry.device_id && d.device_id === entry.device_id;
+        const locMatch =
+          d.hub_serial === entry.hub_serial && d.channel === entry.channel;
+        return !(idMatch || locMatch);
+      });
     } else {
-      zone.devices = [...zone.devices, { hub_serial: hubSerial, channel }];
+      zone.devices = [
+        ...zone.devices,
+        {
+          hub_serial: entry.hub_serial,
+          channel: entry.channel,
+          device_id: entry.device_id,
+        },
+      ];
     }
     onzoneupdate({ ...zone });
   }
@@ -63,7 +117,11 @@
     const all: RgbDeviceRef[] = [];
     for (const hub of availableHubs) {
       for (const dev of hub.devices) {
-        all.push({ hub_serial: hub.serial, channel: dev.channel });
+        all.push({
+          hub_serial: hub.serial,
+          channel: dev.channel,
+          device_id: dev.device_id,
+        });
       }
     }
     zone.devices = all;
@@ -137,8 +195,8 @@
                 <label class="device-row">
                   <input
                     type="checkbox"
-                    checked={isDeviceInZone(zones[selectedZone], group.serial, dev.channel)}
-                    onchange={() => toggleDevice(group.serial, dev.channel)}
+                    checked={isDeviceInZone(zones[selectedZone], dev)}
+                    onchange={() => toggleDevice(dev)}
                   />
                   <span class="device-label">{dev.label}</span>
                 </label>

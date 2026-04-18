@@ -746,41 +746,47 @@ impl IcueLinkHub {
             "Enumerated devices"
         );
 
-        // Cross-validate 0x1d LED counts against enumerated devices. Some
-        // firmware revisions return a mostly-empty table with one or two
-        // outlier values (e.g. 80 LEDs for a LinkAdapter whose default is
-        // 21, and 0 for every real fan). Blindly trusting that response
-        // causes chain desync: the buffer for the outlier channel overshoots
-        // and the hub loses sync for downstream channels, leaving whole fan
-        // groups dark.
+        // Validate 0x1d LED counts against enumerated devices.
         //
-        // Heuristic: the 0x1d response is only authoritative if it has a
-        // non-zero entry for EVERY enumerated device. Anything less means
-        // the firmware's table is incomplete, so fall back to device-type
-        // defaults (which the hub's chain walker does correctly even without
-        // an explicit LED-count table).
+        // The firmware's 0x1d table uses `0` on a channel to mean "use the
+        // device-type default" — NOT "this channel is invalid". Confirmed
+        // empirically by walking a single lit LED across ch 15 on a hub whose
+        // 0x1d returned {ch 15: 80, all other channels: 0}: the 80-LED
+        // claim was real — both chained LS350 strips plus the LINK Adapter
+        // run all 80 addressable positions. Previous heuristic ("reject the
+        // whole table unless every enumerated channel reports non-zero")
+        // discarded that correct value and left the second strip dark.
         //
-        // Users with exotic setups (e.g. 3+ chained LS350 strips on a single
-        // LINK Adapter) can still bypass this heuristic via
-        // [[device_overrides]] in config.toml.
+        // New policy:
+        //  - Keep only non-zero entries that match an enumerated channel.
+        //  - Zero entries are dropped (callers fall through to the
+        //    device-type default at LED-buffer sizing time).
+        //  - Entries for channels that aren't enumerated (firmware stale
+        //    data) are dropped defensively.
+        //  - Bogus entries (count > 255) are already filtered out in
+        //    `read_led_counts`.
+        //
+        // Users with truly exotic setups (e.g. a hub variant whose firmware
+        // reports `0` for a channel that actually has a non-default count)
+        // can still pin a value via `[[device_overrides]]` in config.toml.
         let expected_channels: std::collections::HashSet<u8> =
             devices.iter().map(|d| d.channel).collect();
-        let covered_channels: std::collections::HashSet<u8> = raw_counts
-            .iter()
-            .filter(|entry| *entry.1 > 0 && expected_channels.contains(entry.0))
-            .map(|entry| *entry.0)
+        let led_counts: std::collections::HashMap<u8, u16> = raw_counts
+            .into_iter()
+            .filter(|(ch, count)| *count > 0 && expected_channels.contains(ch))
             .collect();
 
-        let led_counts = if covered_channels == expected_channels && !raw_counts.is_empty() {
-            raw_counts
-        } else {
-            warn!(
+        if !led_counts.is_empty() {
+            info!(
                 serial = self.serial.as_ref(),
-                reported_channels = ?covered_channels,
-                enumerated_channels = ?expected_channels,
-                "0x1d LED-count table is incomplete — falling back to device-type defaults for all channels (configure [[device_overrides]] if a non-standard LED count is required)"
+                channels = ?led_counts,
+                "Accepted 0x1d LED-count overrides (other channels use type defaults)"
             );
-            std::collections::HashMap::new()
+        } else {
+            debug!(
+                serial = self.serial.as_ref(),
+                "0x1d returned no non-zero entries — all channels use device-type defaults"
+            );
         };
 
         Ok(HubInfo {

@@ -6,6 +6,9 @@ use tauri::Emitter;
 use tracing::{error, info, warn};
 
 use corsair_common::config::AppConfig;
+use corsair_common::config_migration::{
+    try_migrate_file, MigrationError, MigrationOutcome,
+};
 use corsair_common::identity::DeviceRegistry;
 use corsair_common::CorsairDevice;
 use corsair_fancontrol::control_loop::{self, ControlLoop};
@@ -76,6 +79,20 @@ fn run_loop(
             return Ok(());
         }
     };
+
+    // V1→V2 config migration. Runs AFTER the control loop is built (so the
+    // registry is populated with this boot's enumeration) and BEFORE the
+    // main loop starts cycling (so the new config is authoritative for the
+    // very first tick).
+    //
+    // All-or-nothing semantics: if any device referenced by the V1 config
+    // isn't currently enumerated, migration aborts and we continue on the
+    // V1 config for this boot. Migration retries on the next startup.
+    //
+    // On success we reload the written file from disk and apply it via
+    // update_config() so the control loop sees the V2 shape without a
+    // disk round-trip through save_config_to_disk.
+    run_config_migration(&mut config, &mut control_loop, &app);
 
     let mut poll_interval = Duration::from_millis(config.general.poll_interval_ms);
 
@@ -996,6 +1013,123 @@ fn apply_rename_device(
         return Err(format!("Failed to apply rename to control loop: {}", e));
     }
     Ok(())
+}
+
+/// Run the V1→V2 migration, if applicable, and reload the control loop's
+/// config from the rewritten file on success.
+///
+/// Error semantics match the plan's soft-fail contract:
+/// - `AlreadyMigrated`: info log, nothing else.
+/// - `Migrated { resolved_count }`: info log, reload config from disk,
+///   apply to the running control loop, emit `config-migrated` event.
+/// - `UnresolvedDevice`: warn with the specific (hub, channel), emit
+///   `config-migration-skipped` event, continue with current V1 config.
+///   Migration retries at next startup.
+/// - Any other `MigrationError`: error log, continue with current V1 config.
+///
+/// This function intentionally swallows all errors — a fan-control daemon
+/// must never refuse to start because config migration hit a snag.
+fn run_config_migration(
+    config: &mut AppConfig,
+    control_loop: &mut ControlLoop,
+    app: &tauri::AppHandle,
+) {
+    // If we're already on V2 in memory, skip the file probe entirely —
+    // there's no legacy shape to rewrite. (The file-level check still runs
+    // below when the in-memory config is V1, even if the on-disk file is
+    // already V2, because the migration helper itself is cheap and
+    // idempotent on an already-V2 file.)
+    if config.is_v2() {
+        info!("Config already V2 in memory — migration skipped");
+        return;
+    }
+
+    let path = crate::config_path();
+    if !path.exists() {
+        // No file on disk (fresh install, running on defaults). Nothing to
+        // migrate — the next save_config_to_disk writes a V1-shaped file
+        // that a subsequent build will migrate.
+        info!(
+            path = %path.display(),
+            "Config file not present — nothing to migrate"
+        );
+        return;
+    }
+
+    let registry = control_loop.registry();
+    match try_migrate_file(&path, registry) {
+        Ok(MigrationOutcome::AlreadyMigrated) => {
+            info!("Config already V2 on disk");
+        }
+        Ok(MigrationOutcome::Migrated { resolved_count }) => {
+            info!(
+                resolved = resolved_count,
+                path = %path.display(),
+                "Migrated config to V2 ({} device references resolved)",
+                resolved_count
+            );
+            // Reload and apply. If the reload or apply fails we keep the
+            // in-memory V1 config running — the new V2 file is on disk and
+            // will be picked up on the next clean boot.
+            match control_loop::load_config(&path) {
+                Ok(new_config) => {
+                    if let Err(e) = control_loop.update_config(new_config.clone()) {
+                        warn!(
+                            error = %e,
+                            "Migration wrote V2 config but live apply failed — \
+                             continuing on in-memory V1 until restart"
+                        );
+                    } else {
+                        *config = new_config;
+                        let _ = app.emit(
+                            "config-migrated",
+                            serde_json::json!({ "resolved_count": resolved_count }),
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        path = %path.display(),
+                        "Migration wrote V2 config but reload failed — \
+                         continuing on in-memory V1 until restart"
+                    );
+                }
+            }
+        }
+        Err(MigrationError::UnresolvedDevice {
+            hub_serial,
+            channel,
+        }) => {
+            warn!(
+                hub_serial = hub_serial.as_str(),
+                channel,
+                "Config migration skipped — device at hub '{}' channel {} not \
+                 currently enumerated (will retry on next boot)",
+                hub_serial,
+                channel
+            );
+            // Surface to the frontend so a toast/banner can explain why a
+            // startup-time migration didn't happen. Payload carries the
+            // first offending pair; a more comprehensive list would require
+            // refactoring the all-or-nothing migration to accumulate.
+            let _ = app.emit(
+                "config-migration-skipped",
+                serde_json::json!({
+                    "hub_serial": hub_serial,
+                    "channel": channel,
+                    "reason": "device not currently enumerated",
+                }),
+            );
+        }
+        Err(e) => {
+            error!(
+                error = %e,
+                "Config migration failed with non-resolvable error — continuing \
+                 on V1 config"
+            );
+        }
+    }
 }
 
 fn save_config_to_disk(config: &AppConfig) -> Result<()> {

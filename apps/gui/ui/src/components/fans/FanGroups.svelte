@@ -1,11 +1,24 @@
 <script lang="ts">
   import { configStore, loadConfig, saveCurrentConfig } from '../../lib/stores/config.svelte';
   import { sensors } from '../../lib/stores/sensors.svelte';
-  import type { FanGroupConfig } from '../../lib/types';
+  import { getDevices } from '../../lib/api';
+  import type { FanGroupConfig, HubSnapshot } from '../../lib/types';
   import FanGroupCard from './FanGroupCard.svelte';
   import { onMount } from 'svelte';
 
-  onMount(() => { loadConfig(); });
+  /** Latest enumerated hubs — used by the device picker modal. */
+  let availableHubs = $state<HubSnapshot[]>([]);
+
+  onMount(async () => {
+    loadConfig();
+    try {
+      const tree = await getDevices();
+      availableHubs = tree.hubs;
+    } catch {
+      // Non-fatal: the picker will show "no hubs enumerated" until a
+      // subsequent refresh succeeds.
+    }
+  });
 
   let selectedIndex = $state(0);
 
@@ -74,6 +87,7 @@
               group={configStore.config.fan_groups[selectedIndex]}
               currentTemp={cpuTemp}
               onchange={(g) => updateGroup(selectedIndex, g)}
+              {availableHubs}
               expanded
             />
           {/if}
