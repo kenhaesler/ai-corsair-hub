@@ -579,6 +579,23 @@ impl ControlLoop {
         result
     }
 
+    /// Return `(hub_serial, channel) → device_id` for every currently-
+    /// enumerated device across all hubs. Used by DTO construction to
+    /// populate `FanReading.device_id` so the frontend can key on stable
+    /// identity instead of channel numbers.
+    pub fn device_id_map(&self) -> HashMap<(String, u8), String> {
+        let mut map = HashMap::new();
+        for (serial, hub_conn) in &self.hubs {
+            for dev in &hub_conn.info.devices {
+                map.insert(
+                    (serial.clone(), dev.channel),
+                    dev.device_id.clone(),
+                );
+            }
+        }
+        map
+    }
+
     /// Return a map of (hub_serial, channel) → (device_type, effective_led_count)
     /// for all enumerated devices across all hubs. Uses the 0x1d LED count table
     /// when available, otherwise falls back to `device_type.led_count()`.

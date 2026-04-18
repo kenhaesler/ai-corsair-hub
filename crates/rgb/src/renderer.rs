@@ -27,6 +27,12 @@ struct ZoneState {
 struct DeviceTarget {
     hub_serial: String,
     channel: u8,
+    /// Stable device identity. `None` when the target came from a V1 config
+    /// that only knows (hub_serial, channel). Populated at the `apply_rgb_config`
+    /// construction site (in `apps/gui`) by looking up the channel in the
+    /// runtime registry. Stays `None` during transition when the device is
+    /// orphaned (referenced in config but not currently enumerated).
+    device_id: Option<String>,
     layout: LedLayout,
 }
 
@@ -75,6 +81,7 @@ impl RgbRenderer {
                     .map(|d| DeviceTarget {
                         hub_serial: d.hub_serial.clone(),
                         channel: d.channel,
+                        device_id: d.device_id.clone(),
                         layout: d.layout.clone(),
                     })
                     .collect();
@@ -138,6 +145,7 @@ impl RgbRenderer {
                 frames.push(RgbFrame {
                     hub_serial: device.hub_serial.clone(),
                     channel: device.channel,
+                    device_id: device.device_id.clone().unwrap_or_default(),
                     leds,
                 });
             }
@@ -168,6 +176,9 @@ pub struct ZoneConfig {
 pub struct DeviceConfig {
     pub hub_serial: String,
     pub channel: u8,
+    /// Stable device identity when known. `None` during V1→V2 transition
+    /// when the source config only had (hub_serial, channel).
+    pub device_id: Option<String>,
     pub layout: LedLayout,
 }
 
@@ -186,6 +197,7 @@ mod tests {
                 devices: vec![DeviceConfig {
                     hub_serial: "HUB1".into(),
                     channel: 1,
+                    device_id: None,
                     layout: LedLayout::qx_fan(),
                 }],
                 layers: vec![Layer {
@@ -220,6 +232,7 @@ mod tests {
                 devices: vec![DeviceConfig {
                     hub_serial: "HUB1".into(),
                     channel: 1,
+                    device_id: None,
                     layout: LedLayout::FanRing { led_count: 4 },
                 }],
                 layers: vec![Layer {
@@ -253,11 +266,13 @@ mod tests {
                         DeviceConfig {
                             hub_serial: "HUB1".into(),
                             channel: 1,
+                            device_id: None,
                             layout: LedLayout::FanRing { led_count: 4 },
                         },
                         DeviceConfig {
                             hub_serial: "HUB1".into(),
                             channel: 2,
+                            device_id: None,
                             layout: LedLayout::FanRing { led_count: 4 },
                         },
                     ],
@@ -277,6 +292,7 @@ mod tests {
                     devices: vec![DeviceConfig {
                         hub_serial: "HUB2".into(),
                         channel: 1,
+                        device_id: None,
                         layout: LedLayout::ls350(),
                     }],
                     layers: vec![Layer {

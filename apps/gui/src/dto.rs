@@ -34,6 +34,11 @@ pub struct TempReading {
 pub struct FanReading {
     pub hub_serial: String,
     pub channel: u8,
+    /// Stable device identity (26-hex string burned in at manufacturing).
+    /// Empty string when the device isn't in the hub's enumerated list at
+    /// this moment (should not happen for fans that returned an RPM, but
+    /// the construction path is defensive).
+    pub device_id: String,
     pub rpm: u16,
     pub duty_percent: u8,
     pub group_name: Option<String>,
@@ -93,10 +98,19 @@ pub struct PsuDeviceInfo {
 }
 
 /// Compact RGB frame for IPC — emitted as Tauri event at 30 FPS.
+///
+/// `device_id` is the stable identity for this device; `hub_serial` + `channel`
+/// are runtime location metadata (kept during the V1→V2 transition so the
+/// preview renderer and diagnostics keep working without UI changes). Frontend
+/// code landing in a later step will key on `device_id` only.
 #[derive(Debug, Clone, Serialize)]
 pub struct RgbFrameDto {
     pub hub_serial: String,
     pub channel: u8,
+    /// Stable device identity. Empty string when the frame originated from a
+    /// zone whose device target has not yet been paired with an enumerated
+    /// device (intermediate transition state during refactor).
+    pub device_id: String,
     pub leds: Vec<[u8; 3]>,
 }
 
@@ -105,6 +119,7 @@ impl RgbFrameDto {
         Self {
             hub_serial: frame.hub_serial.clone(),
             channel: frame.channel,
+            device_id: frame.device_id.clone(),
             leds: frame.leds.iter().map(|c| [c.r, c.g, c.b]).collect(),
         }
     }
@@ -114,10 +129,20 @@ impl RgbFrameDto {
 
 impl SystemSnapshot {
     /// Build a snapshot from a CycleResult plus optional fan RPM and PSU data.
+    ///
+    /// `device_id_map` provides the `(hub_serial, channel) → device_id`
+    /// lookup used to populate the new `FanReading.device_id` field. Built
+    /// from `ControlLoop::hub_snapshots()` at the call site — we accept a
+    /// borrowed map so the caller controls ownership of the strings. When the
+    /// map is missing an entry (e.g. a hub that failed enumeration), the
+    /// device_id is emitted as the empty string; the frontend treats an
+    /// empty string as "unknown" and falls back to legacy (hub, channel)
+    /// display.
     pub fn from_cycle(
         result: &CycleResult,
         fan_speeds: &[(String, Vec<FanSpeed>)],
         psu_status: Option<&PsuStatus>,
+        device_id_map: &std::collections::HashMap<(String, u8), String>,
     ) -> Self {
         let timestamp_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -153,9 +178,14 @@ impl SystemSnapshot {
                     .get(&(serial.clone(), speed.channel))
                     .map(|(d, g)| (*d, Some(g.clone())))
                     .unwrap_or((0, None));
+                let device_id = device_id_map
+                    .get(&(serial.clone(), speed.channel))
+                    .cloned()
+                    .unwrap_or_default();
                 fans.push(FanReading {
                     hub_serial: serial.clone(),
                     channel: speed.channel,
+                    device_id,
                     rpm: speed.rpm,
                     duty_percent: duty,
                     group_name: group,
