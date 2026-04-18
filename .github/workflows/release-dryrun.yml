@@ -1,8 +1,13 @@
-name: Release
+name: Release (dry run)
+
+# Manual-only trigger. Builds the installer and publishes to a throwaway draft
+# release so we can verify the release pipeline (especially latest.json and
+# signature generation) without burning a real version tag.
+#
+# Cleanup: delete the draft release and its tag manually after verification.
 
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch: {}
 
 permissions:
   contents: write
@@ -44,24 +49,22 @@ jobs:
           fi
           mkdir -p apps/gui/.tauri
           printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > apps/gui/.tauri/signing-key.txt
-          # Sanity: file must be non-empty, otherwise tauri-action silently skips
-          # latest.json generation and the updater endpoint returns 404 forever.
           test -s apps/gui/.tauri/signing-key.txt
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
-      - name: Build and release
+      - name: Build and release (dry run)
         uses: tauri-apps/tauri-action@v0.5.22
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY_PATH: ${{ github.workspace }}/apps/gui/.tauri/signing-key.txt
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Corsair Hub ${{ github.ref_name }}'
-          releaseBody: 'See assets to download the installer.'
+          tagName: dryrun-${{ github.run_id }}
+          releaseName: 'Dry run ${{ github.run_id }}'
+          releaseBody: 'Pipeline verification build. Delete after review.'
           releaseDraft: true
-          prerelease: false
+          prerelease: true
           projectPath: 'apps/gui'
           tauriScript: 'npx tauri'
           includeUpdaterJson: true
