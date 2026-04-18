@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+use corsair_common::identity::DeviceRegistry;
 use corsair_fancontrol::CycleResult;
 use corsair_hid::{DeviceGroup, FanSpeed, HubInfo, PsuStatus};
 use corsair_rgb::RgbFrame;
@@ -99,26 +100,34 @@ pub struct PsuDeviceInfo {
 
 /// Compact RGB frame for IPC — emitted as Tauri event at 30 FPS.
 ///
-/// `device_id` is the stable identity for this device; `hub_serial` + `channel`
-/// are runtime location metadata (kept during the V1→V2 transition so the
-/// preview renderer and diagnostics keep working without UI changes). Frontend
-/// code landing in a later step will key on `device_id` only.
+/// `device_id` is the stable identity. `hub_serial` + `channel` are the
+/// currently-resolved runtime location, included for the duration of the
+/// V1→V2 UI transition: the Svelte preview still keys by channel (PR3 will
+/// migrate it). The backend resolves `(hub_serial, channel)` from the
+/// registry at emit time so the DTO is always self-consistent — if the
+/// device can't be resolved now, the location fields are empty.
 #[derive(Debug, Clone, Serialize)]
 pub struct RgbFrameDto {
     pub hub_serial: String,
     pub channel: u8,
-    /// Stable device identity. Empty string when the frame originated from a
-    /// zone whose device target has not yet been paired with an enumerated
-    /// device (intermediate transition state during refactor).
+    /// Stable device identity. Always populated by the backend post-Step 5.
     pub device_id: String,
     pub leds: Vec<[u8; 3]>,
 }
 
 impl RgbFrameDto {
-    pub fn from_frame(frame: &RgbFrame) -> Self {
+    /// Build a DTO from a renderer frame, resolving `(hub_serial, channel)`
+    /// from the current registry. If the device_id is not in the registry
+    /// (orphan — e.g. fan unplugged between frame render and emit), we emit
+    /// empty location strings. The frontend treats empty fields as "unknown
+    /// location" and continues to render by device_id once PR3 lands.
+    pub fn from_frame(frame: &RgbFrame, registry: &DeviceRegistry) -> Self {
+        let (hub_serial, channel) = registry
+            .channel_for(&frame.device_id)
+            .unwrap_or_else(|| (String::new(), 0));
         Self {
-            hub_serial: frame.hub_serial.clone(),
-            channel: frame.channel,
+            hub_serial,
+            channel,
             device_id: frame.device_id.clone(),
             leds: frame.leds.iter().map(|c| [c.r, c.g, c.b]).collect(),
         }

@@ -6,8 +6,9 @@ use tauri::Emitter;
 use tracing::{error, info, warn};
 
 use corsair_common::config::AppConfig;
+use corsair_common::identity::DeviceRegistry;
 use corsair_common::CorsairDevice;
-use corsair_fancontrol::control_loop::{self, ControlLoop, RgbFrameRef};
+use corsair_fancontrol::control_loop::{self, ControlLoop};
 use corsair_hid::{port_power_factor, CorsairPsu, DeviceScanner, IcueLinkHub, LinkDeviceType};
 use corsair_rgb::effect::EffectContext;
 use corsair_rgb::layout::LedLayout;
@@ -89,7 +90,12 @@ fn run_loop(
     let mut last_rgb_tick = Instant::now();
     let mut last_temp: Option<f64> = None;
     let mut last_temp_time: Option<Instant> = None;
-    apply_rgb_config(&mut rgb_renderer, &config, &control_loop.device_type_map());
+    apply_rgb_config(
+        &mut rgb_renderer,
+        &config,
+        &control_loop.device_type_map(),
+        control_loop.registry(),
+    );
 
     info!(
         interval_ms = config.general.poll_interval_ms,
@@ -197,7 +203,12 @@ fn run_loop(
                         } else {
                             33
                         });
-                        apply_rgb_config(&mut rgb_renderer, &config, &control_loop.device_type_map());
+                        apply_rgb_config(
+                            &mut rgb_renderer,
+                            &config,
+                            &control_loop.device_type_map(),
+                            control_loop.registry(),
+                        );
                         if let Err(e) = save_config_to_disk(&config) {
                             warn!("Failed to save RGB config: {}", e);
                         }
@@ -362,8 +373,14 @@ fn run_loop(
             };
 
             let frames = rgb_renderer.tick(&effect_ctx);
-            let frame_dtos: Vec<RgbFrameDto> =
-                frames.iter().map(RgbFrameDto::from_frame).collect();
+            // Resolve (hub_serial, channel) via the current registry so the
+            // DTO carries a self-consistent snapshot for the preview UI
+            // during the V1→V2 transition.
+            let registry_snapshot = control_loop.registry();
+            let frame_dtos: Vec<RgbFrameDto> = frames
+                .iter()
+                .map(|f| RgbFrameDto::from_frame(f, registry_snapshot))
+                .collect();
             let _ = app.emit("rgb-frame", &frame_dtos);
 
             // Send to hardware if enabled
@@ -395,19 +412,14 @@ fn run_loop(
                     })
                     .collect();
 
-                let frame_refs: Vec<RgbFrameRef> = frames
+                // Post-Step-5: send_rgb_frames takes (device_id, leds) only.
+                // The renderer already keys frames by device_id; the control
+                // loop resolves to (hub_serial, channel) via the registry
+                // immediately before the wire write.
+                let frame_refs: Vec<(String, &[[u8; 3]])> = frames
                     .iter()
                     .zip(hw_leds.iter())
-                    .map(|(f, leds)| RgbFrameRef {
-                        hub_serial: &f.hub_serial,
-                        channel: f.channel,
-                        // device_id passes through from the renderer;
-                        // non-empty when the zone was populated from a V2
-                        // config, empty for V1. send_rgb_frames handles
-                        // both cases.
-                        device_id: &f.device_id,
-                        leds,
-                    })
+                    .map(|(f, leds)| (f.device_id.clone(), leds.as_slice()))
                     .collect();
 
                 let sent = control_loop.send_rgb_frames(&frame_refs);
@@ -722,12 +734,33 @@ fn apply_preset(
 }
 
 /// Convert the RGB config into renderer zone configs and apply.
-/// Uses the device type map to assign correct LED layouts (fan ring vs linear strip).
+///
+/// Post-Step-5 (PR2): every `DeviceConfig` carries a non-empty `device_id`.
+/// Source of truth depends on the config schema:
+///   - **V2** (`config.is_v2()`): `RgbDeviceRef.device_id` is authoritative —
+///     we use it directly. Layout resolution then tries to find the device
+///     by device_id in the registry; if the device isn't currently
+///     enumerated we emit a warning and skip it (orphan — the config
+///     reference is preserved, but this tick's renderer won't include it).
+///   - **V1** (`!config.is_v2()`): the `RgbDeviceRef` carries
+///     `(hub_serial, channel)` only. We resolve that pair to a device_id
+///     via the live registry. If the lookup fails (device not enumerated
+///     this boot), we warn and skip — consistent with the V2 path above.
+///
+/// Skipping is the correct behavior for unresolved references: the
+/// renderer's Step 5 invariant is "every DeviceTarget has a device_id", and
+/// letting an empty-device_id DeviceTarget through would trip the `expect`
+/// in `RgbRenderer::tick`. The user-visible effect of skipping is the same
+/// as the pre-refactor "orphan" behavior in the control loop — that zone
+/// just doesn't drive the missing fan this tick, and rejoins
+/// automatically when the device reappears and the registry is rebuilt.
 fn apply_rgb_config(
     renderer: &mut RgbRenderer,
     config: &AppConfig,
     device_types: &std::collections::HashMap<(String, u8), (LinkDeviceType, u16)>,
+    registry: &DeviceRegistry,
 ) {
+    let is_v2 = config.is_v2();
     let zones: Vec<ZoneConfig> = config
         .rgb
         .zones
@@ -736,8 +769,51 @@ fn apply_rgb_config(
             let devices = z
                 .devices
                 .iter()
-                .map(|d| {
-                    let layout = match device_types.get(&(d.hub_serial.clone(), d.channel)) {
+                .filter_map(|d| {
+                    // Resolve device_id: V2 uses the config field directly,
+                    // V1 resolves (hub_serial, channel) via the registry.
+                    let device_id = if is_v2 && !d.device_id.is_empty() {
+                        d.device_id.clone()
+                    } else {
+                        match registry.device_id_at(&d.hub_serial, d.channel) {
+                            Some(id) => id.to_string(),
+                            None => {
+                                warn!(
+                                    hub_serial = d.hub_serial.as_str(),
+                                    channel = d.channel,
+                                    zone = z.name.as_str(),
+                                    "RGB zone references device not currently enumerated — \
+                                     skipping in renderer (will rejoin on next enumeration)"
+                                );
+                                return None;
+                            }
+                        }
+                    };
+
+                    // Layout: prefer registry-resolved (hub, channel) for V2,
+                    // or the V1 config's literal (hub, channel). Either way we
+                    // look up the device_type_map to pick the right LED layout.
+                    let (lookup_hub, lookup_ch) = if is_v2 {
+                        match registry.channel_for(&device_id) {
+                            Some(hc) => hc,
+                            None => {
+                                // V2 reference to a device not currently
+                                // enumerated — skip (same orphan semantics
+                                // as above, different source path).
+                                warn!(
+                                    device_id = device_id.as_str(),
+                                    zone = z.name.as_str(),
+                                    "V2 RGB zone references device_id not currently \
+                                     enumerated — skipping in renderer"
+                                );
+                                return None;
+                            }
+                        }
+                    } else {
+                        (d.hub_serial.clone(), d.channel)
+                    };
+
+                    let layout = match device_types.get(&(lookup_hub, lookup_ch)) {
                         Some((LinkDeviceType::LinkAdapter | LinkDeviceType::LsStrip, led_count)) => {
                             LedLayout::LinearStrip { led_count: *led_count }
                         }
@@ -746,14 +822,8 @@ fn apply_rgb_config(
                         }
                         _ => LedLayout::qx_fan(), // safe fallback
                     };
-                    DeviceConfig {
-                        hub_serial: d.hub_serial.clone(),
-                        channel: d.channel,
-                        // Step 1 transition: V1 config has no device_id.
-                        // PR2 will populate this from the registry lookup.
-                        device_id: None,
-                        layout,
-                    }
+
+                    Some(DeviceConfig { device_id, layout })
                 })
                 .collect();
 
