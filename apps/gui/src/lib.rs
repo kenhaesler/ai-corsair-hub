@@ -3,8 +3,11 @@ mod dto;
 mod hardware_thread;
 mod state;
 
+use std::sync::OnceLock;
+
 use tracing::info;
-use tracing_subscriber::EnvFilter;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use corsair_common::config::AppConfig;
 use corsair_fancontrol::control_loop;
@@ -17,14 +20,19 @@ use tauri::{
     Manager,
 };
 
+/// Retention: keep the most recent N daily log files. Older files are pruned
+/// at startup to prevent unbounded disk growth.
+const LOG_RETENTION_DAYS: usize = 14;
+
+/// Non-blocking log writer guard. Must live for the full process lifetime,
+/// otherwise the background flushing thread is dropped and queued log lines
+/// are silently lost. Stored in a OnceLock so it's never dropped until exit.
+static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
+
 pub fn run() {
-    // Init tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("corsair=info,corsair_hub_gui=info")),
-        )
-        .init();
+    init_tracing();
+
+    info!("corsair-hub GUI starting");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -142,6 +150,114 @@ pub(crate) fn config_path() -> std::path::PathBuf {
     std::path::PathBuf::from(app_data)
         .join("corsair-hub")
         .join("config.toml")
+}
+
+/// Log directory: %APPDATA%\corsair-hub\logs (alongside config.toml).
+/// Separate dir so log rotation/pruning never touches user configuration.
+fn log_dir_path() -> std::path::PathBuf {
+    config_path()
+        .parent()
+        .map(|p| p.join("logs"))
+        .unwrap_or_else(|| std::path::PathBuf::from("logs"))
+}
+
+/// Initialize tracing with a stderr layer and a daily-rolling file layer under
+/// `%APPDATA%\corsair-hub\logs\corsair-hub.log`.
+///
+/// The file writer is non-blocking: log calls enqueue to a bounded channel
+/// that the background thread drains to disk. Under disk pressure the channel
+/// drops overflow rather than blocking the caller — acceptable trade because
+/// the stderr layer still captures everything and hardware-thread stalls would
+/// be catastrophic for fan control.
+///
+/// The WorkerGuard is stashed in a process-lifetime OnceLock. Dropping it
+/// would stop the background thread mid-flight and lose queued messages.
+///
+/// As a best-effort housekeeping step, log files older than the most recent
+/// LOG_RETENTION_DAYS are pruned at startup.
+fn init_tracing() {
+    let log_dir = log_dir_path();
+    let dir_ready = std::fs::create_dir_all(&log_dir).is_ok();
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("corsair=info,corsair_hub_gui=info,corsair_fancontrol=info,corsair_hid=info")
+    });
+
+    let stderr_layer = fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_ansi(false);
+
+    if dir_ready {
+        let file_appender = tracing_appender::rolling::daily(&log_dir, "corsair-hub.log");
+        let (nb_writer, guard) = tracing_appender::non_blocking(file_appender);
+        // Ignore set error: init_tracing is only ever called once from run().
+        let _ = LOG_GUARD.set(guard);
+
+        let file_layer = fmt::layer()
+            .with_writer(nb_writer)
+            .with_ansi(false)
+            .with_target(true);
+
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(stderr_layer)
+            .with(file_layer)
+            .init();
+
+        info!(log_dir = %log_dir.display(), "Logging initialized (stderr + daily file)");
+        prune_old_logs(&log_dir, LOG_RETENTION_DAYS);
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(stderr_layer)
+            .init();
+        tracing::warn!(
+            log_dir = %log_dir.display(),
+            "Could not create log directory — falling back to stderr only"
+        );
+    }
+}
+
+/// Best-effort retention prune: keep the `keep` most-recently-modified log
+/// files in `dir`, delete the rest. Only operates on files whose name starts
+/// with "corsair-hub.log" (so it never touches unrelated user files in case
+/// the log dir is shared or the path is somehow aliased).
+fn prune_old_logs(dir: &std::path::Path, keep: usize) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let mut files: Vec<(std::path::PathBuf, std::time::SystemTime)> = entries
+        .filter_map(|res| res.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("corsair-hub.log")
+        })
+        .filter_map(|entry| {
+            let meta = entry.metadata().ok()?;
+            if !meta.is_file() {
+                return None;
+            }
+            let mtime = meta.modified().ok()?;
+            Some((entry.path(), mtime))
+        })
+        .collect();
+
+    if files.len() <= keep {
+        return;
+    }
+
+    files.sort_by(|a, b| b.1.cmp(&a.1)); // newest first
+
+    for (path, _) in files.iter().skip(keep) {
+        match std::fs::remove_file(path) {
+            Ok(()) => tracing::debug!(path = %path.display(), "Pruned old log file"),
+            Err(e) => tracing::warn!(path = %path.display(), error = %e, "Failed to prune old log"),
+        }
+    }
 }
 
 fn load_config_or_default() -> AppConfig {
