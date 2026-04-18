@@ -2,6 +2,7 @@
   import { getDevices } from '../../lib/api';
   import type { DeviceTree } from '../../lib/types';
   import HubDetail from './HubDetail.svelte';
+  import { loadConfig, configStore } from '../../lib/stores/config.svelte';
   import { onMount } from 'svelte';
 
   let devices = $state<DeviceTree | null>(null);
@@ -9,6 +10,12 @@
   let loading = $state(true);
 
   onMount(async () => {
+    // Config is needed so HubDetail can render user-set friendly names in
+    // the Name column. loadConfig is a no-op if the config is already in
+    // the store.
+    if (!configStore.config) {
+      await loadConfig();
+    }
     await refresh();
   });
 

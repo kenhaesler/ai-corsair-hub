@@ -31,12 +31,19 @@
       }
       availableHubs = deviceTree.hubs;
 
-      // Auto-create a default zone with all devices if none configured
+      // Auto-create a default zone with all devices if none configured.
+      // Entries are written in V2 shape (device_id populated) with the V1
+      // (hub_serial, channel) fields kept populated so a downlevel loader
+      // still works during the transition.
       if (config.zones.length === 0 && availableHubs.length > 0) {
         const allDevices: RgbDeviceRef[] = [];
         for (const hub of availableHubs) {
           for (const dev of hub.devices) {
-            allDevices.push({ hub_serial: hub.serial, channel: dev.channel });
+            allDevices.push({
+              hub_serial: hub.serial,
+              channel: dev.channel,
+              device_id: dev.device_id,
+            });
           }
         }
         config.zones = [{

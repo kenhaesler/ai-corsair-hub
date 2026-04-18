@@ -1,5 +1,8 @@
 <script lang="ts">
-  import type { RgbFrameDto, RgbZoneConfig } from '../../lib/types';
+  import type { RgbFrameDto, RgbZoneConfig, RgbDeviceRef } from '../../lib/types';
+  import { displayName, isDeviceRefV2 } from '../../lib/identity';
+  import { configStore } from '../../lib/stores/config.svelte';
+  import { sensors } from '../../lib/stores/sensors.svelte';
   import FanPreview from './FanPreview.svelte';
 
   interface Props {
@@ -9,9 +12,27 @@
 
   let { zone, frames }: Props = $props();
 
-  function getFrameForDevice(hubSerial: string, channel: number): [number, number, number][] | null {
-    const frame = frames.find(f => f.hub_serial === hubSerial && f.channel === channel);
-    return frame?.leds ?? null;
+  function getFrameForDevice(ref: RgbDeviceRef): [number, number, number][] | null {
+    // Prefer matching by device_id (stable). Fall back to (hub_serial,
+    // channel) for V1 entries and legacy frames that lack device_id.
+    if (isDeviceRefV2(ref) && ref.device_id) {
+      const byId = frames.find((f) => f.device_id === ref.device_id);
+      if (byId) return byId.leds;
+    }
+    const byLoc = frames.find(
+      (f) => f.hub_serial === ref.hub_serial && f.channel === ref.channel,
+    );
+    return byLoc?.leds ?? null;
+  }
+
+  function labelForRef(ref: RgbDeviceRef): string {
+    if (isDeviceRefV2(ref) && ref.device_id) {
+      return displayName(ref.device_id, {
+        config: configStore.config,
+        snapshot: sensors.snapshot,
+      });
+    }
+    return `Ch ${ref.channel}`;
   }
 </script>
 
@@ -19,12 +40,12 @@
   {#if zone && zone.devices.length > 0}
     <div class="device-grid">
       {#each zone.devices as device}
-        {@const leds = getFrameForDevice(device.hub_serial, device.channel)}
+        {@const leds = getFrameForDevice(device)}
         <div class="device-slot">
           <!-- Assume fan ring for channels on hubs; strip detection would come from enumeration -->
           <FanPreview
             leds={leds}
-            label="Ch {device.channel}"
+            label={labelForRef(device)}
             size={120}
           />
         </div>

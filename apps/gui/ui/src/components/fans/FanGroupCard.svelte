@@ -1,5 +1,8 @@
 <script lang="ts">
   import type { FanGroupConfig, FanMode } from '../../lib/types';
+  import { displayName, isFanGroupV2 } from '../../lib/identity';
+  import { configStore } from '../../lib/stores/config.svelte';
+  import { sensors } from '../../lib/stores/sensors.svelte';
   import ModeSelector from './ModeSelector.svelte';
   import CurveEditor from './CurveEditor.svelte';
   import PidTuner from './PidTuner.svelte';
@@ -14,6 +17,24 @@
   let { group, currentTemp, onchange, expanded = false }: Props = $props();
 
   const modeType = $derived(group.mode.type);
+
+  // Membership label: prefer device_ids (V2) when present, fall back to
+  // the V1 channel list. displayName() handles the user-name / location /
+  // orphan-id precedence per-id.
+  const membershipLabel = $derived.by(() => {
+    if (isFanGroupV2(group)) {
+      const ids = group.device_ids ?? [];
+      if (ids.length === 0) return 'No devices';
+      return ids
+        .map((id) =>
+          displayName(id, { config: configStore.config, snapshot: sensors.snapshot })
+        )
+        .join(', ');
+    }
+    const chans = group.channels ?? [];
+    if (chans.length === 0) return 'No channels';
+    return `Ch ${chans.join(', ')}`;
+  });
 
   function changeMode(newMode: 'fixed' | 'curve' | 'pid') {
     let mode: FanMode;
@@ -65,7 +86,7 @@
 <div class="fan-group-card" class:expanded>
   <div class="header">
     <h4 class="group-name">{group.name}</h4>
-    <span class="channels">Ch {group.channels.join(', ')}</span>
+    <span class="channels" title={membershipLabel}>{membershipLabel}</span>
   </div>
 
   <ModeSelector value={modeType} onchange={changeMode} />

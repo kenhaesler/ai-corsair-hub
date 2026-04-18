@@ -1,5 +1,7 @@
 <script lang="ts">
   import type { HubSnapshot } from '../../lib/types';
+  import { displayNameFromTree, shortHubSerial } from '../../lib/identity';
+  import { configStore } from '../../lib/stores/config.svelte';
 
   interface Props {
     hub: HubSnapshot;
@@ -10,7 +12,7 @@
 
 <div class="hub-detail">
   <div class="hub-header">
-    <h4>iCUE LINK Hub</h4>
+    <h4>iCUE LINK Hub — {shortHubSerial(hub.serial)}</h4>
     <span class="meta mono">FW {hub.firmware}</span>
   </div>
   <div class="serial mono">{hub.serial}</div>
@@ -20,6 +22,7 @@
       <tr>
         <th>Ch</th>
         <th>Type</th>
+        <th>Name</th>
         <th>Model</th>
         <th>ID</th>
         <th>RPM</th>
@@ -30,6 +33,7 @@
         <tr>
           <td class="tabular-nums">{device.channel}</td>
           <td>{device.device_type}</td>
+          <td>{displayNameFromTree(device.device_id, { config: configStore.config, hubs: [hub] })}</td>
           <td class="tabular-nums">0x{device.model.toString(16).padStart(2, '0').toUpperCase()}</td>
           <td class="mono">{device.device_id.slice(0, 12)}...</td>
           <td class="tabular-nums">{device.rpm ?? '—'}</td>
