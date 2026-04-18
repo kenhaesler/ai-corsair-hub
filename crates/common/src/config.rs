@@ -6,6 +6,37 @@ pub struct AppConfig {
     pub fan_groups: Vec<FanGroupConfig>,
     #[serde(default)]
     pub rgb: RgbConfig,
+    /// Per-device overrides for hub enumeration quirks. See [`DeviceOverride`].
+    #[serde(default)]
+    pub device_overrides: Vec<DeviceOverride>,
+}
+
+/// Manual override for a specific (hub, channel) device. Use when hub
+/// enumeration misclassifies a device (e.g. LS350 strip reported as QX Fan)
+/// and the wrong LED count corrupts the chain.
+///
+/// Example config snippet:
+/// ```toml
+/// [[device_overrides]]
+/// hub_serial = "8B44BF040D45AA58B07DC6BC9E70E7EC"
+/// channel = 15
+/// led_count = 21
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceOverride {
+    pub hub_serial: String,
+    pub channel: u8,
+    pub led_count: u16,
+}
+
+impl AppConfig {
+    /// Return the LED count override for (hub_serial, channel) if any.
+    pub fn led_count_override(&self, hub_serial: &str, channel: u8) -> Option<u16> {
+        self.device_overrides
+            .iter()
+            .find(|o| o.hub_serial == hub_serial && o.channel == channel)
+            .map(|o| o.led_count)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +105,7 @@ impl Default for AppConfig {
             },
             fan_groups: vec![],
             rgb: RgbConfig::default(),
+            device_overrides: vec![],
         }
     }
 }

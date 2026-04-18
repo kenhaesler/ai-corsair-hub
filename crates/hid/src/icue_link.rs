@@ -516,15 +516,57 @@ impl IcueLinkHub {
     ///
     /// Returns a map of channel → LED count.
     pub fn read_led_counts(&self) -> Result<std::collections::HashMap<u8, u16>> {
-        // Open color endpoint with LED count mode (0x1d)
-        self.transfer(&CMD_OPEN_COLOR, &[0x1d])?;
-        // Read
-        let resp = self.transfer(&[0x08, 0x00], &[])?;
-        // Close
-        self.transfer(&CMD_CLOSE_COLOR, &[])?;
+        // 0x1d can return status 0x03 ("wrong mode") for a short window after
+        // software-mode entry on some firmware revisions. Retry with escalating
+        // backoff before accepting the fallback-to-defaults path — getting the
+        // real LED count from the hub is the difference between a correct
+        // buffer and a chain-desync that makes RGB flicker.
+        let backoffs = [
+            Duration::from_millis(100),
+            Duration::from_millis(300),
+            Duration::from_millis(800),
+        ];
 
-        if resp.len() < 8 {
-            bail!("LED count response too short: {} bytes", resp.len());
+        let mut resp = Vec::new();
+        let mut last_status = 0u8;
+
+        for (attempt, backoff) in std::iter::once(Duration::ZERO)
+            .chain(backoffs.iter().copied())
+            .enumerate()
+        {
+            if !backoff.is_zero() {
+                thread::sleep(backoff);
+            }
+
+            // Open color endpoint with LED count mode (0x1d)
+            self.transfer(&CMD_OPEN_COLOR, &[0x1d])?;
+            // Read
+            resp = self.transfer(&[0x08, 0x00], &[])?;
+            // Close
+            self.transfer(&CMD_CLOSE_COLOR, &[])?;
+
+            if resp.len() < 8 {
+                bail!("LED count response too short: {} bytes", resp.len());
+            }
+
+            last_status = resp[3];
+            if last_status == STATUS_OK {
+                if attempt > 0 {
+                    info!(
+                        serial = self.serial.as_ref(),
+                        attempt = attempt + 1,
+                        "0x1d LED count query succeeded on retry"
+                    );
+                }
+                break;
+            }
+
+            warn!(
+                serial = self.serial.as_ref(),
+                attempt = attempt + 1,
+                status = format!("0x{:02X}", last_status),
+                "0x1d LED count query returned non-OK status"
+            );
         }
 
         // Log raw response for protocol debugging
@@ -535,15 +577,11 @@ impl IcueLinkHub {
             "LED count raw response (0x1d)"
         );
 
-        // Validate response status. byte[3] is the status code:
-        // 0x00 = OK, anything else = error (e.g. 0x03 = wrong mode).
-        // When the hub returns an error, the remaining bytes are garbage.
-        let status = resp[3];
-        if status != STATUS_OK {
+        if last_status != STATUS_OK {
             warn!(
                 serial = self.serial.as_ref(),
-                status = format!("0x{:02X}", status),
-                "0x1d LED count query returned non-OK status — falling back to device type defaults"
+                status = format!("0x{:02X}", last_status),
+                "0x1d LED count query still non-OK after retries — falling back to device type defaults. Consider setting [[device_overrides]] in config.toml if a device has an unexpected LED count."
             );
             return Ok(std::collections::HashMap::new());
         }

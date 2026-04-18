@@ -284,9 +284,27 @@ impl ControlLoop {
                 .with_context(|| format!("Hub serial '{}' not found on USB bus", serial))?;
 
             let hub = IcueLinkHub::new(hid_device, serial.clone());
-            let hub_info = hub
+            let mut hub_info = hub
                 .initialize()
                 .with_context(|| format!("Failed to initialize hub '{}'", serial))?;
+
+            // Apply user-configured device overrides. These take precedence over
+            // both the hub's 0x1d LED-count table and the device-type defaults,
+            // so users can fix misenumeration without waiting for a code change.
+            let mut overridden_channels: Vec<u8> = Vec::new();
+            for ov in &config.device_overrides {
+                if ov.hub_serial == *serial {
+                    hub_info.led_counts.insert(ov.channel, ov.led_count);
+                    overridden_channels.push(ov.channel);
+                }
+            }
+            if !overridden_channels.is_empty() {
+                info!(
+                    serial = serial.as_str(),
+                    channels = ?overridden_channels,
+                    "Applied config device_overrides"
+                );
+            }
 
             let pump_channels: Vec<u8> = hub_info
                 .devices
@@ -305,13 +323,17 @@ impl ControlLoop {
             for dev in &hub_info.devices {
                 let hub_leds = hub_info.led_counts.get(&dev.channel).copied();
                 let effective = hub_leds.unwrap_or_else(|| dev.device_type.led_count());
+                let overridden = overridden_channels.contains(&dev.channel);
                 info!(
                     serial = serial.as_str(),
                     channel = dev.channel,
                     device_type = dev.device_type.name(),
+                    model = format!("0x{:02X}", dev.model),
+                    device_id = dev.device_id.as_str(),
                     type_leds = dev.device_type.led_count(),
                     hub_leds = ?hub_leds,
                     effective_leds = effective,
+                    overridden,
                     "  Device"
                 );
             }
@@ -1426,6 +1448,7 @@ mod tests {
             },
             fan_groups: Vec::new(), // groups supplied separately
             rgb: Default::default(),
+            device_overrides: Vec::new(),
         };
 
         let cl = ControlLoop::from_parts_for_test(config, hubs, vec![group], HashMap::new());
@@ -1446,6 +1469,7 @@ mod tests {
                 mode: FanMode::Fixed { duty_percent: 50.0 },
             }],
             rgb: Default::default(),
+            device_overrides: Vec::new(),
         }
     }
 
