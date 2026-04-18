@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use hidapi::HidDevice;
 use serde::Serialize;
 use std::fmt;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 use tracing::{debug, info, trace, warn};
@@ -217,20 +218,90 @@ pub struct HubInfo {
     pub led_counts: std::collections::HashMap<u8, u16>,
 }
 
+// --- Transport abstraction ---
+
+/// Control-loop-facing transport trait for a single iCUE LINK Hub.
+///
+/// The concrete implementation is `IcueLinkHub` (HID-backed). The trait exists
+/// so the fan-control loop can swap in mock implementations for integration
+/// tests — notably to exercise hub-failure and shutdown-timeout paths that
+/// would otherwise require physical hardware.
+///
+/// All methods take `&self` because `IcueLinkHub` serializes access through an
+/// internal mutex. The `Send + Sync + 'static` bound enables moving a trait
+/// object into a `std::thread::spawn` closure for bounded-timeout shutdown
+/// (see `ControlLoop::shutdown_hardware`).
+pub trait IcueLinkTransport: Send + Sync + 'static {
+    fn set_speeds(&self, targets: &[(u8, u8)]) -> Result<()>;
+    fn get_speeds(&self) -> Result<Vec<FanSpeed>>;
+    fn set_rgb(&self, channel_leds: &[(u8, &[[u8; 3]])]) -> Result<()>;
+    fn enter_hardware_mode(&self) -> Result<()>;
+}
+
+impl IcueLinkTransport for IcueLinkHub {
+    fn set_speeds(&self, targets: &[(u8, u8)]) -> Result<()> {
+        IcueLinkHub::set_speeds(self, targets)
+    }
+    fn get_speeds(&self) -> Result<Vec<FanSpeed>> {
+        IcueLinkHub::get_speeds(self)
+    }
+    fn set_rgb(&self, channel_leds: &[(u8, &[[u8; 3]])]) -> Result<()> {
+        IcueLinkHub::set_rgb(self, channel_leds)
+    }
+    fn enter_hardware_mode(&self) -> Result<()> {
+        IcueLinkHub::enter_hardware_mode(self)
+    }
+}
+
 // --- Hub implementation ---
 
-pub struct IcueLinkHub {
+/// Inner state for a single iCUE LINK Hub connection, shared across `IcueLinkHub`
+/// clones via `Arc`. The `HidDevice` handle and color-endpoint flag live behind a
+/// single mutex so HID transfers are serialized (required by the protocol —
+/// concurrent TX on the same handle would interleave packets).
+///
+/// Keeping both in one mutex also ensures that `enter_hardware_mode` sees a
+/// consistent view of `color_endpoint_open` and avoids a race where a second
+/// thread flips the flag between our check and our close.
+struct IcueLinkHubInner {
     device: HidDevice,
-    serial: String,
     color_endpoint_open: bool,
+}
+
+// SAFETY: `hidapi::HidDevice` is `Send` on all supported platforms (Windows,
+// Linux, macOS) — see hidapi-2.6's platform modules. It is not `Sync`, but we
+// never share it across threads concurrently; the `Mutex` enforces single-
+// threaded access. The `Mutex` is itself `Send + Sync`, so the enclosing
+// `Arc<Mutex<IcueLinkHubInner>>` is `Send + Sync` too.
+
+/// Handle to a Corsair iCUE LINK System Hub.
+///
+/// Cheap to clone (`Arc`-internal): clones share the same underlying HID device
+/// handle and serialize protocol access through an internal mutex. This makes
+/// it safe to move a handle into a short-lived worker thread (e.g. for bounded-
+/// timeout shutdown) without refactoring the caller's ownership model.
+pub struct IcueLinkHub {
+    inner: Arc<Mutex<IcueLinkHubInner>>,
+    serial: Arc<str>,
+}
+
+impl Clone for IcueLinkHub {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            serial: Arc::clone(&self.serial),
+        }
+    }
 }
 
 impl IcueLinkHub {
     pub fn new(device: HidDevice, serial: String) -> Self {
         Self {
-            device,
-            serial,
-            color_endpoint_open: false,
+            inner: Arc::new(Mutex::new(IcueLinkHubInner {
+                device,
+                color_endpoint_open: false,
+            })),
+            serial: Arc::from(serial),
         }
     }
 
@@ -242,28 +313,45 @@ impl IcueLinkHub {
         DATA_INTERFACE
     }
 
+    /// Lock the shared inner state. Poisoned locks are recovered — we don't
+    /// hold data invariants across panics, only a HID handle, so continuing
+    /// after a prior thread's panic is safe.
+    fn lock_inner(&self) -> MutexGuard<'_, IcueLinkHubInner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
     // --- Low-level transfer ---
 
     /// Send a command with optional data, read 512-byte response, check status.
+    ///
+    /// Serializes through the inner mutex so the TX/RX pair is atomic against
+    /// other callers on the same hub.
     fn transfer(&self, cmd: &[u8], data: &[u8]) -> Result<Vec<u8>> {
         let packet = build_packet(cmd, data);
 
         trace!(
-            serial = self.serial.as_str(),
+            serial = self.serial.as_ref(),
             data = hex_string(&packet[..packet.len().min(32)]),
             len = packet.len(),
             "TX"
         );
 
-        self.device
+        let inner = self.lock_inner();
+
+        inner
+            .device
             .write(&packet)
             .context("Failed to write to iCUE LINK Hub")?;
 
         let mut buf = vec![0u8; PACKET_SIZE];
-        let bytes_read = self
+        let bytes_read = inner
             .device
             .read_timeout(&mut buf, READ_TIMEOUT_MS)
             .context("Failed to read from iCUE LINK Hub")?;
+
+        drop(inner);
 
         if bytes_read == 0 {
             bail!("No response from hub (timeout)");
@@ -272,7 +360,7 @@ impl IcueLinkHub {
         buf.truncate(bytes_read);
 
         trace!(
-            serial = self.serial.as_str(),
+            serial = self.serial.as_ref(),
             data = hex_string(&buf[..buf.len().min(32)]),
             len = bytes_read,
             "RX"
@@ -318,12 +406,12 @@ impl IcueLinkHub {
     /// Enter software control mode. Must be called before reading/writing endpoints.
     /// Includes a 500ms delay for the hub to stabilize.
     pub fn enter_software_mode(&self) -> Result<()> {
-        debug!(serial = self.serial.as_str(), "Entering software mode");
+        debug!(serial = self.serial.as_ref(), "Entering software mode");
         let resp = self.transfer(&CMD_WAKE, &[])?;
 
         if resp.len() > 3 && resp[3] != STATUS_OK {
             warn!(
-                serial = self.serial.as_str(),
+                serial = self.serial.as_ref(),
                 status = resp[3],
                 "Non-OK status entering software mode"
             );
@@ -335,11 +423,15 @@ impl IcueLinkHub {
 
     /// Return hub to hardware (firmware) control mode.
     /// Closes the color endpoint if open, then sends the sleep command.
-    pub fn enter_hardware_mode(&mut self) -> Result<()> {
-        debug!(serial = self.serial.as_str(), "Entering hardware mode");
-        if self.color_endpoint_open {
+    pub fn enter_hardware_mode(&self) -> Result<()> {
+        debug!(serial = self.serial.as_ref(), "Entering hardware mode");
+        // Snapshot the flag under the lock so we don't race with another thread
+        // toggling it. If it was open, close_color_endpoint will re-lock and
+        // flip it to false.
+        let was_open = self.lock_inner().color_endpoint_open;
+        if was_open {
             if let Err(e) = self.close_color_endpoint() {
-                warn!(serial = self.serial.as_str(), error = %e, "Failed to close color EP before hardware mode");
+                warn!(serial = self.serial.as_ref(), error = %e, "Failed to close color EP before hardware mode");
             }
         }
         self.transfer(&CMD_SLEEP, &[])?;
@@ -350,21 +442,21 @@ impl IcueLinkHub {
 
     /// Open the color endpoint. Must be called before `write_color()`.
     /// Closes any stale endpoint first, then opens with mode 0x22.
-    pub fn open_color_endpoint(&mut self) -> Result<()> {
-        debug!(serial = self.serial.as_str(), "Opening color endpoint");
+    pub fn open_color_endpoint(&self) -> Result<()> {
+        debug!(serial = self.serial.as_ref(), "Opening color endpoint");
         // Close any stale data endpoint first
         self.transfer(&CMD_CLOSE, &[])?;
         // Open color endpoint (0x0D, 0x00) with mode 0x22
         self.transfer(&CMD_OPEN_COLOR, &[MODE_SET_COLOR])?;
-        self.color_endpoint_open = true;
+        self.lock_inner().color_endpoint_open = true;
         Ok(())
     }
 
     /// Close the color endpoint.
-    pub fn close_color_endpoint(&mut self) -> Result<()> {
-        debug!(serial = self.serial.as_str(), "Closing color endpoint");
+    pub fn close_color_endpoint(&self) -> Result<()> {
+        debug!(serial = self.serial.as_ref(), "Closing color endpoint");
         self.transfer(&CMD_CLOSE_COLOR, &[])?;
-        self.color_endpoint_open = false;
+        self.lock_inner().color_endpoint_open = false;
         Ok(())
     }
 
@@ -390,8 +482,9 @@ impl IcueLinkHub {
     /// High-level RGB API: takes channel→LED color mappings sorted by channel,
     /// flattens into one contiguous RGB buffer, and sends to hardware.
     /// Each LED is `[R, G, B]`. Auto-opens the color endpoint if not already open.
-    pub fn set_rgb(&mut self, channel_leds: &[(u8, &[[u8; 3]])]) -> Result<()> {
-        if !self.color_endpoint_open {
+    pub fn set_rgb(&self, channel_leds: &[(u8, &[[u8; 3]])]) -> Result<()> {
+        let is_open = self.lock_inner().color_endpoint_open;
+        if !is_open {
             self.open_color_endpoint()?;
         }
 
@@ -412,7 +505,7 @@ impl IcueLinkHub {
 
     /// Whether the color endpoint is currently open.
     pub fn color_endpoint_open(&self) -> bool {
-        self.color_endpoint_open
+        self.lock_inner().color_endpoint_open
     }
 
     /// Read the hub's per-channel LED count table.
@@ -436,7 +529,7 @@ impl IcueLinkHub {
 
         // Log raw response for protocol debugging
         info!(
-            serial = self.serial.as_str(),
+            serial = self.serial.as_ref(),
             hex = hex_string(&resp[..resp.len().min(64)]),
             len = resp.len(),
             "LED count raw response (0x1d)"
@@ -448,7 +541,7 @@ impl IcueLinkHub {
         let status = resp[3];
         if status != STATUS_OK {
             warn!(
-                serial = self.serial.as_str(),
+                serial = self.serial.as_ref(),
                 status = format!("0x{:02X}", status),
                 "0x1d LED count query returned non-OK status — falling back to device type defaults"
             );
@@ -461,7 +554,7 @@ impl IcueLinkHub {
         // Sanity check: no hub has more than ~20 physical channels
         if channel_count > 20 {
             warn!(
-                serial = self.serial.as_str(),
+                serial = self.serial.as_ref(),
                 channel_count,
                 "0x1d channel count unreasonable — falling back to device type defaults"
             );
@@ -481,7 +574,7 @@ impl IcueLinkHub {
             // LINK Adapters with multiple strips can report 80+ LEDs.
             if led_count > 0 && led_count <= 255 {
                 debug!(
-                    serial = self.serial.as_str(),
+                    serial = self.serial.as_ref(),
                     channel = ch,
                     dev_type = format!("0x{:02X}", dev_type),
                     led_count,
@@ -492,7 +585,7 @@ impl IcueLinkHub {
         }
 
         info!(
-            serial = self.serial.as_str(),
+            serial = self.serial.as_ref(),
             channels = ?counts,
             "Read LED counts from hub"
         );
@@ -508,7 +601,7 @@ impl IcueLinkHub {
             resp = self.read_endpoint(MODE_DEVICES)?;
 
             debug!(
-                serial = self.serial.as_str(),
+                serial = self.serial.as_ref(),
                 hex = hex_string(&resp[..resp.len().min(128)]),
                 len = resp.len(),
                 attempt = attempt + 1,
@@ -524,7 +617,7 @@ impl IcueLinkHub {
             }
 
             warn!(
-                serial = self.serial.as_str(),
+                serial = self.serial.as_ref(),
                 got_hi = resp.get(4).copied().unwrap_or(0),
                 got_lo = resp.get(5).copied().unwrap_or(0),
                 attempt = attempt + 1,
@@ -570,7 +663,7 @@ impl IcueLinkHub {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     warn!(
-                        serial = self.serial.as_str(),
+                        serial = self.serial.as_ref(),
                         attempt = attempt + 1,
                         error = %e,
                         "set_speeds failed, retrying"
@@ -588,7 +681,7 @@ impl IcueLinkHub {
     pub fn initialize(&self) -> Result<HubInfo> {
         let firmware = self.get_firmware_version()?;
         debug!(
-            serial = self.serial.as_str(),
+            serial = self.serial.as_ref(),
             firmware = %firmware,
             "Hub firmware"
         );
@@ -600,7 +693,7 @@ impl IcueLinkHub {
             Ok(counts) => counts,
             Err(e) => {
                 warn!(
-                    serial = self.serial.as_str(),
+                    serial = self.serial.as_ref(),
                     error = %e,
                     "Failed to read LED counts — will fall back to device type defaults"
                 );
@@ -610,7 +703,7 @@ impl IcueLinkHub {
 
         let devices = self.enumerate_devices()?;
         debug!(
-            serial = self.serial.as_str(),
+            serial = self.serial.as_ref(),
             count = devices.len(),
             "Enumerated devices"
         );

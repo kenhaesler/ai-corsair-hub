@@ -532,7 +532,7 @@ fn build_device_tree(scanner: &DeviceScanner) -> DeviceTree {
                     &group.serial,
                     IcueLinkHub::data_interface(),
                 ) {
-                    let mut hub = IcueLinkHub::new(dev, group.serial.clone());
+                    let hub = IcueLinkHub::new(dev, group.serial.clone());
                     if let Ok(info) = hub.initialize() {
                         let speeds = hub.get_speeds().unwrap_or_default();
                         hub_infos.push((group.serial.clone(), info, speeds));

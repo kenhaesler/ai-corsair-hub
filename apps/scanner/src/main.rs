@@ -119,7 +119,7 @@ fn probe_icue_link_hub(scanner: &DeviceScanner, group: &corsair_hid::discovery::
         }
     };
 
-    let mut hub = IcueLinkHub::new(device, group.serial.clone());
+    let hub = IcueLinkHub::new(device, group.serial.clone());
 
     // Initialize: firmware + software mode + enumerate
     let info = match hub.initialize() {

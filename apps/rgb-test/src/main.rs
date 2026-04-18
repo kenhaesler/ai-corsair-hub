@@ -46,7 +46,7 @@ fn main() -> Result<()> {
         .open_device(group.pid, &group.serial, IcueLinkHub::data_interface())
         .context("Failed to open hub")?;
 
-    let mut hub = IcueLinkHub::new(device, group.serial.clone());
+    let hub = IcueLinkHub::new(device, group.serial.clone());
     let hub_info = hub.initialize().context("Failed to initialize hub")?;
 
     info!("Firmware: {}", hub_info.firmware);
