@@ -771,11 +771,10 @@ fn save_config_to_disk(config: &AppConfig) -> Result<()> {
     let toml_str = toml::to_string_pretty(config)
         .map_err(|e| anyhow::anyhow!("Failed to serialize config: {}", e))?;
     let config_path = crate::config_path();
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| anyhow::anyhow!("Failed to create config dir: {}", e))?;
-    }
-    std::fs::write(&config_path, toml_str)
+    // atomic_write handles parent-directory creation, write+fsync, and rename.
+    // Using it here prevents a truncated/empty config.toml if the process is
+    // killed (crash, power loss, Task Manager) mid-save.
+    corsair_common::atomic_write::write_atomic(&config_path, toml_str.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", config_path.display(), e))?;
     info!("Config saved to {}", config_path.display());
     Ok(())
