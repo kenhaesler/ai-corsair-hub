@@ -16,6 +16,7 @@ pub struct RgbRenderer {
 }
 
 struct ZoneState {
+    #[allow(dead_code)]
     zone_id: String,
     devices: Vec<DeviceTarget>,
     layer_stack: LayerStack,
@@ -24,15 +25,14 @@ struct ZoneState {
     transition: Option<CrossFade>,
 }
 
+/// Internal renderer target. Post-Step-5 the renderer only knows the stable
+/// `device_id` — who routes the resulting LEDs to which hub/channel is the
+/// control loop's concern (it resolves via `DeviceRegistry` immediately
+/// before the wire write). If a zone references a device that cannot be
+/// resolved to a device_id at `apply_rgb_config` time, the caller must
+/// skip it there; the renderer never carries an unknown target.
 struct DeviceTarget {
-    hub_serial: String,
-    channel: u8,
-    /// Stable device identity. `None` when the target came from a V1 config
-    /// that only knows (hub_serial, channel). Populated at the `apply_rgb_config`
-    /// construction site (in `apps/gui`) by looking up the channel in the
-    /// runtime registry. Stays `None` during transition when the device is
-    /// orphaned (referenced in config but not currently enumerated).
-    device_id: Option<String>,
+    device_id: String,
     layout: LedLayout,
 }
 
@@ -79,8 +79,6 @@ impl RgbRenderer {
                     .devices
                     .iter()
                     .map(|d| DeviceTarget {
-                        hub_serial: d.hub_serial.clone(),
-                        channel: d.channel,
                         device_id: d.device_id.clone(),
                         layout: d.layout.clone(),
                     })
@@ -142,10 +140,21 @@ impl RgbRenderer {
                     }
                 }
 
+                // Post-Step-5: the renderer emits frames keyed by
+                // stable device_id. `apply_rgb_config` in `apps/gui` is
+                // responsible for only constructing DeviceConfig entries
+                // with a populated device_id — an empty string here is
+                // upstream-bug territory, caught by the `expect` to
+                // surface the violation immediately instead of silently
+                // emitting orphan frames.
+                assert!(
+                    !device.device_id.is_empty(),
+                    "DeviceTarget must have device_id by Step 5 — upstream apply_rgb_config \
+                     failed to resolve or skip this device"
+                );
+
                 frames.push(RgbFrame {
-                    hub_serial: device.hub_serial.clone(),
-                    channel: device.channel,
-                    device_id: device.device_id.clone().unwrap_or_default(),
+                    device_id: device.device_id.clone(),
                     leds,
                 });
             }
@@ -173,12 +182,11 @@ pub struct ZoneConfig {
     pub flow: Option<FlowConfig>,
 }
 
+/// Per-device renderer input. Stable `device_id` is mandatory — callers that
+/// cannot resolve a zone's device reference to a device_id must skip it at
+/// the config-expansion site (see `apply_rgb_config` in `apps/gui`).
 pub struct DeviceConfig {
-    pub hub_serial: String,
-    pub channel: u8,
-    /// Stable device identity when known. `None` during V1→V2 transition
-    /// when the source config only had (hub_serial, channel).
-    pub device_id: Option<String>,
+    pub device_id: String,
     pub layout: LedLayout,
 }
 
@@ -188,16 +196,17 @@ mod tests {
     use crate::color::BlendMode;
     use crate::effect::EffectConfig;
 
+    /// Renderer produces frames keyed by `device_id` (Step 5 invariant).
+    /// The previous `hub_serial`/`channel` fields are gone — the renderer
+    /// no longer cares about wire location.
     #[test]
-    fn renderer_produces_frames() {
+    fn renderer_produces_frames_with_device_id() {
         let mut renderer = RgbRenderer::new();
         renderer.update_config(
             &[ZoneConfig {
                 name: "test".into(),
                 devices: vec![DeviceConfig {
-                    hub_serial: "HUB1".into(),
-                    channel: 1,
-                    device_id: None,
+                    device_id: "0100AAA".into(),
                     layout: LedLayout::qx_fan(),
                 }],
                 layers: vec![Layer {
@@ -217,8 +226,7 @@ mod tests {
         let ctx = EffectContext::default();
         let frames = renderer.tick(&ctx);
         assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].hub_serial, "HUB1");
-        assert_eq!(frames[0].channel, 1);
+        assert_eq!(frames[0].device_id, "0100AAA");
         assert_eq!(frames[0].leds.len(), 34);
         assert_eq!(frames[0].leds[0], Rgb::new(255, 0, 0));
     }
@@ -230,9 +238,7 @@ mod tests {
             &[ZoneConfig {
                 name: "test".into(),
                 devices: vec![DeviceConfig {
-                    hub_serial: "HUB1".into(),
-                    channel: 1,
-                    device_id: None,
+                    device_id: "0100AAA".into(),
                     layout: LedLayout::FanRing { led_count: 4 },
                 }],
                 layers: vec![Layer {
@@ -264,15 +270,11 @@ mod tests {
                     name: "zone1".into(),
                     devices: vec![
                         DeviceConfig {
-                            hub_serial: "HUB1".into(),
-                            channel: 1,
-                            device_id: None,
+                            device_id: "0100AAA".into(),
                             layout: LedLayout::FanRing { led_count: 4 },
                         },
                         DeviceConfig {
-                            hub_serial: "HUB1".into(),
-                            channel: 2,
-                            device_id: None,
+                            device_id: "0100BBB".into(),
                             layout: LedLayout::FanRing { led_count: 4 },
                         },
                     ],
@@ -290,9 +292,7 @@ mod tests {
                 ZoneConfig {
                     name: "zone2".into(),
                     devices: vec![DeviceConfig {
-                        hub_serial: "HUB2".into(),
-                        channel: 1,
-                        device_id: None,
+                        device_id: "0100CCC".into(),
                         layout: LedLayout::ls350(),
                     }],
                     layers: vec![Layer {

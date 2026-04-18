@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -79,20 +79,6 @@ pub struct GroupDutyReport {
     pub channels: Vec<(u8, u8)>, // (channel, duty_u8)
 }
 
-/// RGB frame data for sending to hardware (no dependency on corsair-rgb crate).
-///
-/// Dual-key during the V1→V2 transition: either `device_id` is populated
-/// (V2 path — resolves through the registry) OR `hub_serial` + `channel`
-/// are populated (V1 path — sent directly). When `device_id` is non-empty
-/// it takes precedence. `send_rgb_frames` treats an orphan device_id
-/// (not currently enumerated) as skipped cleanly.
-pub struct RgbFrameRef<'a> {
-    pub hub_serial: &'a str,
-    pub channel: u8,
-    pub device_id: &'a str,
-    pub leds: &'a [[u8; 3]],
-}
-
 pub struct ControlLoop {
     config: AppConfig,
     sensors: HashMap<String, Box<dyn TemperatureSource>>,
@@ -105,6 +91,15 @@ pub struct ControlLoop {
     /// with non-empty `device_ids` resolves through the registry;
     /// otherwise the legacy channel path runs.
     registry: DeviceRegistry,
+    /// Orphan device_ids already warned about this process lifetime. Step 5
+    /// invariant: `send_rgb_frames` receives frames keyed by device_id only;
+    /// a device_id not in the registry means the config references a device
+    /// that isn't enumerated this boot (unplugged, moved elsewhere). We log
+    /// once per boot per device_id — repeating every tick at 30 FPS would
+    /// flood the log. The set is cleared on `update_config` and on
+    /// `replace_hub` so a device that reappears gets a fresh warning budget
+    /// if it disappears again later.
+    logged_orphan_rgb_ids: HashSet<String>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -459,6 +454,7 @@ impl ControlLoop {
             hubs,
             groups,
             registry,
+            logged_orphan_rgb_ids: HashSet::new(),
             shutdown,
         })
     }
@@ -675,6 +671,15 @@ impl ControlLoop {
         &self.config
     }
 
+    /// Current device identity registry. Used by callers that need to
+    /// resolve (hub_serial, channel) → device_id at config-expansion time
+    /// (notably `apply_rgb_config` in the GUI, which pairs V1
+    /// `RgbDeviceRef` entries with their stable device_id before handing
+    /// zone configs to the renderer).
+    pub fn registry(&self) -> &DeviceRegistry {
+        &self.registry
+    }
+
     /// Names of sensors that are currently initialized and available.
     pub fn available_sensors(&self) -> Vec<String> {
         self.sensors.keys().cloned().collect()
@@ -704,6 +709,11 @@ impl ControlLoop {
         }
         self.config = config;
         self.groups = groups;
+        // A new config may reference a different set of device_ids —
+        // reset the orphan warning dedupe so legitimate new orphans get
+        // surfaced in the log rather than silently suppressed by stale
+        // entries from the previous config.
+        self.logged_orphan_rgb_ids.clear();
         Ok(())
     }
 
@@ -824,6 +834,11 @@ impl ControlLoop {
         // re-enumeration (fans added/removed/reordered on the chain).
         // Rebuild so subsequent cycles resolve device_ids correctly.
         self.registry = build_registry(&self.hubs);
+        // Drop the orphan warning dedupe so a device that disappears
+        // again after a recovery cycle gets a fresh log entry — the
+        // user deserves to know when a reconnected device later goes
+        // missing again, even if we saw it orphan earlier.
+        self.logged_orphan_rgb_ids.clear();
     }
 
     /// Mark that a recovery attempt was made (even if it failed) to enforce
@@ -921,44 +936,74 @@ impl ControlLoop {
     /// device's actual LED count. We must match those counts exactly, or subsequent
     /// devices receive misaligned data.
     ///
-    /// This method uses the hub's cached device enumeration to build a correctly-sized
-    /// buffer for each hub: truncating/padding frame data to match the actual LED count,
-    /// and inserting black for devices without frames.
-    pub fn send_rgb_frames(&mut self, frames: &[RgbFrameRef]) -> usize {
+    /// ## Input shape: `&[(device_id, leds)]`
+    ///
+    /// Post-Step-5 (PR2): the caller supplies frames keyed by stable
+    /// `device_id` only. The renderer produces these; the legacy
+    /// `(hub_serial, channel)` path is gone. This function resolves each
+    /// device_id via the runtime registry, bucketizes by hub, sorts by
+    /// ascending channel within each hub (wire requirement — the hub's
+    /// daisy-chain parser walks the buffer in channel order), and builds a
+    /// flat buffer for every enumerated device on the hub. Devices present
+    /// on a hub but not referenced in `frames` get black fill. Orphan
+    /// device_ids (in the input but not in the registry — e.g. a fan
+    /// unplugged since config load) are logged once per boot per device_id
+    /// and skipped.
+    ///
+    /// ## LED count precedence (Step 6)
+    ///
+    /// For each device we need the actual LED count so the flat buffer
+    /// matches what the hub parser expects. Precedence:
+    ///   1. V2 per-device override: `config.led_count_override_by_id(device_id)`.
+    ///   2. V1 (hub, channel) override: `config.led_count_override(hub, ch)`.
+    ///   3. Hub firmware 0x1d table: `hub_info.led_counts`.
+    ///   4. Device-type default: `dev.device_type.led_count()`.
+    /// V2 and V1 overrides are both pre-applied into `hub_info.led_counts`
+    /// at build time, so in practice the 0x1d-table lookup already reflects
+    /// them. The explicit checks here guard against timing windows where
+    /// `update_config` hasn't refreshed the hub table yet (e.g. a live
+    /// config edit that changes an override — the control loop's next RGB
+    /// tick still produces a correct buffer before the config-apply path
+    /// rewrites `hub_info.led_counts`).
+    pub fn send_rgb_frames(&mut self, frames: &[(String, &[[u8; 3]])]) -> usize {
         use std::collections::BTreeMap;
 
         const BLACK: [u8; 3] = [0, 0, 0];
 
         // Group frames by hub serial, sort by channel within each hub.
         //
-        // Dual-key during the V1→V2 transition: when a frame has a non-
-        // empty device_id, resolve via the registry. Otherwise use the
-        // frame's literal (hub_serial, channel). Orphans (device_ids not
-        // currently enumerated) are skipped silently.
+        // Orphan device_ids (not in the registry) are logged once per boot
+        // per id via `logged_orphan_rgb_ids`, then skipped. A 30 FPS RGB
+        // loop would flood the log otherwise. The dedupe set is reset
+        // when `update_config` or `replace_hub` refreshes the registry.
         //
-        // Ownership note: we key `by_hub` on String (not &str) because
-        // the resolved hub_serial is owned by the registry, and the
-        // registry outlives this function, but not with a borrow that
-        // can be threaded all the way through the HashMap build. Cheap
-        // clones here; RGB frame rate is 30 FPS.
-        let mut by_hub: HashMap<String, BTreeMap<u8, &[[u8; 3]]>> = HashMap::new();
-        for frame in frames {
-            if !frame.device_id.is_empty() {
-                // V2 path: resolve device_id → (hub_serial, channel).
-                let Some(loc) = self.registry.resolve(frame.device_id) else {
-                    // Orphan — skip.
-                    continue;
-                };
-                by_hub
-                    .entry(loc.hub_serial.clone())
-                    .or_default()
-                    .insert(loc.channel, frame.leds);
-            } else {
-                by_hub
-                    .entry(frame.hub_serial.to_string())
-                    .or_default()
-                    .insert(frame.channel, frame.leds);
-            }
+        // We store `(channel, device_id, leds)` keyed by hub so the
+        // per-device LED-count lookup below has the device_id on hand for
+        // the V2 override precedence check.
+        let mut by_hub: HashMap<String, BTreeMap<u8, (String, &[[u8; 3]])>> = HashMap::new();
+        let mut new_orphans: Vec<String> = Vec::new();
+        for (device_id, leds) in frames {
+            let Some(loc) = self.registry.resolve(device_id) else {
+                // Orphan — defer the log until after the loop so we can
+                // update the seen-set without fighting the immutable
+                // borrow on `self.registry` above.
+                if !self.logged_orphan_rgb_ids.contains(device_id) {
+                    new_orphans.push(device_id.clone());
+                }
+                continue;
+            };
+            by_hub
+                .entry(loc.hub_serial.clone())
+                .or_default()
+                .insert(loc.channel, (device_id.clone(), *leds));
+        }
+        for id in new_orphans {
+            warn!(
+                device_id = id.as_str(),
+                "RGB frame references device_id not currently enumerated — \
+                 skipping (further occurrences of this id will be silent this boot)"
+            );
+            self.logged_orphan_rgb_ids.insert(id);
         }
 
         let mut sent = 0;
@@ -975,23 +1020,47 @@ impl ControlLoop {
             let mut device_leds: Vec<(u8, Vec<[u8; 3]>)> = Vec::new();
 
             for dev in &hub_conn.info.devices {
-                // Use hub firmware's LED count (from 0x1d table) if available,
-                // otherwise fall back to device type default.
-                // The 0x1d table is authoritative for LINK Adapters with connected strips.
-                let actual_count = hub_conn
-                    .info
-                    .led_counts
-                    .get(&dev.channel)
-                    .copied()
+                // LED count precedence (Step 6 — device_id-first):
+                //   1. V2 per-device override: `led_count_override_by_id`
+                //      keyed on the device_id (stable across topology
+                //      shifts — a fan moved to a different port keeps its
+                //      override).
+                //   2. V1 (hub, channel) override: `led_count_override`
+                //      for the current hub/channel pair.
+                //   3. Hub firmware 0x1d table (`info.led_counts`) —
+                //      authoritative for LINK Adapters with connected
+                //      strips.
+                //   4. Device-type default (e.g. QxFan = 34).
+                //
+                // In the steady state (1) and (2) are already folded
+                // into `info.led_counts` by `build()` / `update_config`,
+                // so this chain mostly documents intent. The explicit
+                // check still fires correctly in two real cases:
+                //   - a config update between an RGB tick and the
+                //     control-loop `update_config` call that folds the
+                //     new overrides into led_counts;
+                //   - test fixtures that don't seed `led_counts` but
+                //     want the override to take effect.
+                let actual_count = self
+                    .config
+                    .led_count_override_by_id(&dev.device_id)
+                    .or_else(|| self.config.led_count_override(serial.as_str(), dev.channel))
+                    .or_else(|| {
+                        hub_conn
+                            .info
+                            .led_counts
+                            .get(&dev.channel)
+                            .copied()
+                            .filter(|&c| c > 0)
+                    })
                     .map(|c| c as usize)
-                    .filter(|&c| c > 0)
                     .unwrap_or(dev.device_type.led_count() as usize);
 
                 if actual_count == 0 {
                     continue; // truly no LEDs
                 }
 
-                let frame_data = frame_channels.get(&dev.channel);
+                let frame_data = frame_channels.get(&dev.channel).map(|(_id, leds)| *leds);
 
                 let leds = if let Some(data) = frame_data {
                     // Truncate or pad to actual LED count
@@ -1615,6 +1684,7 @@ impl ControlLoop {
             hubs: hub_conns,
             groups,
             registry,
+            logged_orphan_rgb_ids: HashSet::new(),
             shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -2025,22 +2095,35 @@ mod tests {
 
     // --- Step 4: dual-key control loop tests ---
 
-    /// Mock hub that records every set_speeds call so we can verify which
-    /// (channel, duty) pairs were actually dispatched through the
-    /// dual-key path. set_rgb/enter_hardware_mode unused here.
+    /// Mock hub that records every set_speeds and set_rgb call so tests
+    /// can verify which (channel, duty) pairs and (channel, led_count)
+    /// buffers were actually dispatched through the dual-key path.
     struct RecordingHub {
         speeds_sent: std::sync::Mutex<Vec<Vec<(u8, u8)>>>,
+        /// Each element is one `set_rgb` call; per call we record
+        /// `(channel, led_count)` so tests can assert routing and
+        /// buffer sizing without holding the raw byte slices alive.
+        rgb_sent: std::sync::Mutex<Vec<Vec<(u8, usize)>>>,
     }
 
     impl RecordingHub {
         fn new() -> Self {
             Self {
                 speeds_sent: std::sync::Mutex::new(Vec::new()),
+                rgb_sent: std::sync::Mutex::new(Vec::new()),
             }
         }
 
         fn last_speeds(&self) -> Option<Vec<(u8, u8)>> {
             self.speeds_sent.lock().unwrap().last().cloned()
+        }
+
+        fn last_rgb(&self) -> Option<Vec<(u8, usize)>> {
+            self.rgb_sent.lock().unwrap().last().cloned()
+        }
+
+        fn rgb_call_count(&self) -> usize {
+            self.rgb_sent.lock().unwrap().len()
         }
     }
 
@@ -2052,7 +2135,12 @@ mod tests {
         fn get_speeds(&self) -> Result<Vec<FanSpeed>> {
             Ok(Vec::new())
         }
-        fn set_rgb(&self, _channel_leds: &[(u8, &[[u8; 3]])]) -> Result<()> {
+        fn set_rgb(&self, channel_leds: &[(u8, &[[u8; 3]])]) -> Result<()> {
+            let summary: Vec<(u8, usize)> = channel_leds
+                .iter()
+                .map(|(ch, leds)| (*ch, leds.len()))
+                .collect();
+            self.rgb_sent.lock().unwrap().push(summary);
             Ok(())
         }
         fn enter_hardware_mode(&self) -> Result<()> {
@@ -2191,6 +2279,219 @@ mod tests {
             sorted,
             vec![(7u8, 40u8), (8u8, 40u8)],
             "V1 group should keep its literal channels"
+        );
+    }
+
+    // --- Step 5: RGB pipeline keyed by device_id ---
+
+    /// send_rgb_frames now takes `(device_id, leds)` pairs. Each device_id
+    /// must resolve via the registry to its current (hub, channel). Two
+    /// devices on different hubs demonstrate that bucketing routes the
+    /// right LEDs to the right hub.
+    #[test]
+    fn send_rgb_frames_routes_v2_device_ids_correctly() {
+        let hub_a = "HUB_A".to_string();
+        let hub_b = "HUB_B".to_string();
+        let mock_a: Arc<RecordingHub> = Arc::new(RecordingHub::new());
+        let mock_b: Arc<RecordingHub> = Arc::new(RecordingHub::new());
+
+        let mut hubs: HashMap<String, (Arc<dyn IcueLinkTransport>, Vec<u8>)> = HashMap::new();
+        hubs.insert(
+            hub_a.clone(),
+            (mock_a.clone() as Arc<dyn IcueLinkTransport>, Vec::new()),
+        );
+        hubs.insert(
+            hub_b.clone(),
+            (mock_b.clone() as Arc<dyn IcueLinkTransport>, Vec::new()),
+        );
+
+        // ID_A1 on HUB_A ch 1; ID_B2 on HUB_B ch 2. QxFan device type
+        // declares 34 LEDs as its default.
+        let mut devices_by_hub: HashMap<String, Vec<corsair_hid::LinkDevice>> = HashMap::new();
+        devices_by_hub.insert(
+            hub_a.clone(),
+            vec![mk_link_device(1, "ID_A1")],
+        );
+        devices_by_hub.insert(
+            hub_b.clone(),
+            vec![mk_link_device(2, "ID_B2")],
+        );
+
+        let mut cl = ControlLoop::from_parts_for_test_with_devices(
+            base_v1_config(),
+            hubs,
+            devices_by_hub,
+            Vec::new(),
+            HashMap::new(),
+        );
+
+        // Build frames keyed by device_id. Each device advertises 34 LEDs
+        // (QxFan default), so provide that many.
+        let a_leds = vec![[1u8, 2, 3]; 34];
+        let b_leds = vec![[4u8, 5, 6]; 34];
+        let frames: Vec<(String, &[[u8; 3]])> = vec![
+            ("ID_A1".to_string(), a_leds.as_slice()),
+            ("ID_B2".to_string(), b_leds.as_slice()),
+        ];
+
+        let sent = cl.send_rgb_frames(&frames);
+
+        // Each hub's enumeration lists one device; the flat buffer for
+        // each hub is therefore one entry long.
+        assert_eq!(sent, 2, "one device per hub should yield sent == 2");
+
+        // HUB_A call should include channel 1 with 34 LEDs (not channel 2).
+        let a_call = mock_a.last_rgb().expect("HUB_A should have received set_rgb");
+        assert_eq!(
+            a_call,
+            vec![(1u8, 34usize)],
+            "HUB_A should receive ch1 34 LEDs (ID_A1)"
+        );
+        let b_call = mock_b.last_rgb().expect("HUB_B should have received set_rgb");
+        assert_eq!(
+            b_call,
+            vec![(2u8, 34usize)],
+            "HUB_B should receive ch2 34 LEDs (ID_B2)"
+        );
+    }
+
+    /// Orphan device_ids (in frames but not in registry) are skipped cleanly
+    /// and logged only once per boot per id. We verify the behavior by
+    /// calling send_rgb_frames twice with the same orphan id — the second
+    /// call must still skip without crashing and without redundant log
+    /// attempts (the `logged_orphan_rgb_ids` set dedupes the warning path).
+    #[test]
+    fn send_rgb_frames_skips_orphan_device_id_with_log() {
+        let hub_a = "HUB_A".to_string();
+        let mock_a: Arc<RecordingHub> = Arc::new(RecordingHub::new());
+
+        let mut hubs: HashMap<String, (Arc<dyn IcueLinkTransport>, Vec<u8>)> = HashMap::new();
+        hubs.insert(
+            hub_a.clone(),
+            (mock_a.clone() as Arc<dyn IcueLinkTransport>, Vec::new()),
+        );
+
+        // Only ID_A1 is enumerated; ID_ORPHAN is never seen.
+        let mut devices_by_hub: HashMap<String, Vec<corsair_hid::LinkDevice>> = HashMap::new();
+        devices_by_hub.insert(hub_a.clone(), vec![mk_link_device(1, "ID_A1")]);
+
+        let mut cl = ControlLoop::from_parts_for_test_with_devices(
+            base_v1_config(),
+            hubs,
+            devices_by_hub,
+            Vec::new(),
+            HashMap::new(),
+        );
+
+        let real_leds = vec![[10u8, 20, 30]; 34];
+        let orphan_leds = vec![[99u8, 99, 99]; 34];
+        let frames: Vec<(String, &[[u8; 3]])> = vec![
+            ("ID_A1".to_string(), real_leds.as_slice()),
+            ("ID_ORPHAN".to_string(), orphan_leds.as_slice()),
+        ];
+
+        // First call — should warn once on the orphan and successfully
+        // route ID_A1 to channel 1.
+        let sent1 = cl.send_rgb_frames(&frames);
+        assert_eq!(
+            sent1, 1,
+            "one real device on hub; orphan skipped so sent == 1"
+        );
+        assert!(
+            cl.logged_orphan_rgb_ids.contains("ID_ORPHAN"),
+            "orphan id should be recorded in the seen-set after first call"
+        );
+        let call1 = mock_a
+            .last_rgb()
+            .expect("HUB_A should have received a set_rgb call");
+        assert_eq!(
+            call1,
+            vec![(1u8, 34usize)],
+            "HUB_A should receive only ch1 (ID_A1), not the orphan"
+        );
+
+        // Second call — orphan is now in the seen-set; skip silently.
+        // The real device still makes it through.
+        let sent2 = cl.send_rgb_frames(&frames);
+        assert_eq!(sent2, 1, "orphan still skipped on repeat");
+        assert_eq!(
+            mock_a.rgb_call_count(),
+            2,
+            "hub should have received two set_rgb calls overall"
+        );
+    }
+
+    // --- Step 6: LED-count override by device_id ---
+
+    /// V2 per-device-id override takes precedence over V1 (hub, channel)
+    /// override in send_rgb_frames' LED-count resolution. Both overrides
+    /// refer to the same physical device (same hub, same channel). The V2
+    /// override value must win: the flat buffer to the hub should size the
+    /// device at the V2 value.
+    #[test]
+    fn v2_led_count_override_takes_precedence_over_v1() {
+        let hub_serial = "HUB_A".to_string();
+        let mock: Arc<RecordingHub> = Arc::new(RecordingHub::new());
+        let mut hubs: HashMap<String, (Arc<dyn IcueLinkTransport>, Vec<u8>)> = HashMap::new();
+        hubs.insert(
+            hub_serial.clone(),
+            (mock.clone() as Arc<dyn IcueLinkTransport>, Vec::new()),
+        );
+
+        // A QxFan-type device with a 26-hex device_id on ch 1. The type
+        // default is 34 LEDs, but the user has overridden:
+        //   - V1 path: (HUB_A, 1) → 21 (stale/legacy)
+        //   - V2 path: device_id "ID_A1" → 30 (canonical)
+        // V2 must win.
+        let mut devices_by_hub: HashMap<String, Vec<corsair_hid::LinkDevice>> = HashMap::new();
+        devices_by_hub.insert(hub_serial.clone(), vec![mk_link_device(1, "ID_A1")]);
+
+        // Config with BOTH overrides pointing at the same physical device.
+        let config = AppConfig {
+            schema_version: corsair_common::config::SCHEMA_VERSION_V2,
+            general: GeneralConfig {
+                poll_interval_ms: 1000,
+                log_level: "info".to_string(),
+                lhm_exe_path: None,
+            },
+            fan_groups: Vec::new(),
+            rgb: Default::default(),
+            device_overrides: vec![DeviceOverride {
+                hub_serial: hub_serial.clone(),
+                channel: 1,
+                led_count: 21, // V1 — should NOT be used
+            }],
+            devices: vec![corsair_common::config::v2::DeviceEntry {
+                device_id: "ID_A1".to_string(),
+                name: None,
+                led_count: Some(30), // V2 — must win
+            }],
+        };
+
+        let mut cl = ControlLoop::from_parts_for_test_with_devices(
+            config,
+            hubs,
+            devices_by_hub,
+            Vec::new(),
+            HashMap::new(),
+        );
+
+        // Supply a long buffer (34 QxFan defaults); the flat buffer
+        // should be truncated to 30 LEDs per the V2 override.
+        let long_leds = vec![[7u8, 7, 7]; 34];
+        let frames: Vec<(String, &[[u8; 3]])> =
+            vec![("ID_A1".to_string(), long_leds.as_slice())];
+
+        let sent = cl.send_rgb_frames(&frames);
+        assert_eq!(sent, 1);
+
+        let call = mock
+            .last_rgb()
+            .expect("HUB_A should have received set_rgb");
+        assert_eq!(
+            call,
+            vec![(1u8, 30usize)],
+            "V2 per-device override (30) must win over V1 (21) and type default (34)"
         );
     }
 }

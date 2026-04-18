@@ -2,20 +2,19 @@ use serde::Serialize;
 
 use crate::Rgb;
 
-/// A single frame of LED data for one device channel.
+/// A single frame of LED data for one device.
 ///
-/// During the V1→V2 identity refactor this struct carries BOTH the legacy
-/// (hub_serial, channel) location keys AND the stable `device_id`. The
-/// renderer populates `device_id` when the device picker provided one;
-/// otherwise it stays empty and downstream code falls back to the legacy
-/// path. A later step (PR2 Step 5) drops hub_serial/channel in favor of
-/// device_id-only once all call sites are migrated.
+/// Post-Step-5 (PR2): the frame is keyed by stable `device_id` only. The
+/// renderer no longer emits frames with `(hub_serial, channel)` location
+/// tags — the control loop's `send_rgb_frames` resolves each `device_id` via
+/// the runtime registry immediately before the wire write. If a DeviceTarget
+/// reaches frame construction without a device_id, that is a bug upstream of
+/// the renderer (the registry lookup in `apply_rgb_config` should have
+/// populated it, or skipped the device outright).
 #[derive(Debug, Clone, Serialize)]
 pub struct RgbFrame {
-    pub hub_serial: String,
-    pub channel: u8,
-    /// Stable device identity. Empty string during the transition when the
-    /// zone targets came from a V1 config (hub_serial + channel only).
+    /// Stable device identity (26-hex string burned in at manufacturing).
+    /// Mandatory as of Step 5.
     pub device_id: String,
     pub leds: Vec<Rgb>,
 }
