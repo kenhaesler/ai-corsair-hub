@@ -20,7 +20,7 @@ const CMD_WAKE: [u8; 4] = [0x01, 0x03, 0x00, 0x02]; // Enter software mode
 const CMD_SLEEP: [u8; 4] = [0x01, 0x03, 0x00, 0x01]; // Enter hardware mode
 const CMD_FIRMWARE: [u8; 2] = [0x02, 0x13]; // Get firmware version
 const CMD_OPEN: [u8; 2] = [0x0D, 0x01]; // Open data endpoint
-const CMD_CLOSE: [u8; 3] = [0x05, 0x01, 0x01]; // Close data endpoint
+const CMD_CLOSE: [u8; 3] = [0x05, 0x01, 0x01]; // Close endpoint selected by mode byte
 const CMD_READ: [u8; 2] = [0x08, 0x01]; // Read from data endpoint
 const CMD_WRITE: [u8; 2] = [0x06, 0x01]; // Write to data endpoint
 
@@ -433,32 +433,28 @@ impl IcueLinkHub {
     /// Endpoint read: close → open(mode) → read → close
     fn read_endpoint(&self, mode: u8) -> Result<Vec<u8>> {
         let mut inner = self.lock_inner();
-        self.transfer_locked(&mut inner, &CMD_CLOSE, &[], false)?;
-        inner.color_endpoint_open = false;
+        self.transfer_locked(&mut inner, &CMD_CLOSE, &[mode], false)?;
         self.transfer_locked(&mut inner, &CMD_OPEN, &[mode], false)?;
 
         let operation = self.transfer_locked(&mut inner, &CMD_READ, &[], false);
         let close = self
-            .transfer_locked(&mut inner, &CMD_CLOSE, &[], false)
+            .transfer_locked(&mut inner, &CMD_CLOSE, &[mode], false)
             .map(|_| ());
-        inner.color_endpoint_open = false;
         combine_operation_and_close(operation, close)
     }
 
     /// Endpoint write: close → open(mode) → write(data) → close
     fn write_endpoint(&self, mode: u8, data: &[u8]) -> Result<()> {
         let mut inner = self.lock_inner();
-        self.transfer_locked(&mut inner, &CMD_CLOSE, &[], false)?;
-        inner.color_endpoint_open = false;
+        self.transfer_locked(&mut inner, &CMD_CLOSE, &[mode], false)?;
         self.transfer_locked(&mut inner, &CMD_OPEN, &[mode], false)?;
 
         let operation = self
             .transfer_locked(&mut inner, &CMD_WRITE, data, false)
             .map(|_| ());
         let close = self
-            .transfer_locked(&mut inner, &CMD_CLOSE, &[], false)
+            .transfer_locked(&mut inner, &CMD_CLOSE, &[mode], false)
             .map(|_| ());
-        inner.color_endpoint_open = false;
         combine_operation_and_close(operation, close)
     }
 
@@ -505,9 +501,24 @@ impl IcueLinkHub {
     pub fn open_color_endpoint(&self) -> Result<()> {
         debug!(serial = self.serial.as_ref(), "Opening color endpoint");
         let mut inner = self.lock_inner();
-        self.transfer_locked(&mut inner, &CMD_CLOSE, &[], false)?;
+        self.open_color_endpoint_locked(&mut inner)
+    }
+
+    fn open_color_endpoint_locked(&self, inner: &mut IcueLinkHubInner) -> Result<()> {
+        if inner.color_endpoint_open {
+            return Ok(());
+        }
+
+        self.transfer_locked(inner, &CMD_CLOSE, &[MODE_SET_COLOR], false)?;
         inner.color_endpoint_open = false;
-        self.transfer_locked(&mut inner, &CMD_OPEN_COLOR, &[MODE_SET_COLOR], false)?;
+        let response = self.transfer_locked(inner, &CMD_OPEN_COLOR, &[MODE_SET_COLOR], true)?;
+        validate_color_endpoint_open_response(&response)?;
+        if response[3] == STATUS_WRONG_MODE {
+            debug!(
+                serial = self.serial.as_ref(),
+                "Hub returned firmware-compatible status 0x03 for color endpoint open"
+            );
+        }
         inner.color_endpoint_open = true;
         Ok(())
     }
@@ -562,12 +573,12 @@ impl IcueLinkHub {
 
         let payload = build_rgb_payload(&rgb_bytes);
         let mut inner = self.lock_inner();
-        if !inner.color_endpoint_open {
-            self.transfer_locked(&mut inner, &CMD_CLOSE, &[], false)?;
-            self.transfer_locked(&mut inner, &CMD_OPEN_COLOR, &[MODE_SET_COLOR], false)?;
-            inner.color_endpoint_open = true;
+        self.open_color_endpoint_locked(&mut inner)?;
+        let result = self.write_color_locked(&mut inner, &payload);
+        if result.is_err() {
+            inner.color_endpoint_open = false;
         }
-        self.write_color_locked(&mut inner, &payload)
+        result
     }
 
     /// Whether the color endpoint is currently open.
@@ -608,7 +619,7 @@ impl IcueLinkHub {
             // Treat the query as one endpoint session so other traffic cannot
             // change the active mode between open, read, and close.
             let mut inner = self.lock_inner();
-            self.transfer_locked(&mut inner, &CMD_CLOSE, &[], false)?;
+            self.transfer_locked(&mut inner, &CMD_CLOSE, &[0x1d], false)?;
             inner.color_endpoint_open = false;
             self.transfer_locked(&mut inner, &CMD_OPEN_COLOR, &[0x1d], false)?;
             let operation = self.transfer_locked(&mut inner, &[0x08, 0x00], &[], true);
@@ -892,11 +903,17 @@ impl IcueLinkHub {
             );
         };
 
-        Ok(HubInfo {
+        let info = HubInfo {
             firmware,
             devices,
             led_counts,
-        })
+        };
+
+        // The color endpoint is independent of the transactional data endpoint.
+        // Keep it open while telemetry and speed sessions come and go.
+        let mut inner = self.lock_inner();
+        self.open_color_endpoint_locked(&mut inner)?;
+        Ok(info)
     }
 }
 
@@ -936,6 +953,17 @@ fn validate_response(resp: &[u8], cmd: &[u8], allow_non_ok_status: bool) -> Resu
         );
     }
     Ok(())
+}
+
+fn validate_color_endpoint_open_response(resp: &[u8]) -> Result<()> {
+    validate_response(resp, &CMD_OPEN_COLOR, true)?;
+    match resp[3] {
+        STATUS_OK | STATUS_WRONG_MODE => Ok(()),
+        status => bail!(
+            "Hub rejected color endpoint open with status 0x{:02X}",
+            status
+        ),
+    }
 }
 
 fn best_effort_exchange(device: &HidDevice, cmd: &[u8], data: &[u8]) -> Result<()> {
@@ -1255,6 +1283,15 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_close_packet_includes_selected_mode() {
+        let data_close = build_packet(&CMD_CLOSE, &[MODE_SPEEDS]);
+        assert_eq!(&data_close[3..7], &[0x05, 0x01, 0x01, MODE_SPEEDS]);
+
+        let color_close = build_packet(&CMD_CLOSE, &[MODE_SET_COLOR]);
+        assert_eq!(&color_close[3..7], &[0x05, 0x01, 0x01, MODE_SET_COLOR]);
+    }
+
+    #[test]
     fn test_parse_firmware_version() {
         // Simulate response: [00, 00, 0x02, 0x00, major=2, minor=9, patch_lo=0xE8, patch_hi=0x01]
         let mut resp = vec![0u8; PACKET_SIZE];
@@ -1278,6 +1315,21 @@ mod tests {
         assert!(validate_response(&[0, 0, 0x08, 0], &CMD_FIRMWARE, false).is_err());
         assert!(validate_response(&[0, 0, 0x02, 3], &CMD_FIRMWARE, false).is_err());
         assert!(validate_response(&[0, 0, 0x02, 3], &CMD_FIRMWARE, true).is_ok());
+    }
+
+    #[test]
+    fn color_endpoint_open_accepts_only_observed_live_statuses() {
+        let ok = [0, 0, CMD_OPEN_COLOR[0], STATUS_OK];
+        let firmware_compatible = [0, 0, CMD_OPEN_COLOR[0], STATUS_WRONG_MODE];
+        let other_error = [0, 0, CMD_OPEN_COLOR[0], 0x04];
+
+        assert!(validate_color_endpoint_open_response(&ok).is_ok());
+        assert!(validate_color_endpoint_open_response(&firmware_compatible).is_ok());
+        assert!(validate_color_endpoint_open_response(&other_error).is_err());
+
+        // The exception is command-specific; generic strict validation still
+        // rejects status 0x03 for firmware, data, and write operations.
+        assert!(validate_response(&firmware_compatible, &CMD_OPEN_COLOR, false).is_err());
     }
 
     #[test]

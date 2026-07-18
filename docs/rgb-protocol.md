@@ -7,7 +7,7 @@
 
 The iCUE LINK System Hub (VID `0x1B1C`, PID `0x0C3F`) uses a **separate color endpoint** for RGB data, distinct from the data endpoint used for fan/temp/device operations.
 
-- **Data endpoint**: `0x0D 0x01` (open), `0x06 0x01` (write), `0x05 0x01 0x01` (close)
+- **Data endpoint**: `0x0D 0x01` (open), `0x06 0x01` (write), `0x05 0x01 0x01` (close); open and close include the endpoint mode byte
 - **Color endpoint**: `0x0D 0x00` (open), `0x06 0x00` (write), `0x05 0x01` (close)
 
 ## Command Reference
@@ -18,14 +18,14 @@ The iCUE LINK System Hub (VID `0x1B1C`, PID `0x0C3F`) uses a **separate color en
 | Close color EP | `0x05, 0x01` | Closes the color endpoint (shorter than data EP close) |
 | Write color (first chunk) | `0x06, 0x00` + payload | First chunk of color data |
 | Write color (continuation) | `0x07, 0x00` + payload | Subsequent chunks when data > 508 bytes |
-| Close data EP (stale) | `0x05, 0x01, 0x01` | Close stale data EP before opening color EP |
+| Close data EP (stale) | `0x05, 0x01, 0x01` + mode `0x22` | Close the endpoint selected by mode before opening the color EP |
 | Reset LED power | `0x15, 0x01` | Reset LED power state |
 
 ## Write Sequence
 
 ```
 1. Close any stale data endpoint:
-   TX: [0x00, 0x00, 0x01, 0x05, 0x01, 0x01, 0x00, ...]  (513 bytes)
+   TX: [0x00, 0x00, 0x01, 0x05, 0x01, 0x01, 0x22, ...]  (513 bytes)
    RX: 512 bytes
 
 2. Open color endpoint with mode 0x22:
@@ -41,6 +41,11 @@ The iCUE LINK System Hub (VID `0x1B1C`, PID `0x0C3F`) uses a **separate color en
    TX: [0x00, 0x00, 0x01, 0x07, 0x00, <payload[508..1016]>]  (513 bytes)
    RX: 512 bytes
 ```
+
+Live hubs can return status `0x03` from the `0x0D, 0x00, 0x22` open and still
+accept the following color write. The exact firmware meaning is undocumented,
+so this compatibility exception is limited to that open command; color writes
+and all other commands continue to require status `0x00`.
 
 ## Payload Format
 
