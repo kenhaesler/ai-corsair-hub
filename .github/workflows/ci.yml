@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install pinned Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            apps/gui/package-lock.json
+            apps/gui/ui/package-lock.json
+
+      - name: Install Tauri CLI dependencies
+        working-directory: apps/gui
+        run: npm ci
+
+      - name: Install frontend dependencies
+        working-directory: apps/gui/ui
+        run: npm ci
+
+      - name: Check version metadata
+        shell: pwsh
+        run: ./scripts/check-version.ps1
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint Rust
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test Rust workspace
+        run: cargo test --locked --workspace --all-targets
+
+      - name: Check frontend
+        working-directory: apps/gui/ui
+        run: npm run check -- --fail-on-warnings
+
+      - name: Test frontend
+        working-directory: apps/gui/ui
+        run: npm test
+
+      - name: Build frontend
+        working-directory: apps/gui/ui
+        run: npm run build

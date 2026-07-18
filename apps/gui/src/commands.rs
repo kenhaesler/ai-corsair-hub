@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use tauri::State;
 
 use corsair_common::config::{AppConfig, FanPresetDef, RgbConfig};
@@ -30,6 +32,9 @@ pub async fn get_devices(state: State<'_, AppState>) -> Result<DeviceTree, Strin
 
 #[tauri::command]
 pub async fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
+    if let Some(error) = &state.startup_config_error {
+        return Err(error.clone());
+    }
     let (tx, rx) = tokio::sync::oneshot::channel();
     state
         .hw_sender
@@ -44,9 +49,7 @@ pub async fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String>
 /// the per-group sensor-weighting UI — the picker only shows sensors
 /// that actually exist on this machine right now.
 #[tauri::command]
-pub async fn list_available_sensors(
-    state: State<'_, AppState>,
-) -> Result<Vec<String>, String> {
+pub async fn list_available_sensors(state: State<'_, AppState>) -> Result<Vec<String>, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     state
         .hw_sender
@@ -57,10 +60,12 @@ pub async fn list_available_sensors(
 }
 
 #[tauri::command]
-pub async fn save_config(
-    state: State<'_, AppState>,
-    config: AppConfig,
-) -> Result<(), String> {
+pub async fn save_config(state: State<'_, AppState>, config: AppConfig) -> Result<(), String> {
+    if let Some(error) = &state.startup_config_error {
+        return Err(format!(
+            "Cannot overwrite an invalid startup configuration: {error}"
+        ));
+    }
     let (tx, rx) = tokio::sync::oneshot::channel();
     state
         .hw_sender
@@ -70,14 +75,59 @@ pub async fn save_config(
         .map_err(|_| "Hardware thread dropped".to_string())?
 }
 
+const RELAUNCH_FAILSAFE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+
+#[tauri::command]
+pub async fn prepare_for_relaunch(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let shutdown = state.shutdown_handle();
+    let shutdown_result =
+        tauri::async_runtime::spawn_blocking(move || shutdown.shutdown_and_join())
+            .await
+            .map_err(|error| format!("Hardware shutdown task failed: {error}"))
+            .and_then(|result| result);
+
+    match shutdown_result {
+        Ok(()) => {}
+        Err(error) => {
+            tracing::error!(%error, "Hardware shutdown failed before update; forcing app restart");
+            // `restart` returns `!`: a failed restoration can never fall
+            // through to installation or be reported as successful.
+            app.restart();
+        }
+    }
+
+    // From this point the control loop is stopped. If the webview or updater
+    // stalls before invoking `relaunch_app`, restore service automatically.
+    let watchdog_app = app.clone();
+    if std::thread::Builder::new()
+        .name("update-relaunch-watchdog".to_string())
+        .spawn(move || {
+            std::thread::sleep(RELAUNCH_FAILSAFE_TIMEOUT);
+            tracing::error!("Update did not relaunch in time; forcing app restart");
+            watchdog_app.restart();
+        })
+        .is_err()
+    {
+        tracing::error!("Could not start update relaunch watchdog; forcing app restart");
+        app.restart();
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn relaunch_app(app: tauri::AppHandle) {
+    app.restart();
+}
+
 /// Apply a curated fan preset globally (every configured group).
 /// Retained for back-compat with saved UI state and the tray menu;
 /// the v0.3 UI uses `apply_preset_to_group` for per-group control.
 #[tauri::command]
-pub async fn apply_preset(
-    state: State<'_, AppState>,
-    preset: String,
-) -> Result<(), String> {
+pub async fn apply_preset(state: State<'_, AppState>, preset: String) -> Result<(), String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     state
         .hw_sender
@@ -212,10 +262,7 @@ pub fn validate_config(config: AppConfig) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn set_rgb_config(
-    state: State<'_, AppState>,
-    config: RgbConfig,
-) -> Result<(), String> {
+pub async fn set_rgb_config(state: State<'_, AppState>, config: RgbConfig) -> Result<(), String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     state
         .hw_sender
@@ -226,10 +273,7 @@ pub async fn set_rgb_config(
 }
 
 #[tauri::command]
-pub async fn set_rgb_enabled(
-    state: State<'_, AppState>,
-    enabled: bool,
-) -> Result<(), String> {
+pub async fn set_rgb_enabled(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     state
         .hw_sender

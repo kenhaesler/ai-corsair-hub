@@ -16,16 +16,35 @@ Write-Host "`n=== Corsair Hub Developer Setup ===" -ForegroundColor Cyan
 
 # --- Install toolchain via winget ---
 
+$root = Split-Path $PSScriptRoot -Parent
+$requiredNode = (Get-Content (Join-Path $root '.nvmrc') -Raw).Trim()
+$toolchain = Get-Content (Join-Path $root 'rust-toolchain.toml') -Raw
+$rustMatch = [regex]::Match($toolchain, '(?m)^channel\s*=\s*"([^"]+)"')
+if (-not $rustMatch.Success) {
+    throw 'Could not read the pinned Rust version from rust-toolchain.toml'
+}
+$requiredRust = $rustMatch.Groups[1].Value
+
 $packages = @(
     @{ Id = 'Rustlang.Rustup';                          Name = 'Rust (rustup)' },
-    @{ Id = 'OpenJS.NodeJS.LTS';                         Name = 'Node.js LTS' },
+    @{ Id = 'OpenJS.NodeJS.LTS';                         Name = 'Node.js'; Version = $requiredNode },
     @{ Id = 'Microsoft.VisualStudio.2022.BuildTools';    Name = 'MSVC Build Tools 2022' },
     @{ Id = 'LibreHardwareMonitor.LibreHardwareMonitor'; Name = 'LibreHardwareMonitor' }
 )
 
 foreach ($pkg in $packages) {
     Write-Host "`nInstalling $($pkg.Name)..." -ForegroundColor Yellow
-    winget install $pkg.Id --silent --accept-package-agreements --accept-source-agreements
+    $wingetArgs = @(
+        'install',
+        $pkg.Id,
+        '--silent',
+        '--accept-package-agreements',
+        '--accept-source-agreements'
+    )
+    if ($pkg.ContainsKey('Version')) {
+        $wingetArgs += @('--version', $pkg.Version)
+    }
+    winget @wingetArgs
     if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
         # -1978335189 = already installed
         Write-Warning "$($pkg.Name) install returned exit code $LASTEXITCODE"
@@ -35,6 +54,17 @@ foreach ($pkg in $packages) {
 # Refresh PATH for current session
 $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
             [System.Environment]::GetEnvironmentVariable('Path', 'User')
+
+# Install the exact Rust toolchain and validate the Node.js version.
+rustup toolchain install $requiredRust --profile minimal --component rustfmt clippy
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to install Rust $requiredRust"
+}
+
+$installedNode = ((node --version) -replace '^v', '').Trim()
+if ($installedNode -ne $requiredNode) {
+    throw "Node.js $requiredNode is required, but $installedNode is active"
+}
 
 # --- Install MSVC C++ workload if Build Tools was just installed ---
 Write-Host "`nEnsuring MSVC C++ workload is available..." -ForegroundColor Yellow

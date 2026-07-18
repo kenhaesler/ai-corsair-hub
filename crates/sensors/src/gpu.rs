@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use corsair_common::Temperature;
-use nvml_wrapper::enum_wrappers::device::TemperatureSensor;
 use nvml_wrapper::Nvml;
+use nvml_wrapper::enum_wrappers::device::TemperatureSensor;
 use tracing::debug;
 
 use crate::TemperatureSource;
@@ -43,7 +43,11 @@ impl GpuSensor {
             .context("Failed to get GPU device by index")?;
 
         let gpu_name = device.name().unwrap_or_else(|_| "NVIDIA GPU".to_string());
-        debug!(gpu = gpu_name.as_str(), index = device_index, "GPU sensor initialized");
+        debug!(
+            gpu = gpu_name.as_str(),
+            index = device_index,
+            "GPU sensor initialized"
+        );
 
         Ok(Self {
             name: format!("GPU {}", gpu_name),

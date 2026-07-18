@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+use crate::Rgb;
 use crate::color::BlendMode;
 use crate::effect::{EffectConfig, EffectContext, RgbEffect};
-use crate::Rgb;
 
 /// A single layer in the compositing stack.
 #[derive(Debug, Clone, Serialize, Deserialize)]

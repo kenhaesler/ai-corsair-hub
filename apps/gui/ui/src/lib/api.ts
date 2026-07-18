@@ -66,6 +66,9 @@ export const renameDevice = (deviceId: string, name: string) =>
 export const validateConfig = (config: AppConfig) => invoke('validate_config', { config });
 export const setRgbConfig = (config: RgbConfig) => invoke('set_rgb_config', { config });
 export const setRgbEnabled = (enabled: boolean) => invoke('set_rgb_enabled', { enabled });
+/** Restore hardware mode and stop the control thread before an updater relaunch. */
+export const prepareForRelaunch = () => invoke<void>('prepare_for_relaunch');
+export const relaunchApp = () => invoke<void>('relaunch_app');
 
 /**
  * One row in the channel-identify diagnostic mapping returned by

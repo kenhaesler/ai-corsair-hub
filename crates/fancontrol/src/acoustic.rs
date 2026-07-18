@@ -4,9 +4,10 @@ pub struct AcousticFilter {
     current_duty: f64,
     target_duty: f64,
     ramp_up_rate: f64,   // max %/sec increase
-    ramp_down_rate: f64,  // max %/sec decrease
-    hysteresis: f64,      // °C band to ignore
+    ramp_down_rate: f64, // max %/sec decrease
+    hysteresis: f64,     // °C band to ignore
     last_trigger_temp: f64,
+    override_active: bool,
 }
 
 impl AcousticFilter {
@@ -18,6 +19,7 @@ impl AcousticFilter {
             ramp_down_rate: ramp_down,
             hysteresis,
             last_trigger_temp: 0.0,
+            override_active: false,
         }
     }
 
@@ -29,9 +31,10 @@ impl AcousticFilter {
     /// - Always ramp current_duty toward target_duty regardless of hysteresis.
     pub fn update(&mut self, raw_duty: f64, temp: f64, dt_secs: f64) -> f64 {
         // Re-evaluate target if temp moved enough
-        if (temp - self.last_trigger_temp).abs() >= self.hysteresis {
+        if self.override_active || (temp - self.last_trigger_temp).abs() >= self.hysteresis {
             self.last_trigger_temp = temp;
             self.target_duty = raw_duty;
+            self.override_active = false;
         }
 
         // Always ramp toward target
@@ -51,6 +54,7 @@ impl AcousticFilter {
     pub fn override_duty(&mut self, duty: f64) {
         self.current_duty = duty;
         self.target_duty = duty;
+        self.override_active = true;
     }
 
     /// Get the current filtered duty.
@@ -111,5 +115,15 @@ mod tests {
         let mut filter = AcousticFilter::new(5.0, 2.0, 3.0);
         filter.override_duty(100.0);
         assert!((filter.current_duty() - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn override_recovers_inside_hysteresis_band() {
+        let mut filter = AcousticFilter::new(10.0, 5.0, 3.0);
+        filter.update(40.0, 50.0, 1.0);
+        filter.override_duty(70.0);
+
+        let recovered = filter.update(40.0, 50.0, 1.0);
+        assert!((recovered - 65.0).abs() < 0.01, "got {recovered}");
     }
 }

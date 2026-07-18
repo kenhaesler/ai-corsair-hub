@@ -93,10 +93,7 @@ impl DeviceRegistry {
                 e.device_id.to_string(),
             );
         }
-        Self {
-            by_id,
-            by_location,
-        }
+        Self { by_id, by_location }
     }
 
     /// Look up a device's current location.

@@ -1,8 +1,11 @@
 <script lang="ts">
-  import { configStore, loadConfig, saveCurrentConfig } from '../../lib/stores/config.svelte';
+  import { configStore, replaceConfig, saveCurrentConfig } from '../../lib/stores/config.svelte';
+  import { discardAllConfigChanges, rgb } from '../../lib/stores/rgb.svelte';
   import { check } from '@tauri-apps/plugin-updater';
   import { getVersion } from '@tauri-apps/api/app';
   import { onMount } from 'svelte';
+  import { prepareForRelaunch, relaunchApp } from '../../lib/api';
+  import ConfirmDialog from '../ConfirmDialog.svelte';
 
   let updateStatus = $state<'idle' | 'checking' | 'available' | 'downloading' | 'upToDate' | 'error'>('idle');
   let updateVersion = $state('');
@@ -11,9 +14,11 @@
   let appVersion = $state('');
   let downloadedBytes = $state(0);
   let downloadTotalBytes = $state(0);
+  let updateConfirmOpen = $state(false);
+  let updateLocked = $state(false);
+  let resolveUpdateDecision: ((decision: 'save' | 'discard' | 'cancel') => void) | null = null;
 
   onMount(() => {
-    loadConfig();
     getVersion()
       .then(v => appVersion = v)
       .catch(() => { /* Tauri API unavailable (e.g. dev-reload race) — leave blank */ });
@@ -38,12 +43,12 @@
 
   function updatePollInterval(value: number) {
     if (!configStore.config) return;
-    configStore.config = { ...configStore.config, general: { ...configStore.config.general, poll_interval_ms: value } };
+    replaceConfig({ ...configStore.config, general: { ...configStore.config.general, poll_interval_ms: value } });
   }
 
   function updateLogLevel(value: string) {
     if (!configStore.config) return;
-    configStore.config = { ...configStore.config, general: { ...configStore.config.general, log_level: value } };
+    replaceConfig({ ...configStore.config, general: { ...configStore.config.general, log_level: value } });
   }
 
   async function checkForUpdates() {
@@ -69,8 +74,9 @@
     updateStatus = 'downloading';
     downloadedBytes = 0;
     downloadTotalBytes = 0;
+    let relaunchRequired = false;
     try {
-      await updateObj.downloadAndInstall((event) => {
+      await updateObj.download((event) => {
         switch (event.event) {
           case 'Started':
             downloadTotalBytes = event.data.contentLength ?? 0;
@@ -79,14 +85,67 @@
             downloadedBytes += event.data.chunkLength;
             break;
           case 'Finished':
-            // App is about to restart; leave state as 'downloading'
+            // Download complete. Keep cooling active until the install is ready.
             break;
-        }
+          }
       });
+
+      if (!(await settleDirtyConfig())) return;
+      updateLocked = true;
+      relaunchRequired = true;
+      await prepareForRelaunch();
+      await updateObj.install();
     } catch (e) {
       updateError = humanErr(e);
       updateStatus = 'error';
+    } finally {
+      if (relaunchRequired) {
+        try {
+          await relaunchApp();
+        } catch (e) {
+          updateLocked = false;
+          updateError = `Relaunch failed: ${humanErr(e)}`;
+          updateStatus = 'error';
+        }
+      }
     }
+  }
+
+  function requestUpdateDecision(): Promise<'save' | 'discard' | 'cancel'> {
+    updateConfirmOpen = true;
+    return new Promise((resolve) => {
+      resolveUpdateDecision = resolve;
+    });
+  }
+
+  function chooseUpdateDecision(decision: 'save' | 'discard' | 'cancel') {
+    updateConfirmOpen = false;
+    const resolve = resolveUpdateDecision;
+    resolveUpdateDecision = null;
+    resolve?.(decision);
+  }
+
+  async function settleDirtyConfig(): Promise<boolean> {
+    while (configStore.dirty) {
+      const decision = await requestUpdateDecision();
+      if (decision === 'cancel') {
+        updateLocked = false;
+        updateStatus = 'available';
+        return false;
+      }
+
+      updateLocked = true;
+      const settled = decision === 'save'
+        ? await saveCurrentConfig()
+        : await discardAllConfigChanges();
+      if (!settled) {
+        updateLocked = false;
+        updateError = configStore.error ?? rgb.error ?? 'Configuration changes could not be settled.';
+        updateStatus = 'error';
+        return false;
+      }
+    }
+    return true;
   }
 </script>
 
@@ -123,8 +182,11 @@
         </select>
       </div>
       <div class="actions">
-        <button class="primary" onclick={saveCurrentConfig} disabled={configStore.saving}>
-          {configStore.saving ? 'Saving...' : 'Save Settings'}
+        {#if configStore.dirty}
+          <button onclick={() => void discardAllConfigChanges()} disabled={configStore.saving}>Discard Changes</button>
+        {/if}
+        <button class="primary" onclick={saveCurrentConfig} disabled={configStore.saving || !configStore.dirty}>
+          {configStore.saving ? 'Saving...' : configStore.dirty ? 'Save Settings' : 'Saved'}
         </button>
       </div>
     </section>
@@ -177,6 +239,24 @@
     <p class="about-text">Lightweight replacement for iCUE — smart fan control for custom water cooling</p>
     <p class="about-text" style="color: var(--text-muted)">Apache 2.0 License</p>
   </section>
+
+  <ConfirmDialog
+    open={updateConfirmOpen}
+    title="Unsaved configuration"
+    message="Save or discard the current configuration changes before installing the update."
+    confirmLabel="Save & Install"
+    secondaryLabel="Discard & Install"
+    cancelLabel="Cancel Update"
+    onconfirm={() => chooseUpdateDecision('save')}
+    onsecondary={() => chooseUpdateDecision('discard')}
+    oncancel={() => chooseUpdateDecision('cancel')}
+  />
+
+  {#if updateLocked}
+    <div class="update-lock" role="status" aria-live="assertive">
+      <p>Installing update...</p>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -247,5 +327,20 @@
     font-size: 12px;
     margin: 0 0 4px 0;
     color: var(--text-secondary);
+  }
+  .update-lock {
+    position: fixed;
+    inset: 0;
+    z-index: 110;
+    display: grid;
+    place-items: center;
+    background: rgba(0, 0, 0, 0.72);
+    backdrop-filter: blur(4px);
+  }
+  .update-lock p {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 600;
   }
 </style>

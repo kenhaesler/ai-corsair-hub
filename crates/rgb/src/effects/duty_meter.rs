@@ -1,5 +1,5 @@
-use crate::effect::{EffectContext, RgbEffect};
 use crate::Rgb;
+use crate::effect::{EffectContext, RgbEffect};
 
 /// Fan duty → fill level + color. LEDs fill proportionally to fan duty.
 pub struct DutyMeterEffect {

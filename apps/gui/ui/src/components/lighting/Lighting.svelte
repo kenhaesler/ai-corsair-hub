@@ -1,9 +1,15 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { rgb } from '../../lib/stores/rgb.svelte';
-  import { getConfig, getDevices } from '../../lib/api';
-  import type { RgbConfig, RgbZoneConfig, RgbDeviceRef, HubSnapshot } from '../../lib/types';
-  import { setRgbConfig, setRgbEnabled } from '../../lib/api';
+  import {
+    flushRgbSave,
+    initializeRgbConfig,
+    rgb,
+    scheduleRgbSave,
+  } from '../../lib/stores/rgb.svelte';
+  import { configStore, loadConfig } from '../../lib/stores/config.svelte';
+  import { getDevices } from '../../lib/api';
+  import type { AppConfig, RgbConfig, RgbZoneConfig, RgbDeviceRef, HubSnapshot } from '../../lib/types';
+  import type { RgbPreset } from '../../lib/types';
   import ZonePanel from './ZonePanel.svelte';
   import HardwarePreview from './HardwarePreview.svelte';
   import LayerStack from './LayerStack.svelte';
@@ -23,74 +29,92 @@
   let selectedZone = $state(0);
 
   /** All discovered hubs + their devices — for device assignment UI */
+  let configLoaded = $state(false);
+  let devicesLoaded = $state(false);
+  let devicesError = $state<string | null>(null);
   let availableHubs = $state<HubSnapshot[]>([]);
 
-  onMount(async () => {
-    try {
-      const [appConfig, deviceTree] = await Promise.all([getConfig(), getDevices()]);
-      if (appConfig.rgb) {
-        config = appConfig.rgb;
-      }
-      availableHubs = deviceTree.hubs;
+  let devicesLoading = false;
 
-      // Auto-create a default zone with all devices if none configured.
-      // Entries are written in V2 shape (device_id populated) with the V1
-      // (hub_serial, channel) fields kept populated so a downlevel loader
-      // still works during the transition.
-      if (config.zones.length === 0 && availableHubs.length > 0) {
-        const allDevices: RgbDeviceRef[] = [];
-        for (const hub of availableHubs) {
-          for (const dev of hub.devices) {
-            allDevices.push({
-              hub_serial: hub.serial,
-              channel: dev.channel,
-              device_id: dev.device_id,
-            });
-          }
-        }
-        config.zones = [{
-          name: 'All Fans',
-          devices: allDevices,
-          layers: [{
-            effect: { type: 'Static', color: { r: 96, g: 165, b: 250 } },
-            blend_mode: 'Normal',
-            opacity: 1.0,
-            enabled: true,
-          }],
-          brightness: 100,
-          flow: null,
-        }];
-        await saveConfig();
-      }
-    } catch {
-      // Use defaults
+  function syncConfig(appConfig: AppConfig) {
+    if (configLoaded) return;
+    config = structuredClone(appConfig.rgb);
+    initializeRgbConfig(config);
+    configLoaded = true;
+  }
+
+  function ensureDefaultZone() {
+    if (!configLoaded || !devicesLoaded || config.zones.length > 0 || availableHubs.length === 0) {
+      return;
+    }
+
+    const devices: RgbDeviceRef[] = availableHubs.flatMap((hub) =>
+      hub.devices.map((device) => ({
+        hub_serial: hub.serial,
+        channel: device.channel,
+        device_id: device.device_id,
+      })),
+    );
+    config.zones = [{
+      name: 'All Fans',
+      devices,
+      layers: [{
+        effect: { type: 'Static', color: { r: 96, g: 165, b: 250 } },
+        blend_mode: 'Normal',
+        opacity: 1,
+        enabled: true,
+      }],
+      brightness: 100,
+      flow: null,
+    }];
+    saveConfig(true);
+  }
+
+  async function reloadDevices() {
+    if (devicesLoading) return;
+    devicesLoading = true;
+    devicesError = null;
+    try {
+      availableHubs = (await getDevices()).hubs;
+      devicesLoaded = true;
+      ensureDefaultZone();
+    } catch (error) {
+      devicesLoaded = false;
+      devicesError = String(error);
+    } finally {
+      devicesLoading = false;
+    }
+  }
+
+  $effect(() => {
+    const appConfig = configStore.config;
+    if (appConfig && !configLoaded) {
+      syncConfig(appConfig);
+      void reloadDevices();
     }
   });
 
+  onMount(async () => {
+    const appConfig = await loadConfig();
+    if (appConfig) syncConfig(appConfig);
+    await reloadDevices();
+  });
   function currentZone(): RgbZoneConfig | null {
     return config.zones[selectedZone] ?? null;
   }
 
-  async function saveConfig() {
-    rgb.saving = true;
-    try {
-      await setRgbConfig(config);
-    } catch (e) {
-      console.error('Failed to save RGB config:', e);
-    } finally {
-      rgb.saving = false;
-    }
+  function saveConfig(immediate = false) {
+    scheduleRgbSave(config, immediate);
   }
 
-  async function toggleEnabled() {
+  function toggleEnabled() {
     config.enabled = !config.enabled;
-    await setRgbEnabled(config.enabled);
-    await saveConfig();
+    saveConfig(true);
   }
 
-  async function toggleHardwareOutput() {
+  function toggleHardwareOutput() {
     config.hardware_output = !config.hardware_output;
-    await saveConfig();
+    saveConfig(true);
   }
 
   function handleBrightness(e: Event) {
@@ -118,7 +142,7 @@
       flow: null,
     }];
     selectedZone = config.zones.length - 1;
-    saveConfig();
+    saveConfig(true);
   }
 
   function deleteZone(index: number) {
@@ -126,13 +150,13 @@
     if (selectedZone >= config.zones.length) {
       selectedZone = Math.max(0, config.zones.length - 1);
     }
-    saveConfig();
+    saveConfig(true);
   }
 
   function applyPresetZones(zones: RgbZoneConfig[]) {
     config.zones = zones;
     selectedZone = 0;
-    saveConfig();
+    saveConfig(true);
   }
 
   function handleFlowChange(flow: FlowConfig | null) {
@@ -142,9 +166,16 @@
     config = config; // trigger reactivity
     saveConfig();
   }
+
+  function updatePresets(presets: RgbPreset[]) {
+    config.presets = presets;
+    saveConfig(true);
+  }
 </script>
 
+
 <div class="lighting-page">
+{#if configLoaded}
   <div class="lighting-layout">
     <!-- Left: Zone Sidebar -->
     <div class="zone-sidebar">
@@ -161,7 +192,16 @@
         presets={config.presets}
         currentZones={config.zones}
         onapply={applyPresetZones}
+        onpresetsupdate={updatePresets}
       />
+      {#if devicesError}
+        <div class="banner error" aria-live="polite">
+          <span>Device discovery failed.</span>
+          <button onclick={reloadDevices}>Retry</button>
+        </div>
+      {:else if !devicesLoaded}
+        <span class="saving-indicator">Loading devices...</span>
+      {/if}
     </div>
 
     <!-- Center: Preview -->
@@ -229,7 +269,17 @@
         <span class="saving-indicator">Saving...</span>
       {/if}
     </div>
+      {#if rgb.error}
+        <button class="save-error" onclick={flushRgbSave} title={rgb.error}>
+          Save failed. Retry
+        </button>
+      {/if}
   </div>
+{:else}
+  <div class="loading" aria-live="polite">
+    Loading lighting configuration...
+  </div>
+{/if}
 </div>
 
 <style>

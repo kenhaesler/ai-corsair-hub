@@ -50,8 +50,12 @@ struct LhmJsonNode {
 
 /// Which backend provides CPU temperature.
 enum CpuBackend {
-    AcpiWmi { wmi_con: WMIConnection },
-    Cimv2 { wmi_con: WMIConnection },
+    AcpiWmi {
+        wmi_con: WMIConnection,
+    },
+    Cimv2 {
+        wmi_con: WMIConnection,
+    },
     LhmWmi {
         wmi_con: WMIConnection,
         sensor_name: String,
@@ -89,19 +93,17 @@ impl CpuSensor {
         }
         // 3. Native ACPI WMI
         match WMIConnection::with_namespace_path("root\\WMI") {
-            Ok(wmi_con) => {
-                match wmi_con.query::<ThermalZone>() {
-                    Ok(zones) if !zones.is_empty() => {
-                        let temp = kelvin_tenths_to_celsius(zones[0].CurrentTemperature);
-                        info!(temp_c = temp, "CPU sensor initialized via root\\WMI");
-                        return Ok(Self {
-                            name: "CPU".to_string(),
-                            backend: CpuBackend::AcpiWmi { wmi_con },
-                        });
-                    }
-                    _ => warn!("root\\WMI thermal zones empty, trying CIMV2 fallback"),
+            Ok(wmi_con) => match wmi_con.query::<ThermalZone>() {
+                Ok(zones) if !zones.is_empty() => {
+                    let temp = kelvin_tenths_to_celsius(zones[0].CurrentTemperature);
+                    info!(temp_c = temp, "CPU sensor initialized via root\\WMI");
+                    return Ok(Self {
+                        name: "CPU".to_string(),
+                        backend: CpuBackend::AcpiWmi { wmi_con },
+                    });
                 }
-            }
+                _ => warn!("root\\WMI thermal zones empty, trying CIMV2 fallback"),
+            },
             Err(e) => warn!(error = %e, "root\\WMI unavailable"),
         }
         // 4. CIMV2 fallback
@@ -110,15 +112,9 @@ impl CpuSensor {
 
     fn try_lhm_http(base_url: &str) -> Result<Self> {
         let url = format!("{}/data.json", base_url);
-        let body: String = ureq::get(&url)
-            .call()
-            .context("LHM HTTP not available")?
-            .body_mut()
-            .read_to_string()
-            .context("Failed to read LHM response")?;
+        let body = crate::lhm::read_lhm_body(&url).context("LHM HTTP not available")?;
 
-        let root: LhmJsonNode =
-            serde_json::from_str(&body).context("Failed to parse LHM JSON")?;
+        let root: LhmJsonNode = serde_json::from_str(&body).context("Failed to parse LHM JSON")?;
 
         // Walk the tree to find CPU temperature sensors
         let mut temps = Vec::new();
@@ -189,7 +185,7 @@ impl CpuSensor {
         };
 
         let temp = sensor.Value as f64;
-        if temp < -10.0 || temp > 150.0 {
+        if !(-10.0..=150.0).contains(&temp) {
             anyhow::bail!("LHM WMI CPU temp out of range: {}°C", temp);
         }
 
@@ -217,9 +213,7 @@ impl CpuSensor {
     fn try_cimv2() -> Result<Self> {
         let wmi_con = WMIConnection::with_namespace_path("root\\CIMV2")
             .context("Failed to connect to CIMV2")?;
-        let zones: Vec<ThermalZoneInfo> = wmi_con
-            .query()
-            .context("No CIMV2 thermal data")?;
+        let zones: Vec<ThermalZoneInfo> = wmi_con.query().context("No CIMV2 thermal data")?;
         if zones.is_empty() {
             anyhow::bail!(
                 "No thermal zone sensors found. \
@@ -243,12 +237,7 @@ impl TemperatureSource for CpuSensor {
     fn read(&self) -> Result<Temperature> {
         match &self.backend {
             CpuBackend::LhmHttp { url, sensor_id } => {
-                let body: String = ureq::get(url)
-                    .call()
-                    .context("LHM HTTP request failed")?
-                    .body_mut()
-                    .read_to_string()
-                    .context("Failed to read LHM response")?;
+                let body = crate::lhm::read_lhm_body(url)?;
                 let root: LhmJsonNode =
                     serde_json::from_str(&body).context("Failed to parse LHM JSON")?;
                 let temp = find_sensor_value(&root, sensor_id)
@@ -282,8 +271,9 @@ impl TemperatureSource for CpuSensor {
                 })
             }
             CpuBackend::Cimv2 { wmi_con } => {
-                let zones: Vec<ThermalZoneInfo> =
-                    wmi_con.query().context("Failed to read CIMV2 thermal zone")?;
+                let zones: Vec<ThermalZoneInfo> = wmi_con
+                    .query()
+                    .context("Failed to read CIMV2 thermal zone")?;
                 let zone = zones.first().context("No CIMV2 thermal zone data")?;
                 Ok(Temperature {
                     celsius: zone.Temperature as f64 - 273.15,
@@ -295,10 +285,11 @@ impl TemperatureSource for CpuSensor {
 
 /// Walk the LHM JSON tree collecting temperature sensors with CPU-related SensorIds.
 fn collect_cpu_temps(node: &LhmJsonNode, results: &mut Vec<(String, String, f64)>) {
-    if node.Type == "Temperature" && !node.SensorId.is_empty() {
-        if let Some(temp) = parse_lhm_value(&node.Value) {
-            results.push((node.Text.clone(), node.SensorId.clone(), temp));
-        }
+    if node.Type == "Temperature"
+        && !node.SensorId.is_empty()
+        && let Some(temp) = parse_lhm_value(&node.Value)
+    {
+        results.push((node.Text.clone(), node.SensorId.clone(), temp));
     }
     for child in &node.Children {
         collect_cpu_temps(child, results);
@@ -320,7 +311,13 @@ fn find_sensor_value(node: &LhmJsonNode, target_id: &str) -> Option<f64> {
 
 /// Parse LHM value string like "59.6 °C" → 59.6
 fn parse_lhm_value(s: &str) -> Option<f64> {
-    s.split_whitespace().next()?.replace(',', ".").parse().ok()
+    let value: f64 = s
+        .split_whitespace()
+        .next()?
+        .replace(',', ".")
+        .parse()
+        .ok()?;
+    value.is_finite().then_some(value)
 }
 
 fn kelvin_tenths_to_celsius(tenths_k: u32) -> f64 {
@@ -354,5 +351,7 @@ mod tests {
         assert_eq!(parse_lhm_value("59.6 °C"), Some(59.6));
         assert_eq!(parse_lhm_value("59,6 °C"), Some(59.6));
         assert_eq!(parse_lhm_value(""), None);
+        assert_eq!(parse_lhm_value("NaN C"), None);
+        assert_eq!(parse_lhm_value("inf C"), None);
     }
 }

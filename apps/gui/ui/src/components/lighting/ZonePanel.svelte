@@ -141,11 +141,9 @@
 
   <div class="zone-list">
     {#each zones as zone, i}
-      <button
+      <div
         class="zone-item"
         class:active={selectedZone === i}
-        onclick={() => onselect(i)}
-        ondblclick={() => startRename(i)}
       >
         {#if editingName === i}
           <input
@@ -156,8 +154,14 @@
             onkeydown={(e) => { if (e.key === 'Enter') finishRename(i); if (e.key === 'Escape') editingName = null; }}
           />
         {:else}
-          <span class="zone-name">{zone.name}</span>
-          <span class="zone-meta">{zone.devices.length} dev</span>
+          <button
+            class="zone-select"
+            onclick={() => onselect(i)}
+            ondblclick={() => startRename(i)}
+          >
+            <span class="zone-name">{zone.name}</span>
+            <span class="zone-meta">{zone.devices.length} dev</span>
+          </button>
         {/if}
 
         {#if zones.length > 1}
@@ -167,7 +171,7 @@
             title="Delete zone"
           >&times;</button>
         {/if}
-      </button>
+      </div>
     {/each}
   </div>
 
@@ -219,6 +223,17 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+  }
+  .zone-select {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    color: inherit;
   }
   .zone-item {
     display: flex;

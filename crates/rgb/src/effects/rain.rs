@@ -1,5 +1,5 @@
-use crate::effect::{EffectContext, RgbEffect};
 use crate::Rgb;
+use crate::effect::{EffectContext, RgbEffect};
 
 /// Rain droplets moving along positions, spawning and despawning.
 pub struct RainEffect {
@@ -15,8 +15,7 @@ impl RainEffect {
         let num_droplets = (density * 20.0).max(3.0) as usize;
         let droplets: Vec<(f64, f64)> = (0..num_droplets)
             .map(|i| {
-                let h = ((i as u64).wrapping_mul(2654435761) ^ 0xCAFEBABE) as f64
-                    / u64::MAX as f64;
+                let h = ((i as u64).wrapping_mul(2654435761) ^ 0xCAFEBABE) as f64 / u64::MAX as f64;
                 let start = h; // 0..1 starting position
                 let birth = h * 2.0; // staggered birth
                 (start, birth)

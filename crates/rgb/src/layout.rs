@@ -51,9 +51,9 @@ impl LedLayout {
                     (angle.cos() * 0.5 + 0.5, angle.sin() * 0.5 + 0.5)
                 })
                 .collect(),
-            LedLayout::LinearStrip { .. } => (0..count)
-                .map(|i| (i as f32 / count as f32, 0.5))
-                .collect(),
+            LedLayout::LinearStrip { .. } => {
+                (0..count).map(|i| (i as f32 / count as f32, 0.5)).collect()
+            }
         }
     }
 }
@@ -80,7 +80,7 @@ mod tests {
     fn positions_normalized() {
         let positions = LedLayout::qx_fan().positions();
         for &p in &positions {
-            assert!(p >= 0.0 && p < 1.0, "Position {p} out of range");
+            assert!((0.0..1.0).contains(&p), "Position {p} out of range");
         }
     }
 
@@ -89,8 +89,8 @@ mod tests {
         let positions = LedLayout::qx_fan().positions_2d();
         for &(x, y) in &positions {
             // Should be within [0, 1]
-            assert!(x >= 0.0 && x <= 1.0);
-            assert!(y >= 0.0 && y <= 1.0);
+            assert!((0.0..=1.0).contains(&x));
+            assert!((0.0..=1.0).contains(&y));
         }
     }
 }

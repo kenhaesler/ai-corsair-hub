@@ -1,6 +1,6 @@
+use crate::Rgb;
 use crate::effect::{EffectContext, RgbEffect};
 use crate::noise::noise_1d;
-use crate::Rgb;
 
 pub struct CandleEffect {
     pub color: Rgb,

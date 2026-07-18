@@ -7,13 +7,15 @@
 //! to defaults, silently losing all user customization.
 //!
 //! `write_atomic` fixes this by writing to a sibling temp file, fsyncing, then
-//! renaming over the target. On Windows, `std::fs::rename` uses `MoveFileExW`
-//! which is atomic within a single NTFS volume. Readers see either the old
-//! contents or the new contents — never a truncated prefix.
+//! replacing the target with `MoveFileExW` on Windows. Readers see either the
+//! old contents or the new contents, never a truncated prefix.
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Atomically replace `path` with `contents`.
 ///
@@ -25,55 +27,105 @@ use std::path::Path;
 /// Returns `io::ErrorKind::InvalidInput` if `path` has no parent directory or
 /// no file name (e.g. a bare drive root like `"C:\\"`).
 pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory")
-    })?;
-    let file_name = path.file_name().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "path has no file name")
-    })?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory")
+        })?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
 
     fs::create_dir_all(parent)?;
 
-    // Deterministic temp name next to the target. Hidden (leading dot) so the
-    // user doesn't see it in Explorer if we ever leak one.
-    let mut tmp = parent.to_path_buf();
-    tmp.push(format!(".{}.tmp", file_name.to_string_lossy()));
+    let (tmp, mut file) = create_unique_temp(parent, file_name)?;
 
     // Write+fsync in an inner scope so the handle is dropped before the rename.
     // Windows requires the source handle to be closed before MoveFileExW.
     let write_result: io::Result<()> = (|| {
-        let mut f = File::create(&tmp)?;
-        f.write_all(contents)?;
-        f.sync_all()?;
+        file.write_all(contents)?;
+        file.sync_all()?;
         Ok(())
     })();
+    drop(file);
 
     if let Err(e) = write_result {
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }
 
-    match fs::rename(&tmp, path) {
+    match replace_file(&tmp, path) {
         Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-            // Extremely rare on Windows: someone (antivirus, indexer) holds an
-            // exclusive handle on the target. Best-effort fallback: remove the
-            // target and retry. If the retry also fails, caller sees the error
-            // and the temp file is cleaned up.
-            let _ = fs::remove_file(path);
-            match fs::rename(&tmp, path) {
-                Ok(()) => Ok(()),
-                Err(e2) => {
-                    let _ = fs::remove_file(&tmp);
-                    Err(e2)
-                }
-            }
-        }
         Err(e) => {
             let _ = fs::remove_file(&tmp);
             Err(e)
         }
     }
+}
+
+fn create_unique_temp(
+    parent: &Path,
+    file_name: &std::ffi::OsStr,
+) -> io::Result<(std::path::PathBuf, File)> {
+    for _ in 0..128 {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!(
+            ".{}.{}.{}.tmp",
+            file_name.to_string_lossy(),
+            std::process::id(),
+            sequence
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(file) => return Ok((tmp, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique atomic-write temp file",
+    ))
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
+    fs::rename(source, target)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, target: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    use windows::core::PCWSTR;
+
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let target: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut last_error = None;
+    for attempt in 0..50 {
+        // SAFETY: both paths are NUL-terminated and remain valid for the call.
+        match unsafe {
+            MoveFileExW(
+                PCWSTR(source.as_ptr()),
+                PCWSTR(target.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        } {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < 49 {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }
+        }
+    }
+    Err(io::Error::other(format!(
+        "MoveFileExW failed: {}",
+        last_error.expect("replace loop always runs")
+    )))
 }
 
 #[cfg(test)]
@@ -106,11 +158,7 @@ mod tests {
         let leftover: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with(".cfg.toml")
-            })
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".cfg.toml"))
             .collect();
         assert!(leftover.is_empty(), "temp file leaked: {:?}", leftover);
     }
@@ -121,6 +169,45 @@ mod tests {
         let p = dir.path().join("nested").join("deeper").join("cfg.toml");
         write_atomic(&p, b"deep").unwrap();
         assert_eq!(fs::read(&p).unwrap(), b"deep");
+    }
+
+    #[test]
+    fn concurrent_writers_use_distinct_temp_files() {
+        let dir = tempdir().unwrap();
+        let path = std::sync::Arc::new(dir.path().join("cfg.toml"));
+        let mut writers = Vec::new();
+        for value in 0..8u8 {
+            let path = std::sync::Arc::clone(&path);
+            writers.push(std::thread::spawn(move || {
+                write_atomic(&path, &[value; 16]).unwrap();
+            }));
+        }
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let contents = fs::read(&*path).unwrap();
+        assert_eq!(contents.len(), 16);
+        assert!(contents.iter().all(|byte| *byte == contents[0]));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[allow(clippy::permissions_set_readonly_false)]
+    fn failed_replace_preserves_existing_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cfg.toml");
+        fs::write(&path, b"original").unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions.clone()).unwrap();
+
+        let result = write_atomic(&path, b"replacement");
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+
+        permissions.set_readonly(false);
+        fs::set_permissions(&path, permissions).unwrap();
     }
 
     #[test]

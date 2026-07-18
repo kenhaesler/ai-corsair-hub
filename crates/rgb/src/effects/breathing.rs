@@ -1,5 +1,5 @@
-use crate::effect::{EffectContext, RgbEffect};
 use crate::Rgb;
+use crate::effect::{EffectContext, RgbEffect};
 
 pub struct BreathingEffect {
     pub color: Rgb,

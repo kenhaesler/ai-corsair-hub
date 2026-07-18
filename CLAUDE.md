@@ -13,11 +13,15 @@ smart fan control and thermal/acoustic optimization for a high-end custom water-
 # Set PATH (required in new shell sessions)
 export PATH="$USERPROFILE/.cargo/bin:/c/Program Files/nodejs:$PATH"
 
-# Build entire workspace
-cargo build
-
-# Run tests
-cargo test
+# CI-equivalent checks
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-targets
+npm --prefix apps/gui ci
+npm --prefix apps/gui/ui ci
+npm --prefix apps/gui/ui run check -- --fail-on-warnings
+npm --prefix apps/gui/ui test
+npm --prefix apps/gui/ui run build
 
 # Run USB device scanner
 cargo run --bin corsair-scanner
@@ -34,7 +38,7 @@ RUST_LOG=corsair_hid=trace cargo run --bin corsair-rgb-test
 
 ## Project Structure
 
-Rust workspace with 7 crates:
+Rust workspace with five library crates and four application crates:
 
 - `crates/common` — Shared types (CorsairDevice, config, Temperature, FanReading, RgbConfig)
 - `crates/hid` — USB HID layer (device discovery, iCUE LINK data + color endpoint protocol)
@@ -44,7 +48,7 @@ Rust workspace with 7 crates:
 - `apps/gui` — Tauri 2.0 + Svelte 5 desktop app (dashboard, fans, lighting, settings)
 - `apps/scanner` — CLI tool: scans USB devices, probes iCUE LINK hubs
 - `apps/rgb-test` — CLI tool: RGB protocol validation (cycles red/green/blue on hardware)
-- `apps/service` — Windows Service daemon [stub]
+- `apps/service` — Windows SCM fan-control service with console mode
 
 ## Architecture
 
@@ -71,8 +75,10 @@ The target system has:
 
 ## Current Phase
 
-**Phases 0–5 complete.** Fan control, sensor integration, GUI, and RGB are all working.
-Next: Phase 6 (Polish & Community) — installer, auto-update, documentation.
+**Phases 0–5 are implemented. Phase 6 (Polish & Community) is active.** The installer,
+updater, quality gates, and Windows Service SCM lifecycle are implemented. The GUI and
+service are alternative direct hardware owners; a named mutex prevents concurrent
+access. GUI/service IPC, SCM failure recovery, and broader hardware validation remain.
 
 ## Tech Stack
 

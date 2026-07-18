@@ -134,9 +134,13 @@ impl EffectConfig {
             EffectConfig::Fire { intensity, speed } => {
                 Box::new(fire::FireEffect { intensity, speed })
             }
-            EffectConfig::Aurora { speed, color_spread } => {
-                Box::new(aurora::AuroraEffect { speed, color_spread })
-            }
+            EffectConfig::Aurora {
+                speed,
+                color_spread,
+            } => Box::new(aurora::AuroraEffect {
+                speed,
+                color_spread,
+            }),
             EffectConfig::Candle {
                 color,
                 flicker_speed,

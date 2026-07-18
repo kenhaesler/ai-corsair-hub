@@ -1,5 +1,5 @@
-use crate::effect::{EffectContext, RgbEffect};
 use crate::Rgb;
+use crate::effect::{EffectContext, RgbEffect};
 
 /// PID-inspired: proportional color + integral saturation ramp + derivative brightness spike.
 pub struct ThermalPulseEffect {

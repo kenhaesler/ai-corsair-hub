@@ -23,9 +23,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::atomic_write::write_atomic;
-use crate::config::{
-    v2::DeviceEntry, AppConfig, FanGroupConfig, RgbDeviceRef, SCHEMA_VERSION_V2,
-};
+use crate::config::{AppConfig, FanGroupConfig, RgbDeviceRef, SCHEMA_VERSION_V2, v2::DeviceEntry};
 use crate::identity::DeviceRegistry;
 
 /// Errors that may occur during migration.
@@ -34,7 +32,9 @@ pub enum MigrationError {
     /// A V1 `(hub_serial, channel)` reference has no device_id in the
     /// registry right now. Could be transient (device unplugged); caller
     /// should retry on next boot with a fresh registry.
-    #[error("device at hub '{hub_serial}' channel {channel} not currently enumerated — cannot migrate")]
+    #[error(
+        "device at hub '{hub_serial}' channel {channel} not currently enumerated — cannot migrate"
+    )]
     UnresolvedDevice { hub_serial: String, channel: u8 },
 
     #[error("I/O error during migration: {0}")]
@@ -238,7 +238,12 @@ pub fn try_migrate_file(
         .iter()
         .map(|g| g.device_ids.len())
         .sum::<usize>()
-        + migrated.rgb.zones.iter().map(|z| z.devices.len()).sum::<usize>()
+        + migrated
+            .rgb
+            .zones
+            .iter()
+            .map(|z| z.devices.len())
+            .sum::<usize>()
         + current.device_overrides.len();
 
     Ok(MigrationOutcome::Migrated { resolved_count })
@@ -247,12 +252,11 @@ pub fn try_migrate_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DeviceOverride;
     use crate::config::{
-        CurvePoint, FanMode, GeneralConfig, LayerConfig, RgbConfig, RgbZoneConfig,
-        TempSourceConfig,
+        CurvePoint, FanMode, GeneralConfig, LayerConfig, RgbConfig, RgbZoneConfig, TempSourceConfig,
     };
     use crate::identity::{DeviceEnumEntry, DeviceRegistry};
-    use crate::config::DeviceOverride;
     use corsair_rgb::{BlendMode, EffectConfig};
     use tempfile::tempdir;
 
@@ -404,7 +408,10 @@ mod tests {
         let reg = registry_with_two_hubs();
         let err = migrate_v1_to_v2(&v1, &reg).expect_err("must fail");
         match err {
-            MigrationError::UnresolvedDevice { hub_serial, channel } => {
+            MigrationError::UnresolvedDevice {
+                hub_serial,
+                channel,
+            } => {
                 assert_eq!(hub_serial, "HUB_A");
                 assert_eq!(channel, 99);
             }
@@ -438,7 +445,10 @@ mod tests {
 
         // File unchanged.
         let after = fs::read_to_string(&cfg_path).unwrap();
-        assert_eq!(after, original, "file must be untouched when migration aborts");
+        assert_eq!(
+            after, original,
+            "file must be untouched when migration aborts"
+        );
         // No backup file created on abort.
         let backup = backup_path_for(&cfg_path);
         assert!(!backup.exists(), "no backup on abort");
@@ -459,8 +469,14 @@ mod tests {
             device_ids: Vec::new(),
             mode: FanMode::Curve {
                 points: vec![
-                    CurvePoint { temp: 40.0, duty: 30.0 },
-                    CurvePoint { temp: 70.0, duty: 100.0 },
+                    CurvePoint {
+                        temp: 40.0,
+                        duty: 30.0,
+                    },
+                    CurvePoint {
+                        temp: 70.0,
+                        duty: 100.0,
+                    },
                 ],
                 hysteresis: 2.0,
                 ramp_rate: 5.0,
@@ -495,7 +511,10 @@ mod tests {
         let backup = backup_path_for(&cfg_path);
         assert!(backup.exists(), ".bak.v1 exists");
         let backup_contents = fs::read_to_string(&backup).unwrap();
-        assert_eq!(backup_contents, original, "backup is byte-identical to pre-migration");
+        assert_eq!(
+            backup_contents, original,
+            "backup is byte-identical to pre-migration"
+        );
         let reparsed_backup: AppConfig = toml::from_str(&backup_contents).unwrap();
         assert_eq!(reparsed_backup.schema_version, 1);
 
