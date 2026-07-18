@@ -7,7 +7,9 @@
   import ZonePanel from './ZonePanel.svelte';
   import HardwarePreview from './HardwarePreview.svelte';
   import LayerStack from './LayerStack.svelte';
+  import FlowEditor from './FlowEditor.svelte';
   import PresetManager from './PresetManager.svelte';
+  import type { FlowConfig } from '../../lib/types';
 
   let config = $state<RgbConfig>({
     enabled: false,
@@ -132,6 +134,14 @@
     selectedZone = 0;
     saveConfig();
   }
+
+  function handleFlowChange(flow: FlowConfig | null) {
+    const zone = currentZone();
+    if (!zone) return;
+    config.zones[selectedZone] = { ...zone, flow };
+    config = config; // trigger reactivity
+    saveConfig();
+  }
 </script>
 
 <div class="lighting-page">
@@ -165,6 +175,11 @@
     <!-- Right: Layer Stack -->
     <div class="layer-panel">
       {#if currentZone()}
+        <FlowEditor
+          flow={currentZone()!.flow ?? null}
+          deviceCount={currentZone()!.devices.length}
+          onchange={handleFlowChange}
+        />
         <LayerStack
           zone={currentZone()!}
           onupdate={handleZoneUpdate}

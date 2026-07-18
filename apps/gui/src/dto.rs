@@ -16,6 +16,37 @@ pub struct SystemSnapshot {
     pub emergency: bool,
     pub any_stale: bool,
     pub hub_health: Vec<HubHealth>,
+    /// Extended GPU telemetry (util %, power W, clock MHz, VRAM). Present
+    /// only when NVML is available — on AMD/Intel systems this is `None`
+    /// and the dashboard GPU card hides itself. Populated alongside the
+    /// existing `gpu` entry in `temperatures`; the two can co-exist since
+    /// temperature is a sensor-fusion input and these metrics are pure
+    /// display. Added in v0.4.
+    pub gpu_metrics: Option<GpuMetricsDto>,
+    /// Extended CPU telemetry (load %, package power, max core clock)
+    /// sourced from LibreHardwareMonitor's HTTP tree. `None` when LHM
+    /// isn't running or doesn't have a `/amdcpu` / `/intelcpu` node.
+    /// Added in v0.4.
+    pub cpu_metrics: Option<CpuMetricsDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GpuMetricsDto {
+    pub utilization_pct: u32,
+    pub power_watts: f64,
+    pub clock_mhz: u32,
+    pub memory_used_mb: u64,
+    /// Temperature in °C — duplicated from `temperatures` so the card can
+    /// render without cross-referencing. The temperatures vec is the
+    /// authoritative source for fan-control logic.
+    pub temp_celsius: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CpuMetricsDto {
+    pub load_pct: f64,
+    pub power_watts: f64,
+    pub clock_mhz: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -165,6 +196,8 @@ impl SystemSnapshot {
         fan_speeds: &[(String, Vec<FanSpeed>)],
         psu_status: Option<&PsuStatus>,
         device_id_map: &std::collections::HashMap<(String, u8), String>,
+        gpu_metrics: Option<GpuMetricsDto>,
+        cpu_metrics: Option<CpuMetricsDto>,
     ) -> Self {
         let timestamp_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -279,6 +312,8 @@ impl SystemSnapshot {
             emergency: result.emergency,
             any_stale: result.any_stale,
             hub_health,
+            gpu_metrics,
+            cpu_metrics,
         }
     }
 }

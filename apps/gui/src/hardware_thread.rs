@@ -17,8 +17,31 @@ use corsair_rgb::effect::EffectContext;
 use corsair_rgb::layout::LedLayout;
 use corsair_rgb::renderer::{DeviceConfig, RgbRenderer, ZoneConfig};
 
-use crate::dto::{DeviceTree, RgbFrameDto, SystemSnapshot};
-use crate::state::HwCommand;
+use crate::dto::{CpuMetricsDto, DeviceTree, GpuMetricsDto, RgbFrameDto, SystemSnapshot};
+use crate::state::{ChannelIdentity, HwCommand};
+
+/// Distinct high-contrast colours used by the Channel Identify
+/// diagnostic. Indexed modulo by an arbitrary `(hub_index, channel)`
+/// slot so each physical device in the case shows a unique, easily-
+/// describable hue. Pairs with [`identify_color_name`].
+const IDENTIFY_PALETTE: &[([u8; 3], &str)] = &[
+    ([255, 0, 0], "red"),
+    ([255, 128, 0], "orange"),
+    ([255, 255, 0], "yellow"),
+    ([0, 255, 0], "green"),
+    ([0, 255, 255], "cyan"),
+    ([0, 128, 255], "blue"),
+    ([128, 0, 255], "purple"),
+    ([255, 0, 255], "magenta"),
+    ([255, 0, 128], "pink"),
+    ([255, 255, 255], "white"),
+    ([128, 128, 0], "olive"),
+    ([0, 128, 128], "teal"),
+    ([128, 0, 0], "dark red"),
+    ([0, 128, 0], "dark green"),
+    ([0, 0, 128], "dark blue"),
+    ([255, 128, 128], "pastel red"),
+];
 
 /// Spawn the dedicated hardware I/O thread. Returns a channel sender for commands.
 ///
@@ -141,6 +164,31 @@ fn run_loop(
     let mut psu_fail_count: u32 = 0;
     const PSU_STALE_LIMIT: u32 = 10; // drop after 10 consecutive failures
 
+    // Channel-identify diagnostic state. When `Some((deadline, map))`,
+    // the RGB tick overrides normal rendering with per-device distinct
+    // colours from `map` (keyed by device_id). Automatically clears when
+    // `Instant::now() >= deadline`, at which point the next tick
+    // resumes the configured effect rendering.
+    let mut rgb_identify: Option<(Instant, std::collections::HashMap<String, [u8; 3]>)> =
+        None;
+
+    // Separate NVML handle for extended GPU metrics (util, power, clock,
+    // VRAM). The control loop already owns a GpuSensor for temperature
+    // fan control — we keep an independent one here so those two concerns
+    // don't leak into the fancontrol crate's API. NVML is refcounted by
+    // the driver, so two handles in one process is legit.
+    let gpu_metrics_sensor: Option<corsair_sensors::GpuSensor> =
+        match corsair_sensors::GpuSensor::new() {
+            Ok(g) => {
+                info!("GPU metrics sensor ready for dashboard");
+                Some(g)
+            }
+            Err(e) => {
+                info!(error = %e, "GPU metrics sensor unavailable (non-NVIDIA machine or driver missing)");
+                None
+            }
+        };
+
     loop {
         let cycle_start = Instant::now();
 
@@ -161,8 +209,11 @@ fn run_loop(
                     HwCommand::GetConfig { reply } => {
                         let _ = reply.send(Ok(control_loop.config().clone()));
                     }
+                    HwCommand::ListSensors { reply } => {
+                        let _ = reply.send(Ok(control_loop.available_sensors()));
+                    }
                     HwCommand::UpdateConfig {
-                        config: new_config,
+                        config: mut new_config,
                         reply,
                     } => {
                         // Validate first
@@ -170,6 +221,11 @@ fn run_loop(
                             let _ = reply.send(Err(format!("Invalid config: {}", e)));
                             continue;
                         }
+                        // Reconcile preset_applied: if a group's mode has
+                        // drifted from its named preset's canonical values,
+                        // clear the tag so the UI indicator goes to
+                        // Modified / Off on next read.
+                        reconcile_preset_applied(&mut new_config);
                         // Persist to disk
                         if let Err(e) = save_config_to_disk(&new_config) {
                             let _ = reply.send(Err(format!("Failed to save config: {}", e)));
@@ -189,8 +245,17 @@ fn run_loop(
                             }
                         }
                     }
-                    HwCommand::ApplyPreset { preset, reply } => {
-                        let result = apply_preset(&preset, &mut config, &mut control_loop);
+                    HwCommand::ApplyPreset {
+                        preset,
+                        group_name,
+                        reply,
+                    } => {
+                        let result = apply_preset(
+                            &preset,
+                            group_name.as_deref(),
+                            &mut config,
+                            &mut control_loop,
+                        );
                         let ok = result.is_ok();
                         let _ = reply.send(result);
                         if ok {
@@ -263,6 +328,56 @@ fn run_loop(
                             warn!("Failed to save RGB enabled state: {}", e);
                         }
                         let _ = reply.send(Ok(()));
+                    }
+                    HwCommand::RgbIdentifyChannels {
+                        duration_secs,
+                        reply,
+                    } => {
+                        // Build a deterministic (hub_index, channel) →
+                        // palette-index mapping so every enumerated device
+                        // receives a unique colour. Key the runtime
+                        // override by device_id so the colour follows the
+                        // device even if the registry re-resolves
+                        // mid-test. Also return the mapping so the UI
+                        // can render a legend.
+                        let hub_snaps = control_loop.hub_snapshots();
+                        let mut identity: Vec<ChannelIdentity> = Vec::new();
+                        let mut id_to_rgb: std::collections::HashMap<String, [u8; 3]> =
+                            std::collections::HashMap::new();
+                        // Keep hubs in enumeration order so the
+                        // colour indices are stable across runs.
+                        for (hub_idx, (serial, info, _speeds)) in hub_snaps.iter().enumerate() {
+                            for dev in &info.devices {
+                                // Offset by hub index × 8 so two
+                                // different hubs cycle through the
+                                // palette starting at different
+                                // colours — the same ch1 on two hubs
+                                // shouldn't both be red.
+                                let slot = (hub_idx * 8 + (dev.channel as usize))
+                                    % IDENTIFY_PALETTE.len();
+                                let (rgb, name) = IDENTIFY_PALETTE[slot];
+                                id_to_rgb.insert(dev.device_id.clone(), rgb);
+                                identity.push(ChannelIdentity {
+                                    hub_serial: serial.clone(),
+                                    channel: dev.channel,
+                                    device_id: dev.device_id.clone(),
+                                    device_type: dev.device_type.name().to_string(),
+                                    color_name: name.to_string(),
+                                    rgb,
+                                });
+                            }
+                        }
+                        let clamped = duration_secs.clamp(3, 120);
+                        rgb_identify = Some((
+                            Instant::now() + Duration::from_secs(clamped),
+                            id_to_rgb,
+                        ));
+                        info!(
+                            duration_secs = clamped,
+                            devices = identity.len(),
+                            "RGB channel-identify mode active"
+                        );
+                        let _ = reply.send(Ok(identity));
                     }
                     HwCommand::Shutdown => {
                         info!("Hardware thread received shutdown command");
@@ -363,11 +478,34 @@ fn run_loop(
         // carries stable identity alongside (hub, channel) during the V1→V2
         // transition.
         let device_id_map = control_loop.device_id_map();
+        let gpu_metrics = gpu_metrics_sensor
+            .as_ref()
+            .and_then(|s| s.read_metrics().ok())
+            .map(|m| GpuMetricsDto {
+                utilization_pct: m.utilization_pct,
+                power_watts: m.power_watts,
+                clock_mhz: m.clock_mhz,
+                memory_used_mb: m.memory_used_mb,
+                temp_celsius: m.temp_celsius,
+            });
+        // CPU metrics come from LHM — same HTTP tree the PSU path
+        // already touches. Only populated when LHM is running; on
+        // fallback backends (root\WMI, CIMV2) this stays `None` and
+        // the dashboard hides the CPU extras strip.
+        let cpu_metrics = corsair_sensors::lhm::read_cpu_metrics_from_lhm().map(|m| {
+            CpuMetricsDto {
+                load_pct: m.load_pct,
+                power_watts: m.power_watts,
+                clock_mhz: m.clock_mhz,
+            }
+        });
         let snapshot = SystemSnapshot::from_cycle(
             &cycle_result,
             &cycle_result.fan_speeds,
             psu_status.as_ref(),
             &device_id_map,
+            gpu_metrics,
+            cpu_metrics,
         );
         let _ = app.emit("sensor-update", &snapshot);
 
@@ -407,6 +545,10 @@ fn run_loop(
                 temperature: primary_temp,
                 temp_delta,
                 duty_percent: avg_duty,
+                gpu_utilization: snapshot
+                    .gpu_metrics
+                    .as_ref()
+                    .map(|g| g.utilization_pct as f64),
                 all_temps: snapshot
                     .temperatures
                     .iter()
@@ -414,7 +556,37 @@ fn run_loop(
                     .collect(),
             };
 
-            let frames = rgb_renderer.tick(&effect_ctx);
+            let mut frames = rgb_renderer.tick(&effect_ctx);
+
+            // Channel-identify override: if active and not expired,
+            // replace every LED colour in every frame with the
+            // device's assigned identify colour. This bypasses the
+            // effect output but still uses the real renderer's frame
+            // shapes (device_id, led count) so the hub buffer layout
+            // is identical to production rendering — the only
+            // variable is colour-per-device.
+            let expired = rgb_identify
+                .as_ref()
+                .map(|(deadline, _)| Instant::now() >= *deadline)
+                .unwrap_or(false);
+            if expired {
+                info!("RGB channel-identify mode expired — resuming normal rendering");
+                rgb_identify = None;
+            }
+            if let Some((_, id_to_rgb)) = &rgb_identify {
+                for frame in frames.iter_mut() {
+                    let rgb = id_to_rgb
+                        .get(&frame.device_id)
+                        .copied()
+                        .unwrap_or([32, 32, 32]); // unknown device → dim grey
+                    for led in frame.leds.iter_mut() {
+                        led.r = rgb[0];
+                        led.g = rgb[1];
+                        led.b = rgb[2];
+                    }
+                }
+            }
+
             // Resolve (hub_serial, channel) via the current registry so the
             // DTO carries a self-consistent snapshot for the preview UI
             // during the V1→V2 transition.
@@ -505,6 +677,9 @@ fn run_degraded(rx: mpsc::Receiver<HwCommand>) {
             Ok(HwCommand::GetConfig { reply }) => {
                 let _ = reply.send(Err("Hardware unavailable".into()));
             }
+            Ok(HwCommand::ListSensors { reply }) => {
+                let _ = reply.send(Err("Hardware unavailable".into()));
+            }
             Ok(HwCommand::UpdateConfig { reply, .. }) => {
                 let _ = reply.send(Err("Hardware unavailable".into()));
             }
@@ -524,6 +699,9 @@ fn run_degraded(rx: mpsc::Receiver<HwCommand>) {
                 let _ = reply.send(Err("Hardware unavailable".into()));
             }
             Ok(HwCommand::SetRgbEnabled { reply, .. }) => {
+                let _ = reply.send(Err("Hardware unavailable".into()));
+            }
+            Ok(HwCommand::RgbIdentifyChannels { reply, .. }) => {
                 let _ = reply.send(Err("Hardware unavailable".into()));
             }
         }
@@ -549,6 +727,9 @@ fn run_discovery_only(
             Ok(HwCommand::GetConfig { reply }) => {
                 let _ = reply.send(Err("Control loop not running".into()));
             }
+            Ok(HwCommand::ListSensors { reply }) => {
+                let _ = reply.send(Err("Control loop not running".into()));
+            }
             Ok(HwCommand::UpdateConfig { reply, .. }) => {
                 let _ = reply.send(Err("Control loop not running".into()));
             }
@@ -570,6 +751,9 @@ fn run_discovery_only(
             Ok(HwCommand::SetRgbEnabled { reply, .. }) => {
                 let _ = reply.send(Err("Control loop not running".into()));
             }
+            Ok(HwCommand::RgbIdentifyChannels { reply, .. }) => {
+                let _ = reply.send(Err("Control loop not running".into()));
+            }
         }
     }
 }
@@ -587,11 +771,17 @@ fn build_snapshot(
         })
         .or_else(|| last_good_psu.clone());
     let device_id_map = control_loop.device_id_map();
+    // GetSnapshot is a rare on-demand path (used for reply-direct calls
+    // from Tauri commands), so we skip the NVML + CPU-metrics reads
+    // here rather than carrying another `&GpuSensor` borrow — the
+    // frontend's live stream is driven by the main-loop event.
     Ok(SystemSnapshot::from_cycle(
         &cycle_result,
         &cycle_result.fan_speeds,
         psu_status.as_ref(),
         &device_id_map,
+        None,
+        None,
     ))
 }
 
@@ -684,97 +874,107 @@ fn validate_psu_status(s: corsair_hid::PsuStatus) -> Option<corsair_hid::PsuStat
     Some(s)
 }
 
+/// Apply a curated fan preset to one or all fan groups.
+///
+/// Preset definitions live in the compile-time-embedded
+/// `assets/presets/fans.toml` asset and are looked up via
+/// `crate::presets::lookup`.
+///
+/// `group_name` is the per-group filter added in v0.3:
+/// - `None` — apply to every group (pre-v0.3 global behavior, still used
+///   by the tray menu and the `apply_preset` back-compat command).
+/// - `Some(name)` — apply to that group only. Unknown names are a no-op
+///   (the call returns `Ok(())`) — the UI should only ever call with a
+///   name that came from `get_devices` / `get_config`, so a missing
+///   name means the user just deleted the group and the click raced.
+///
+/// On success every targeted group's `preset_applied` is set to the
+/// preset's id — the UI reads this back in `get_config` to render the
+/// three-state (Active / Modified / Off) indicator.
 fn apply_preset(
     preset: &str,
+    group_name: Option<&str>,
     config: &mut AppConfig,
     control_loop: &mut ControlLoop,
 ) -> Result<(), String> {
-    use corsair_common::config::{CurvePoint, FanMode, TempSourceConfig};
+    use corsair_common::config::{FanMode, TempSourceConfig};
 
-    // Pick best available temp source
+    let def = crate::presets::lookup(preset)
+        .ok_or_else(|| format!("Unknown preset: {}", preset))?;
+
     let available = control_loop.available_sensors();
-    let temp_source = if available.contains(&"cpu".to_string())
-        && available.contains(&"gpu".to_string())
-    {
-        // Both available: 60% CPU, 40% GPU — water loop cools both
-        TempSourceConfig {
-            sensors: vec!["cpu".to_string(), "gpu".to_string()],
-            weights: vec![0.6, 0.4],
+
+    // Build a TempSourceConfig from the preset's per-sensor weights,
+    // dropping any sensor not currently available. `water_inline` is a
+    // v0.4 placeholder — when it isn't enumerated we gracefully degrade
+    // to CPU/GPU weighting (if *those* are also missing we fall through
+    // to the fixed-duty fallback below).
+    let mut sensors = Vec::new();
+    let mut weights = Vec::new();
+    for (name, weight) in [
+        ("cpu", def.cpu_weight),
+        ("gpu", def.gpu_weight),
+        ("water_inline", def.water_weight),
+    ] {
+        if weight > 0.0 && available.contains(&name.to_string()) {
+            sensors.push(name.to_string());
+            weights.push(weight);
         }
-    } else if available.contains(&"cpu".to_string()) {
-        TempSourceConfig {
-            sensors: vec!["cpu".to_string()],
-            weights: vec![1.0],
+    }
+
+    // water_priority preview: if the user picked it but no water sensor
+    // is present, fall back to whatever cpu/gpu split was authored on
+    // the *same* preset or, if the preset is water-only, a CPU 0.6 /
+    // GPU 0.4 default that matches the pre-v0.3 behavior.
+    if sensors.is_empty() {
+        if available.contains(&"cpu".to_string())
+            && available.contains(&"gpu".to_string())
+        {
+            sensors = vec!["cpu".to_string(), "gpu".to_string()];
+            weights = vec![0.6, 0.4];
+        } else if available.contains(&"cpu".to_string()) {
+            sensors = vec!["cpu".to_string()];
+            weights = vec![1.0];
+        } else if available.contains(&"gpu".to_string()) {
+            sensors = vec!["gpu".to_string()];
+            weights = vec![1.0];
         }
-    } else if available.contains(&"gpu".to_string()) {
-        TempSourceConfig {
-            sensors: vec!["gpu".to_string()],
-            weights: vec![1.0],
-        }
+    }
+
+    let mode = if sensors.is_empty() {
+        // No sensors available at all — fall back to a fixed-duty that
+        // picks a sensible mid-curve duty, not 0. The mid-point of the
+        // preset's curve is a reasonable proxy.
+        let mid_duty = def
+            .points
+            .get(def.points.len() / 2)
+            .map(|p| p.duty)
+            .unwrap_or(50.0);
+        FanMode::Fixed { duty_percent: mid_duty }
     } else {
-        // No sensors — fall back to fixed duty
-        for group in &mut config.fan_groups {
-            group.mode = match preset {
-                "silent" => FanMode::Fixed { duty_percent: 25.0 },
-                "balanced" => FanMode::Fixed { duty_percent: 50.0 },
-                "performance" => FanMode::Fixed { duty_percent: 80.0 },
-                other => return Err(format!("Unknown preset: {}", other)),
-            };
+        FanMode::Curve {
+            points: def.points.clone(),
+            hysteresis: def.hysteresis,
+            ramp_rate: def.ramp_up,
+            ramp_down_rate: Some(def.ramp_down),
+            temp_source: TempSourceConfig { sensors, weights },
         }
-        return control_loop
-            .update_config(config.clone())
-            .map_err(|e| format!("Failed to apply preset: {}", e));
     };
 
-    // Intelligent curves optimized for custom water cooling
-    // (3x 420mm radiators, high thermal mass, shared CPU+GPU loop)
-    let mode = match preset {
-        "silent" => FanMode::Curve {
-            // Prioritize silence — rely on radiator thermal mass for short bursts
-            // Fans stay near-silent until water loop really heats up
-            points: vec![
-                CurvePoint { temp: 30.0, duty: 20.0 },
-                CurvePoint { temp: 50.0, duty: 30.0 },
-                CurvePoint { temp: 65.0, duty: 50.0 },
-                CurvePoint { temp: 80.0, duty: 80.0 },
-                CurvePoint { temp: 90.0, duty: 100.0 },
-            ],
-            hysteresis: 5.0, // wide band prevents fan hunting
-            ramp_rate: 3.0,  // slow ramp — inaudible transitions
-            temp_source: temp_source.clone(),
-        },
-        "balanced" => FanMode::Curve {
-            // Good tradeoff: cool enough for sustained gaming, quiet at idle
-            points: vec![
-                CurvePoint { temp: 30.0, duty: 25.0 },
-                CurvePoint { temp: 45.0, duty: 35.0 },
-                CurvePoint { temp: 60.0, duty: 55.0 },
-                CurvePoint { temp: 75.0, duty: 80.0 },
-                CurvePoint { temp: 85.0, duty: 100.0 },
-            ],
-            hysteresis: 3.0,
-            ramp_rate: 5.0,
-            temp_source: temp_source.clone(),
-        },
-        "performance" => FanMode::Curve {
-            // Aggressive cooling: fans respond quickly, keeps temps low
-            // Good for sustained workloads, rendering, stress tests
-            points: vec![
-                CurvePoint { temp: 30.0, duty: 30.0 },
-                CurvePoint { temp: 40.0, duty: 50.0 },
-                CurvePoint { temp: 55.0, duty: 70.0 },
-                CurvePoint { temp: 70.0, duty: 90.0 },
-                CurvePoint { temp: 80.0, duty: 100.0 },
-            ],
-            hysteresis: 2.0, // tight band — quick response
-            ramp_rate: 10.0, // fast ramp — don't let temps climb
-            temp_source: temp_source.clone(),
-        },
-        other => return Err(format!("Unknown preset: {}", other)),
-    };
-
+    // Apply to the target group(s).
+    let mut applied_any = false;
     for group in &mut config.fan_groups {
-        group.mode = mode.clone();
+        if group_name.map_or(true, |n| group.name == n) {
+            group.mode = mode.clone();
+            group.preset_applied = Some(def.id.clone());
+            applied_any = true;
+        }
+    }
+
+    if !applied_any {
+        // Harmless no-op — the UI raced against a delete. Return Ok so
+        // the user isn't surprised by an error toast.
+        return Ok(());
     }
 
     // Persist to disk so it survives restart
@@ -1132,6 +1332,62 @@ fn run_config_migration(
     }
 }
 
+/// Clear `preset_applied` on every group whose current mode no longer
+/// matches the canonical values of the named preset. Called from the
+/// `save_config` path so a user drag-edit immediately marks a group as
+/// drifted. `apply_preset` then re-sets the tag on the next apply.
+///
+/// Comparison is structural on the mode variant: for Curve mode we
+/// compare points / hysteresis / ramp_up / ramp_down. Temp-source
+/// differences alone do NOT drift the preset (the preset's sensor
+/// weights get re-resolved at apply-time against the currently-
+/// available sensors, so a machine with no GPU resolves a preset's
+/// 0.6/0.4 to 1.0 CPU — that's by design, not a drift).
+pub(crate) fn reconcile_preset_applied(config: &mut AppConfig) {
+    use corsair_common::config::FanMode;
+
+    for group in &mut config.fan_groups {
+        let Some(preset_id) = group.preset_applied.as_deref() else {
+            continue;
+        };
+        let Some(def) = crate::presets::lookup(preset_id) else {
+            // Unknown preset id (e.g. config from a newer version that
+            // shipped a preset removed here). Clear it — the UI would
+            // render it as Off anyway.
+            group.preset_applied = None;
+            continue;
+        };
+
+        let matches = match &group.mode {
+            FanMode::Curve {
+                points,
+                hysteresis,
+                ramp_rate,
+                ramp_down_rate,
+                ..
+            } => {
+                let same_points = points.len() == def.points.len()
+                    && points.iter().zip(def.points.iter()).all(|(a, b)| {
+                        (a.temp - b.temp).abs() < 0.001
+                            && (a.duty - b.duty).abs() < 0.001
+                    });
+                let same_hyst = (hysteresis - def.hysteresis).abs() < 0.001;
+                let same_up = (ramp_rate - def.ramp_up).abs() < 0.001;
+                let same_down = ramp_down_rate
+                    .map(|d| (d - def.ramp_down).abs() < 0.001)
+                    .unwrap_or(false);
+                same_points && same_hyst && same_up && same_down
+            }
+            // Fixed / Pid modes never match a curve-valued preset.
+            _ => false,
+        };
+
+        if !matches {
+            group.preset_applied = None;
+        }
+    }
+}
+
 fn save_config_to_disk(config: &AppConfig) -> Result<()> {
     let toml_str = toml::to_string_pretty(config)
         .map_err(|e| anyhow::anyhow!("Failed to serialize config: {}", e))?;
@@ -1246,6 +1502,105 @@ mod tests {
         assert!(cfg.devices.is_empty());
     }
 
+    // --- reconcile_preset_applied ---
+
+    use corsair_common::config::{CurvePoint, TempSourceConfig};
+
+    /// Silent preset's canonical values, matching fans.toml. Keeping
+    /// this literal in the test instead of reading from the library
+    /// prevents a silent regression — if someone changes fans.toml and
+    /// the reconciler stops recognising Silent, this test goes red.
+    fn silent_canonical_curve() -> FanMode {
+        FanMode::Curve {
+            points: vec![
+                CurvePoint { temp: 30.0, duty: 20.0 },
+                CurvePoint { temp: 50.0, duty: 30.0 },
+                CurvePoint { temp: 65.0, duty: 50.0 },
+                CurvePoint { temp: 80.0, duty: 80.0 },
+                CurvePoint { temp: 90.0, duty: 100.0 },
+            ],
+            hysteresis: 5.0,
+            ramp_rate: 3.0,
+            ramp_down_rate: Some(1.5),
+            temp_source: TempSourceConfig {
+                sensors: vec!["cpu".into()],
+                weights: vec![1.0],
+            },
+        }
+    }
+
+    /// A group tagged with "silent" whose mode exactly matches Silent's
+    /// canonical values retains its tag through reconciliation. This
+    /// is the "Active" path the UI reads back as a glowing card.
+    #[test]
+    fn reconcile_keeps_tag_when_values_match() {
+        let mut cfg = empty_v1_config();
+        cfg.fan_groups.push(corsair_common::config::FanGroupConfig {
+            name: "g".into(),
+            channels: vec![1],
+            hub_serial: Some("H".into()),
+            device_ids: Vec::new(),
+            mode: silent_canonical_curve(),
+            preset_applied: Some("silent".into()),
+        });
+
+        super::reconcile_preset_applied(&mut cfg);
+
+        assert_eq!(
+            cfg.fan_groups[0].preset_applied.as_deref(),
+            Some("silent"),
+            "unchanged Silent curve must keep its tag"
+        );
+    }
+
+    /// A group tagged with "silent" whose curve has been edited is
+    /// cleared on reconciliation. This is the drift path that makes
+    /// the UI switch to the Modified badge.
+    #[test]
+    fn reconcile_clears_tag_when_curve_drifts() {
+        let mut cfg = empty_v1_config();
+        let mut drifted = silent_canonical_curve();
+        if let FanMode::Curve { ref mut points, .. } = drifted {
+            // Nudge one point's duty by 1%.
+            points[0].duty += 1.0;
+        }
+        cfg.fan_groups.push(corsair_common::config::FanGroupConfig {
+            name: "g".into(),
+            channels: vec![1],
+            hub_serial: Some("H".into()),
+            device_ids: Vec::new(),
+            mode: drifted,
+            preset_applied: Some("silent".into()),
+        });
+
+        super::reconcile_preset_applied(&mut cfg);
+
+        assert!(
+            cfg.fan_groups[0].preset_applied.is_none(),
+            "drifted curve must clear the preset tag"
+        );
+    }
+
+    /// An unknown preset id gets cleared — a config from a newer app
+    /// version whose preset was renamed here shouldn't keep a dangling
+    /// tag that never matches anything.
+    #[test]
+    fn reconcile_clears_unknown_preset_id() {
+        let mut cfg = empty_v1_config();
+        cfg.fan_groups.push(corsair_common::config::FanGroupConfig {
+            name: "g".into(),
+            channels: vec![1],
+            hub_serial: Some("H".into()),
+            device_ids: Vec::new(),
+            mode: silent_canonical_curve(),
+            preset_applied: Some("nonexistent_preset".into()),
+        });
+
+        super::reconcile_preset_applied(&mut cfg);
+
+        assert!(cfg.fan_groups[0].preset_applied.is_none());
+    }
+
     /// V1-shaped config round-trips cleanly with a newly-added V2
     /// device entry. The serde skip_serializing_if attributes on
     /// DeviceEntry.name / led_count keep the output compact and backwards
@@ -1260,6 +1615,7 @@ mod tests {
             hub_serial: Some("HUB_A".to_string()),
             device_ids: Vec::new(),
             mode: FanMode::Fixed { duty_percent: 50.0 },
+            preset_applied: None,
         });
 
         rename_device_in_config(&mut cfg, "ID_A1", "Top Front");

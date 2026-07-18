@@ -1,6 +1,7 @@
 mod commands;
 mod dto;
 mod hardware_thread;
+mod presets;
 mod state;
 
 use std::sync::OnceLock;
@@ -78,6 +79,8 @@ pub fn run() {
                             let _ = state.hw_sender.send(
                                 crate::state::HwCommand::ApplyPreset {
                                     preset: id.to_string(),
+                                    // Tray quick-switch is always global.
+                                    group_name: None,
                                     reply: tx,
                                 },
                             );
@@ -128,8 +131,11 @@ pub fn run() {
             commands::get_snapshot,
             commands::get_devices,
             commands::get_config,
+            commands::list_available_sensors,
             commands::save_config,
             commands::apply_preset,
+            commands::apply_preset_to_group,
+            commands::get_fan_presets,
             #[allow(deprecated)]
             commands::set_manual_duty,
             commands::set_manual_duty_by_device_id,
@@ -137,6 +143,7 @@ pub fn run() {
             commands::validate_config,
             commands::set_rgb_config,
             commands::set_rgb_enabled,
+            commands::rgb_identify_channels,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

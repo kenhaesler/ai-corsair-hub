@@ -117,6 +117,13 @@ pub struct FanGroupConfig {
     #[serde(default)]
     pub device_ids: Vec<String>,
     pub mode: FanMode,
+    /// Id of the preset whose canonical curve/hysteresis/ramp currently
+    /// equals this group's mode. Set by `apply_preset` / `apply_preset_to_group`
+    /// on success; cleared by `save_config` when values diverge. The UI
+    /// uses this for an O(1) Active / Modified / Off indicator on the
+    /// preset strip. `None` means "no preset is tracking this group".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset_applied: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,7 +136,16 @@ pub enum FanMode {
     Curve {
         points: Vec<CurvePoint>,
         hysteresis: f64,
+        /// Ramp-up rate (%/sec). When `ramp_down_rate` is `None` this is
+        /// also used as the down-rate times 0.4 — preserving the pre-v0.3
+        /// symmetric behavior.
         ramp_rate: f64,
+        /// Asymmetric ramp-down rate (%/sec). `None` on v0.2 and earlier
+        /// configs; `Some(v)` overrides the legacy `ramp_rate * 0.4`
+        /// fallback. Asymmetric fall-off makes fans quieter to the ear
+        /// than their rise suggests.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ramp_down_rate: Option<f64>,
         temp_source: TempSourceConfig,
     },
 
@@ -155,6 +171,75 @@ pub struct CurvePoint {
 pub struct TempSourceConfig {
     pub sensors: Vec<String>,
     pub weights: Vec<f64>,
+}
+
+/// A curated, use-case-specific fan preset loaded from the shipped
+/// `fans.toml` asset. Presets expand on the pre-v0.3 hardcoded
+/// Silent / Balanced / Performance trio with scenarios like
+/// "Quiet Productivity", "Gaming", "Competitive FPS", "Cinema", etc.
+///
+/// Shipped as data rather than code so the owner can iterate on curves
+/// by editing one TOML file and rebuilding — no Rust edit per tweak.
+/// The Tauri command `get_fan_presets` returns the parsed list to the
+/// UI, which renders a horizontal rail of cards; `apply_preset` looks
+/// up by `id` and writes the canonical mode into the target fan group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FanPresetDef {
+    /// Stable identifier used by `apply_preset` and by
+    /// `FanGroupConfig.preset_applied`. Lowercase_snake_case. Legacy ids
+    /// `silent`, `balanced`, `performance` are retained in the shipped
+    /// TOML for V1/V2 config back-compat.
+    pub id: String,
+    /// Human-readable name shown in the UI.
+    pub name: String,
+    /// One-line use-case description (e.g. "AAA single-player gaming").
+    pub description: String,
+    /// Temperature → duty points. Same shape as `FanMode::Curve.points`.
+    pub points: Vec<CurvePoint>,
+    /// Deadband (°C) — temp change smaller than this leaves the target
+    /// duty untouched. Smaller = quicker response, larger = quieter.
+    pub hysteresis: f64,
+    /// Ramp-up rate in %/sec.
+    pub ramp_up: f64,
+    /// Asymmetric ramp-down rate in %/sec. Typically < `ramp_up` so
+    /// fans fall off slowly — easier on the ear than the rise.
+    pub ramp_down: f64,
+    /// CPU sensor weight when both CPU and GPU are available.
+    #[serde(default)]
+    pub cpu_weight: f64,
+    /// GPU sensor weight when both CPU and GPU are available.
+    #[serde(default)]
+    pub gpu_weight: f64,
+    /// Water-loop sensor weight. `0.0` for all presets today; the
+    /// `water_priority` preset sets this to 1.0 as a preview for the
+    /// future inline-coolant-temp sensor. If `water_inline` is not an
+    /// available sensor, `apply_preset` falls back to CPU/GPU weighting.
+    #[serde(default)]
+    pub water_weight: f64,
+}
+
+/// Root of the shipped `fans.toml` asset: a top-level list of presets
+/// keyed by `[[preset]]` tables.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FanPresetLibrary {
+    #[serde(rename = "preset")]
+    pub presets: Vec<FanPresetDef>,
+}
+
+impl FanPresetLibrary {
+    /// Parse a TOML document (typically the compile-time-embedded
+    /// `fans.toml` asset) into a preset library. Errors surface as a
+    /// `String` so callers in binaries and Lazy-inits can `.expect` with
+    /// a stable message.
+    pub fn parse(toml_src: &str) -> Result<Self, String> {
+        toml::from_str::<FanPresetLibrary>(toml_src)
+            .map_err(|e| format!("Invalid fan-preset TOML: {}", e))
+    }
+
+    /// Return the preset with the given `id`, or `None` if absent.
+    pub fn lookup(&self, id: &str) -> Option<&FanPresetDef> {
+        self.presets.iter().find(|p| p.id == id)
+    }
 }
 
 impl Default for AppConfig {
@@ -480,6 +565,7 @@ led_count = 30
                 hub_serial: Some("HUB_A".to_string()),
                 device_ids: vec![],
                 mode: FanMode::Fixed { duty_percent: 50.0 },
+                preset_applied: None,
             }],
             rgb: RgbConfig::default(),
             device_overrides: vec![DeviceOverride {

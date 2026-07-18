@@ -91,6 +91,44 @@
         flow: null,
       }],
     },
+    // Workload Aurora — composes the v0.4 substrate. Base layer
+    // colour-maps water/CPU temp onto the case; top layer modulates
+    // brightness by fan duty via Multiply blend, so the fans that are
+    // actually working glow brighter. Switch to GpuMeter + Multiply if
+    // you prefer "where the GPU pushes hardest" over "where the fans
+    // are reacting".
+    {
+      name: 'Workload Aurora',
+      zones: [{
+        name: 'All',
+        devices: [],
+        layers: [
+          {
+            effect: {
+              type: 'TemperatureMap',
+              gradient: [
+                [30, { r: 60, g: 120, b: 220 }],
+                [55, { r: 140, g: 80, b: 200 }],
+                [75, { r: 240, g: 140, b: 60 }],
+                [90, { r: 248, g: 70, b: 70 }],
+              ],
+              glow_on_spike: true,
+            },
+            blend_mode: 'Normal',
+            opacity: 1.0,
+            enabled: true,
+          },
+          {
+            effect: { type: 'DutyMeter', low_color: { r: 20, g: 20, b: 20 }, high_color: { r: 255, g: 255, b: 255 } },
+            blend_mode: 'Multiply',
+            opacity: 0.6,
+            enabled: true,
+          },
+        ],
+        brightness: 90,
+        flow: { delay_per_device_ms: 60, direction: 'Forward' },
+      }],
+    },
   ];
 
   function applyPreset(preset: RgbPreset) {

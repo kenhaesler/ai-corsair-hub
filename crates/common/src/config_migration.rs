@@ -123,6 +123,7 @@ pub fn migrate_v1_to_v2(
             hub_serial: None,
             device_ids,
             mode: group.mode.clone(),
+            preset_applied: group.preset_applied.clone(),
         });
     }
 
@@ -305,6 +306,7 @@ mod tests {
             hub_serial: Some("HUB_A".into()),
             device_ids: Vec::new(),
             mode: FanMode::Fixed { duty_percent: 50.0 },
+            preset_applied: None,
         });
 
         let reg = registry_with_two_hubs();
@@ -396,6 +398,7 @@ mod tests {
             hub_serial: Some("HUB_A".into()),
             device_ids: Vec::new(),
             mode: FanMode::Fixed { duty_percent: 50.0 },
+            preset_applied: None,
         });
 
         let reg = registry_with_two_hubs();
@@ -424,6 +427,7 @@ mod tests {
             hub_serial: Some("HUB_A".into()),
             device_ids: Vec::new(),
             mode: FanMode::Fixed { duty_percent: 50.0 },
+            preset_applied: None,
         });
         let original = toml::to_string_pretty(&v1).unwrap();
         fs::write(&cfg_path, &original).unwrap();
@@ -460,11 +464,13 @@ mod tests {
                 ],
                 hysteresis: 2.0,
                 ramp_rate: 5.0,
+                ramp_down_rate: None,
                 temp_source: TempSourceConfig {
                     sensors: vec!["cpu".into()],
                     weights: vec![1.0],
                 },
             },
+            preset_applied: None,
         });
         v1.device_overrides.push(DeviceOverride {
             hub_serial: "HUB_B".into(),

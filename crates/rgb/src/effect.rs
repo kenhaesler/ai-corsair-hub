@@ -21,6 +21,11 @@ pub struct EffectContext {
     pub temp_delta: Option<f64>,
     /// Current fan duty (0–100).
     pub duty_percent: Option<f64>,
+    /// GPU utilisation (0–100 %), when an NVIDIA GPU is present and
+    /// NVML is reachable. `None` on AMD/Intel or when NVML failed.
+    /// Consumed by `GpuMeterEffect` (and a good signal for user-defined
+    /// thermal-reactive effects that want to lead rather than lag temp).
+    pub gpu_utilization: Option<f64>,
     /// All available sensors: (name, celsius).
     pub all_temps: Vec<(String, f64)>,
 }
@@ -88,6 +93,14 @@ pub enum EffectConfig {
         max_temp: f64,
     },
     DutyMeter {
+        low_color: Rgb,
+        high_color: Rgb,
+    },
+    /// GPU utilisation → fill + colour. Analogous to DutyMeter but
+    /// reads `EffectContext.gpu_utilization` — useful because GPU util
+    /// leads temperature by a few seconds during scene changes, so
+    /// case LEDs can react before fans ramp.
+    GpuMeter {
         low_color: Rgb,
         high_color: Rgb,
     },
@@ -161,6 +174,13 @@ impl EffectConfig {
                 low_color,
                 high_color,
             } => Box::new(duty_meter::DutyMeterEffect {
+                low_color,
+                high_color,
+            }),
+            EffectConfig::GpuMeter {
+                low_color,
+                high_color,
+            } => Box::new(gpu_meter::GpuMeterEffect {
                 low_color,
                 high_color,
             }),

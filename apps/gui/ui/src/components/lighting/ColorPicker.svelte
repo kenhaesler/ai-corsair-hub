@@ -50,21 +50,32 @@
 </script>
 
 <div class="color-picker">
+  <!-- The swatch is a label wrapping a hidden native <input type="color">.
+       Clicking the swatch opens the OS-level colour picker overlay
+       directly — no internal dropdown, so no z-index / overflow:hidden
+       traps from the surrounding scrollable layer-panel. -->
+  <label class="swatch-wrap" title="Click to change colour">
+    <span
+      class="swatch-btn"
+      style="background: rgb({color.r},{color.g},{color.b})"
+    ></span>
+    <input
+      type="color"
+      value={hexFromColor(color)}
+      oninput={handleNative}
+      class="native-picker-hidden"
+    />
+  </label>
+
+  <!-- Expand button shows the hex + presets panel for fine-tuning. -->
   <button
-    class="swatch-btn"
-    style="background: rgb({color.r},{color.g},{color.b})"
+    class="expand-btn"
     onclick={() => { expanded = !expanded; }}
-  ></button>
+    title={expanded ? 'Close details' : 'Hex + presets'}
+  >{expanded ? '×' : '…'}</button>
 
   {#if expanded}
     <div class="picker-dropdown">
-      <input
-        type="color"
-        value={hexFromColor(color)}
-        oninput={handleNative}
-        class="native-picker"
-      />
-
       <div class="hex-row">
         <input
           type="text"
@@ -90,6 +101,7 @@
             class="preset-swatch"
             style="background: rgb({preset.r},{preset.g},{preset.b})"
             onclick={() => onchange(preset)}
+            aria-label="Use preset colour"
           ></button>
         {/each}
       </div>
@@ -100,42 +112,73 @@
 <style>
   .color-picker {
     position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .swatch-wrap {
+    position: relative;
+    display: inline-block;
+    cursor: pointer;
+    line-height: 0;
   }
   .swatch-btn {
+    display: inline-block;
     width: 24px;
     height: 24px;
     border-radius: 4px;
     border: 1px solid rgba(255,255,255,0.15);
-    cursor: pointer;
-    padding: 0;
+    box-sizing: border-box;
   }
-  .swatch-btn:hover {
+  .swatch-wrap:hover .swatch-btn {
     border-color: rgba(255,255,255,0.3);
   }
-  .picker-dropdown {
+  /* Hide the native colour input but keep it clickable on top of the
+     swatch — the label wrapper makes the whole swatch a trigger. */
+  .native-picker-hidden {
     position: absolute;
-    top: 100%;
-    left: 0;
-    z-index: 100;
-    margin-top: 4px;
-    padding: 8px;
-    background: rgba(30, 30, 30, 0.95);
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    cursor: pointer;
+    border: none;
+    padding: 0;
+  }
+  .expand-btn {
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 11px;
+    line-height: 1;
+  }
+  .expand-btn:hover {
+    color: var(--accent);
+    border-color: var(--accent-dim);
+  }
+  .picker-dropdown {
+    position: fixed;
+    z-index: 1000;
+    /* Positioned via JS on open so we don't get clipped by overflow
+       scrolling ancestors. Default centre on screen via transform. */
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    padding: 10px;
+    background: rgba(30, 30, 30, 0.98);
     backdrop-filter: blur(20px);
     border: 1px solid var(--border-bright);
     border-radius: var(--radius);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
     display: flex;
     flex-direction: column;
     gap: 6px;
     min-width: 180px;
-  }
-  .native-picker {
-    width: 100%;
-    height: 32px;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    padding: 0;
-    background: none;
   }
   .hex-input {
     width: 100%;

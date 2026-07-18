@@ -1,0 +1,164 @@
+# Curated fan presets tuned for a high-thermal-mass custom water loop
+# (3x 420mm radiators, shared CPU+GPU cooling).
+#
+# Curves stay flat-low at idle because the water loop buffers short
+# thermal transients — there's no thermodynamic reason to spin fans up
+# for a 5-second CPU burst when the coolant barely moves. Curves then
+# climb steeply once coolant actually heats up.
+#
+# Ship as an asset (not hardcoded constants) so the owner can retune a
+# preset by editing this file and rebuilding — no Rust edit per tweak.
+# Embedded into the binary at compile time via include_str!, so there
+# is no runtime disk read or "asset missing" failure mode.
+#
+# --- Six presets, each occupying a distinct quadrant --------------
+# Earlier iterations shipped 10 presets; several overlapped so heavily
+# that the user couldn't tell them apart (quiet_productivity vs. silent,
+# competitive_fps vs. gaming, content_render vs. performance, cinema
+# collapsed into silent). Six lets every card justify its own slot:
+#
+#   silent         — quiet default (legacy id, v0.2 back-compat)
+#   balanced       — daily driver (legacy id)
+#   gaming         — GPU-weighted, responsive to frametime spikes
+#   performance    — aggressive sustained cooling (legacy id)
+#   benchmark      — max cooling, loud by design
+#   water_priority — preview for a future inline coolant sensor
+#
+# --- Legend ---------------------------------------------------------
+# cpu_weight / gpu_weight  : sensor fusion weights when both sensors
+#                            are available; sum does not need to equal
+#                            1.0 (normalization happens downstream).
+# hysteresis               : °C deadband around current temp — values
+#                            inside this band don't re-trigger a target
+#                            update. Larger = quieter.
+# ramp_up                  : %/sec — how fast fans accelerate.
+# ramp_down                : %/sec — how fast fans decelerate. Usually
+#                            < ramp_up so fall-off is gentle to the ear.
+# --------------------------------------------------------------------
+
+# Quiet default. Fans are inaudible at idle and through light workloads;
+# the water loop's thermal mass absorbs short bursts so there's no
+# reason to spin up for a quick compile or a video-call. Slightly
+# CPU-biased because idle workload noise comes from CPU cores, not GPU.
+[[preset]]
+id = "silent"
+name = "Silent"
+description = "Quiet default — relies on radiator thermal mass"
+hysteresis = 5.0
+ramp_up = 3.0
+ramp_down = 1.5
+cpu_weight = 0.6
+gpu_weight = 0.4
+water_weight = 0.0
+points = [
+    { temp = 30.0, duty = 20.0 },
+    { temp = 50.0, duty = 30.0 },
+    { temp = 65.0, duty = 50.0 },
+    { temp = 80.0, duty = 80.0 },
+    { temp = 90.0, duty = 100.0 },
+]
+
+# Daily default — good compromise for mixed workloads. Quiet enough for
+# background work, responsive enough for sustained gaming without
+# acoustic gymnastics. Legacy v0.2 preset, values preserved.
+[[preset]]
+id = "balanced"
+name = "Balanced"
+description = "Daily driver — quiet at idle, cool under load"
+hysteresis = 3.0
+ramp_up = 5.0
+ramp_down = 3.0
+cpu_weight = 0.6
+gpu_weight = 0.4
+water_weight = 0.0
+points = [
+    { temp = 30.0, duty = 25.0 },
+    { temp = 45.0, duty = 35.0 },
+    { temp = 60.0, duty = 55.0 },
+    { temp = 75.0, duty = 80.0 },
+    { temp = 85.0, duty = 100.0 },
+]
+
+# Gaming. GPU-weighted because the GPU drives loop temp in most games
+# while the CPU has headroom. Peppier ramp than balanced so fans
+# respond to scene transitions / loading-screen-to-open-world spikes.
+[[preset]]
+id = "gaming"
+name = "Gaming"
+description = "GPU-weighted, responsive to frametime spikes"
+hysteresis = 3.0
+ramp_up = 6.0
+ramp_down = 3.0
+cpu_weight = 0.4
+gpu_weight = 0.6
+water_weight = 0.0
+points = [
+    { temp = 30.0, duty = 25.0 },
+    { temp = 50.0, duty = 40.0 },
+    { temp = 62.0, duty = 60.0 },
+    { temp = 72.0, duty = 85.0 },
+    { temp = 80.0, duty = 100.0 },
+]
+
+# Aggressive sustained cooling — for all-core renders, long compile
+# runs, or stress tests where you care about keeping temps down more
+# than about noise. Legacy v0.2 preset, values preserved.
+[[preset]]
+id = "performance"
+name = "Performance"
+description = "Aggressive sustained — keeps temps low for hours"
+hysteresis = 2.0
+ramp_up = 10.0
+ramp_down = 5.0
+cpu_weight = 0.5
+gpu_weight = 0.5
+water_weight = 0.0
+points = [
+    { temp = 30.0, duty = 30.0 },
+    { temp = 40.0, duty = 50.0 },
+    { temp = 55.0, duty = 70.0 },
+    { temp = 70.0, duty = 90.0 },
+    { temp = 80.0, duty = 100.0 },
+]
+
+# Benchmark / stress. Starts at 50% duty even at idle so fans are
+# already moving when the run begins — no spin-up lag on scores.
+# Minimum hysteresis and fast ramps. Loud by design.
+[[preset]]
+id = "benchmark"
+name = "Benchmark / Stress"
+description = "Cinebench, 3DMark, OCCT — max cooling, loud by design"
+hysteresis = 1.0
+ramp_up = 12.0
+ramp_down = 6.0
+cpu_weight = 0.5
+gpu_weight = 0.5
+water_weight = 0.0
+points = [
+    { temp = 30.0, duty = 50.0 },
+    { temp = 45.0, duty = 70.0 },
+    { temp = 55.0, duty = 85.0 },
+    { temp = 65.0, duty = 95.0 },
+    { temp = 72.0, duty = 100.0 },
+]
+
+# Preview preset for when an inline coolant sensor lands. Targets
+# coolant temperature directly (28–45°C range), which is the right
+# control variable for a custom loop. Without `water_inline` available
+# this preset's apply_preset falls back to CPU 0.6 / GPU 0.4 automatic.
+[[preset]]
+id = "water_priority"
+name = "Water Priority"
+description = "Preview — targets coolant temp; falls back to CPU/GPU without a water sensor"
+hysteresis = 2.0
+ramp_up = 6.0
+ramp_down = 3.0
+cpu_weight = 0.6
+gpu_weight = 0.4
+water_weight = 1.0
+points = [
+    { temp = 28.0, duty = 30.0 },
+    { temp = 34.0, duty = 55.0 },
+    { temp = 40.0, duty = 80.0 },
+    { temp = 45.0, duty = 100.0 },
+]

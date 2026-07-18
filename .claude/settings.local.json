@@ -67,7 +67,8 @@
       "Bash(\"/c/Users/kenha/AppData/Local/Programs/gh/gh.exe\" --version)",
       "Read(//c/Users/kenha/scoop/shims/**)",
       "Bash(where.exe gh:*)",
-      "Read(//c/Users/kenha/Documents/git/ai-corsair-hub/$LOCALAPPDATA/GitHub CLI/**)"
+      "Read(//c/Users/kenha/Documents/git/ai-corsair-hub/$LOCALAPPDATA/GitHub CLI/**)",
+      "Bash(findstr :5173)"
     ]
   }
 }

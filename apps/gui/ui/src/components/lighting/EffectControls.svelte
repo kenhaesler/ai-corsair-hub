@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { EffectConfig, RgbColor } from '../../lib/types';
   import ColorPicker from './ColorPicker.svelte';
+  import GradientEditor from './GradientEditor.svelte';
 
   interface Props {
     effect: EffectConfig;
@@ -17,8 +18,13 @@
     onchange({ ...effect, [key]: color } as EffectConfig);
   }
 
-  function formatColor(c: RgbColor): string {
-    return `rgb(${c.r},${c.g},${c.b})`;
+  // Gradient effect stores a flat color array. The editor speaks
+  // [position, color] stops; synthesize even-spaced positions on read
+  // and discard them on write — the renderer still interpolates evenly.
+  function colorsToStops(colors: RgbColor[]): [number, RgbColor][] {
+    if (colors.length === 0) return [];
+    if (colors.length === 1) return [[0, colors[0]]];
+    return colors.map((c, i) => [(i / (colors.length - 1)) * 100, c]);
   }
 </script>
 
@@ -155,7 +161,11 @@
       <input type="checkbox" checked={effect.glow_on_spike}
         onchange={(e) => update({ glow_on_spike: (e.target as HTMLInputElement).checked })} />
     </div>
-    <p class="hint">Gradient: blue (30C) - yellow (60C) - red (85C)</p>
+    <GradientEditor
+      stops={effect.gradient}
+      unit="°C"
+      onchange={(stops) => update({ gradient: stops })}
+    />
 
   {:else if effect.type === 'ThermalPulse'}
     <div class="control-row">
@@ -187,6 +197,17 @@
       <ColorPicker color={effect.high_color} onchange={(c) => updateColor('high_color', c)} />
     </div>
 
+  {:else if effect.type === 'GpuMeter'}
+    <div class="control-row">
+      <label>Idle Color</label>
+      <ColorPicker color={effect.low_color} onchange={(c) => updateColor('low_color', c)} />
+    </div>
+    <div class="control-row">
+      <label>Load Color</label>
+      <ColorPicker color={effect.high_color} onchange={(c) => updateColor('high_color', c)} />
+    </div>
+    <p class="hint">LEDs fill with GPU utilisation (0–100 %). Useful because GPU util leads temperature by a couple of seconds on scene transitions.</p>
+
   {:else if effect.type === 'Gradient'}
     <div class="control-row">
       <label>Speed</label>
@@ -194,14 +215,11 @@
         oninput={(e) => update({ speed: parseFloat((e.target as HTMLInputElement).value) })} />
       <span class="value">{effect.speed.toFixed(2)}</span>
     </div>
-    <div class="color-stops">
-      {#each effect.colors as color, i}
-        <div class="color-stop">
-          <span class="stop-label">Stop {i + 1}</span>
-          <div class="stop-swatch" style="background: {formatColor(color)}"></div>
-        </div>
-      {/each}
-    </div>
+    <GradientEditor
+      stops={colorsToStops(effect.colors)}
+      unit="%"
+      onchange={(stops) => update({ colors: stops.map(([, c]) => c) })}
+    />
   {/if}
 </div>
 
