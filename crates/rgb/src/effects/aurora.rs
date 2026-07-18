@@ -1,6 +1,6 @@
+use crate::Rgb;
 use crate::effect::{EffectContext, RgbEffect};
 use crate::noise::noise_2d;
-use crate::Rgb;
 
 pub struct AuroraEffect {
     pub speed: f32,

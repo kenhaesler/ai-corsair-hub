@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "../../target/release/corsair-service.exe": "corsair-service.exe"
+    }
+  }
+}

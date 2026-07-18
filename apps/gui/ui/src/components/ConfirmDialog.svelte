@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   // Small reusable confirmation dialog for destructive actions.
   // Deliberately simpler than DevicePickerModal — no toolbar, no lists,
   // just a title, body, and confirm/cancel pair.
@@ -9,9 +10,11 @@
     message: string;
     confirmLabel?: string;
     cancelLabel?: string;
+    secondaryLabel?: string;
     destructive?: boolean;
     onconfirm: () => void;
     oncancel: () => void;
+    onsecondary?: () => void;
   }
 
   let {
@@ -20,45 +23,76 @@
     message,
     confirmLabel = 'Confirm',
     cancelLabel = 'Cancel',
+    secondaryLabel,
     destructive = false,
     onconfirm,
     oncancel,
+    onsecondary,
   }: Props = $props();
 
-  function handleBackdrop(e: MouseEvent) {
-    if (e.target === e.currentTarget) oncancel();
+  let cancelButton = $state<HTMLButtonElement>();
+  let confirmButton = $state<HTMLButtonElement>();
+  let previousFocus: HTMLElement | null = null;
+  let wasOpen = false;
+
+  $effect(() => {
+    if (open && !wasOpen) {
+      previousFocus = document.activeElement as HTMLElement | null;
+      void tick().then(() => {
+        (destructive ? cancelButton : confirmButton)?.focus();
+      });
+    } else if (!open && wasOpen) {
+      previousFocus?.focus();
+      previousFocus = null;
+    }
+    wasOpen = open;
+  });
+
+  function handleBackdrop(event: MouseEvent) {
+    if (event.target === event.currentTarget) oncancel();
   }
-  function handleBackdropKey(e: KeyboardEvent) {
-    if (e.target !== e.currentTarget) return;
-    if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ') oncancel();
-  }
-  function handleKeydown(e: KeyboardEvent) {
-    if (!open) return;
-    if (e.key === 'Escape') oncancel();
-    if (e.key === 'Enter') onconfirm();
+
+  function handleDialogKey(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      oncancel();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+
+    const first = cancelButton;
+    const last = confirmButton;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last?.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first?.focus();
+    }
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
-
 {#if open}
-  <div
+  <dialog
+    open
     class="backdrop"
-    role="button"
-    tabindex="-1"
+    aria-modal="true"
+    aria-labelledby="confirm-title"
     onclick={handleBackdrop}
-    onkeydown={handleBackdropKey}
-    aria-label={cancelLabel}
+    onkeydown={handleDialogKey}
   >
-    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <div class="modal">
       <h3 id="confirm-title">{title}</h3>
       <p>{message}</p>
       <footer>
-        <button class="cancel" onclick={oncancel}>{cancelLabel}</button>
-        <button class="confirm" class:destructive onclick={onconfirm}>{confirmLabel}</button>
+        <button bind:this={cancelButton} class="cancel" onclick={oncancel}>{cancelLabel}</button>
+        {#if secondaryLabel && onsecondary}
+          <button class="secondary" onclick={onsecondary}>{secondaryLabel}</button>
+        {/if}
+        <button bind:this={confirmButton} class="confirm" class:destructive onclick={onconfirm}>{confirmLabel}</button>
       </footer>
     </div>
-  </div>
+  </dialog>
 {/if}
 
 <style>
@@ -73,6 +107,12 @@
     z-index: 120;
     padding: 24px;
     border: none;
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    max-height: none;
+    margin: 0;
+    color: var(--text-primary);
     cursor: default;
   }
   .modal {
@@ -116,6 +156,14 @@
   }
   .cancel:hover {
     color: var(--text-primary);
+    border-color: var(--text-muted);
+  }
+  .secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+  }
+  .secondary:hover {
     border-color: var(--text-muted);
   }
   .confirm {

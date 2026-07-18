@@ -92,7 +92,9 @@ impl PidController {
 
         // Integral with anti-windup
         self.integral += error * dt;
-        self.integral = self.integral.clamp(-self.integral_limit, self.integral_limit);
+        self.integral = self
+            .integral
+            .clamp(-self.integral_limit, self.integral_limit);
         let i = self.ki * self.integral;
 
         // Derivative (on error, with simple filtering)
@@ -115,8 +117,7 @@ mod tests {
 
     #[test]
     fn test_pid_below_setpoint_returns_min() {
-        let mut pid = PidController::new(2.0, 0.1, 0.05, 70.0)
-            .with_output_limits(0.0, 100.0);
+        let mut pid = PidController::new(2.0, 0.1, 0.05, 70.0).with_output_limits(0.0, 100.0);
 
         // First call initializes
         let output = pid.update(50.0);
@@ -125,8 +126,7 @@ mod tests {
 
     #[test]
     fn test_pid_above_setpoint_increases_output() {
-        let mut pid = PidController::new(2.0, 0.1, 0.05, 70.0)
-            .with_output_limits(0.0, 100.0);
+        let mut pid = PidController::new(2.0, 0.1, 0.05, 70.0).with_output_limits(0.0, 100.0);
 
         pid.update(70.0); // init
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -136,8 +136,7 @@ mod tests {
 
     #[test]
     fn test_pid_output_clamped() {
-        let mut pid = PidController::new(100.0, 0.0, 0.0, 30.0)
-            .with_output_limits(20.0, 100.0);
+        let mut pid = PidController::new(100.0, 0.0, 0.0, 30.0).with_output_limits(20.0, 100.0);
 
         pid.update(30.0);
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -147,8 +146,7 @@ mod tests {
 
     #[test]
     fn test_reset_integral_clears_windup() {
-        let mut pid = PidController::new(1.0, 0.5, 0.0, 70.0)
-            .with_output_limits(0.0, 100.0);
+        let mut pid = PidController::new(1.0, 0.5, 0.0, 70.0).with_output_limits(0.0, 100.0);
 
         // Drive integral positive by feeding errors above setpoint for several
         // cycles. First call initializes (returns min_output immediately), so
@@ -170,7 +168,11 @@ mod tests {
         );
 
         pid.reset_integral();
-        assert_eq!(pid.integral(), 0.0, "reset_integral must clear the integral term");
+        assert_eq!(
+            pid.integral(),
+            0.0,
+            "reset_integral must clear the integral term"
+        );
 
         // prev_error and prev_time should be untouched — distinct from full
         // reset(). We can verify indirectly: another update() should proceed

@@ -45,7 +45,10 @@ mod tests {
     /// The shipped TOML must always parse — this is the canary for edits.
     #[test]
     fn bundled_asset_parses() {
-        assert!(!all().is_empty(), "fans.toml must contain at least one preset");
+        assert!(
+            !all().is_empty(),
+            "fans.toml must contain at least one preset"
+        );
     }
 
     /// Legacy preset ids must remain valid so saved UI state doesn't

@@ -2,9 +2,9 @@ use anyhow::Result;
 use corsair_common::CorsairDevice;
 use corsair_hid::discovery::DeviceScanner;
 use corsair_hid::{CorsairPsu, IcueLinkHub};
+use corsair_sensors::TemperatureSource;
 use corsair_sensors::cpu::CpuSensor;
 use corsair_sensors::gpu::GpuSensor;
-use corsair_sensors::TemperatureSource;
 use tracing::warn;
 
 fn main() -> Result<()> {
@@ -107,11 +107,8 @@ fn print_system_temps() {
 
 fn probe_icue_link_hub(scanner: &DeviceScanner, group: &corsair_hid::discovery::DeviceGroup) {
     // Open only MI_00 (data interface)
-    let device = match scanner.open_device(
-        group.pid,
-        &group.serial,
-        IcueLinkHub::data_interface(),
-    ) {
+    let device = match scanner.open_device(group.pid, &group.serial, IcueLinkHub::data_interface())
+    {
         Ok(d) => d,
         Err(e) => {
             println!("      Cannot open data interface: {} (is iCUE running?)", e);
@@ -174,11 +171,7 @@ fn probe_icue_link_hub(scanner: &DeviceScanner, group: &corsair_hid::discovery::
 }
 
 fn probe_psu(scanner: &DeviceScanner, group: &corsair_hid::discovery::DeviceGroup) {
-    let device = match scanner.open_device(
-        group.pid,
-        &group.serial,
-        CorsairPsu::data_interface(),
-    ) {
+    let device = match scanner.open_device(group.pid, &group.serial, CorsairPsu::data_interface()) {
         Ok(d) => d,
         Err(e) => {
             println!("      Cannot open PSU: {} (is iCUE running?)", e);

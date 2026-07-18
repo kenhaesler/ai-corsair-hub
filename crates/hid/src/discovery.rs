@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use corsair_common::{CorsairDevice, DeviceInfo, CORSAIR_VID};
+use corsair_common::{CORSAIR_VID, CorsairDevice, DeviceInfo};
 use hidapi::HidApi;
 use serde::Serialize;
 use tracing::{debug, info};
@@ -33,10 +33,7 @@ impl DeviceScanner {
             let pid = dev.product_id();
             let device_type = CorsairDevice::from_pid(pid);
 
-            let serial = dev
-                .serial_number()
-                .unwrap_or("unknown")
-                .to_string();
+            let serial = dev.serial_number().unwrap_or("unknown").to_string();
 
             let path = dev.path().to_string_lossy().to_string();
             let interface = dev.interface_number();
@@ -87,12 +84,7 @@ impl DeviceScanner {
         result
     }
 
-    pub fn open_device(
-        &self,
-        pid: u16,
-        serial: &str,
-        interface: i32,
-    ) -> Result<hidapi::HidDevice> {
+    pub fn open_device(&self, pid: u16, serial: &str, interface: i32) -> Result<hidapi::HidDevice> {
         for dev in self.api.device_list() {
             if dev.vendor_id() == CORSAIR_VID
                 && dev.product_id() == pid

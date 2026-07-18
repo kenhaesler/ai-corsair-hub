@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use hidapi::HidDevice;
 use serde::Serialize;
 use std::fmt;
@@ -20,7 +20,7 @@ const CMD_WAKE: [u8; 4] = [0x01, 0x03, 0x00, 0x02]; // Enter software mode
 const CMD_SLEEP: [u8; 4] = [0x01, 0x03, 0x00, 0x01]; // Enter hardware mode
 const CMD_FIRMWARE: [u8; 2] = [0x02, 0x13]; // Get firmware version
 const CMD_OPEN: [u8; 2] = [0x0D, 0x01]; // Open data endpoint
-const CMD_CLOSE: [u8; 3] = [0x05, 0x01, 0x01]; // Close data endpoint
+const CMD_CLOSE: [u8; 3] = [0x05, 0x01, 0x01]; // Close endpoint selected by mode byte
 const CMD_READ: [u8; 2] = [0x08, 0x01]; // Read from data endpoint
 const CMD_WRITE: [u8; 2] = [0x06, 0x01]; // Write to data endpoint
 
@@ -45,9 +45,7 @@ const MAX_COLOR_PAYLOAD: usize = 508; // max bytes per USB transfer
 
 // Data types for response matching and write payload headers
 const DATA_TYPE_DEVICES: [u8; 2] = [0x21, 0x00];
-#[cfg(test)]
 const DATA_TYPE_SPEEDS: [u8; 2] = [0x25, 0x00];
-#[cfg(test)]
 const DATA_TYPE_TEMPS: [u8; 2] = [0x10, 0x00];
 const DATA_TYPE_SET_SPEED: [u8; 2] = [0x07, 0x00];
 
@@ -147,7 +145,26 @@ impl LinkDeviceType {
     }
 
     pub fn is_pump(&self) -> bool {
-        matches!(self, Self::PumpXd5 | Self::PumpXd6)
+        matches!(
+            self,
+            Self::PumpXd5 | Self::PumpXd6 | Self::LiquidCooler | Self::TitanCooler
+        )
+    }
+
+    pub fn is_speed_controllable(&self) -> bool {
+        matches!(
+            self,
+            Self::QxFan
+                | Self::LxFan
+                | Self::RxMaxRgbFan
+                | Self::RxMaxFan
+                | Self::RxRgbFan
+                | Self::RxFan
+                | Self::PumpXd5
+                | Self::PumpXd6
+                | Self::LiquidCooler
+                | Self::TitanCooler
+        )
     }
 
     /// Whether this device has addressable RGB LEDs.
@@ -182,7 +199,7 @@ impl LinkDeviceType {
             Self::TitanCooler => 20,
             Self::PumpXd6 => 22,
             Self::LinkAdapter => 21, // LS350 default; overridden by 0x1d table at runtime
-            Self::LsStrip => 21, // dynamic via LINK Adapter, 21 default for LS350
+            Self::LsStrip => 21,     // dynamic via LINK Adapter, 21 default for LS350
             _ => 0,
         }
     }
@@ -234,6 +251,7 @@ pub struct HubInfo {
 pub trait IcueLinkTransport: Send + Sync + 'static {
     fn set_speeds(&self, targets: &[(u8, u8)]) -> Result<()>;
     fn get_speeds(&self) -> Result<Vec<FanSpeed>>;
+    fn get_temperatures(&self) -> Result<Vec<TemperatureReading>>;
     fn set_rgb(&self, channel_leds: &[(u8, &[[u8; 3]])]) -> Result<()>;
     fn enter_hardware_mode(&self) -> Result<()>;
 }
@@ -244,6 +262,9 @@ impl IcueLinkTransport for IcueLinkHub {
     }
     fn get_speeds(&self) -> Result<Vec<FanSpeed>> {
         IcueLinkHub::get_speeds(self)
+    }
+    fn get_temperatures(&self) -> Result<Vec<TemperatureReading>> {
+        IcueLinkHub::get_temperatures(self)
     }
     fn set_rgb(&self, channel_leds: &[(u8, &[[u8; 3]])]) -> Result<()> {
         IcueLinkHub::set_rgb(self, channel_leds)
@@ -266,6 +287,26 @@ impl IcueLinkTransport for IcueLinkHub {
 struct IcueLinkHubInner {
     device: HidDevice,
     color_endpoint_open: bool,
+    software_mode_active: bool,
+}
+
+impl Drop for IcueLinkHubInner {
+    fn drop(&mut self) {
+        if !self.software_mode_active {
+            return;
+        }
+
+        // Final safety net for partial initialization and unexpected owner
+        // teardown. Normal shutdown clears the flag and avoids this path.
+        if self.color_endpoint_open {
+            let _ = best_effort_exchange(&self.device, &CMD_CLOSE_COLOR, &[]);
+            self.color_endpoint_open = false;
+        }
+        if let Err(error) = best_effort_exchange(&self.device, &CMD_SLEEP, &[]) {
+            warn!(%error, "Failed to restore hardware mode while dropping hub");
+        }
+        self.software_mode_active = false;
+    }
 }
 
 // SAFETY: `hidapi::HidDevice` is `Send` on all supported platforms (Windows,
@@ -300,6 +341,7 @@ impl IcueLinkHub {
             inner: Arc::new(Mutex::new(IcueLinkHubInner {
                 device,
                 color_endpoint_open: false,
+                software_mode_active: false,
             })),
             serial: Arc::from(serial),
         }
@@ -329,6 +371,20 @@ impl IcueLinkHub {
     /// Serializes through the inner mutex so the TX/RX pair is atomic against
     /// other callers on the same hub.
     fn transfer(&self, cmd: &[u8], data: &[u8]) -> Result<Vec<u8>> {
+        let mut inner = self.lock_inner();
+        self.transfer_locked(&mut inner, cmd, data, false)
+    }
+
+    /// Perform a request/response exchange while the caller owns the hub
+    /// mutex. Endpoint operations use this to keep their complete session
+    /// atomic against other control and RGB traffic.
+    fn transfer_locked(
+        &self,
+        inner: &mut IcueLinkHubInner,
+        cmd: &[u8],
+        data: &[u8],
+        allow_non_ok_status: bool,
+    ) -> Result<Vec<u8>> {
         let packet = build_packet(cmd, data);
 
         trace!(
@@ -337,8 +393,6 @@ impl IcueLinkHub {
             len = packet.len(),
             "TX"
         );
-
-        let inner = self.lock_inner();
 
         inner
             .device
@@ -351,10 +405,15 @@ impl IcueLinkHub {
             .read_timeout(&mut buf, READ_TIMEOUT_MS)
             .context("Failed to read from iCUE LINK Hub")?;
 
-        drop(inner);
-
         if bytes_read == 0 {
             bail!("No response from hub (timeout)");
+        }
+        if bytes_read != PACKET_SIZE {
+            bail!(
+                "Incomplete hub response: received {} bytes, expected {}",
+                bytes_read,
+                PACKET_SIZE
+            );
         }
 
         buf.truncate(bytes_read);
@@ -366,33 +425,37 @@ impl IcueLinkHub {
             "RX"
         );
 
+        validate_response(&buf, cmd, allow_non_ok_status)?;
+
         Ok(buf)
     }
 
     /// Endpoint read: close → open(mode) → read → close
     fn read_endpoint(&self, mode: u8) -> Result<Vec<u8>> {
-        // Close any stale endpoint
-        self.transfer(&CMD_CLOSE, &[])?;
+        let mut inner = self.lock_inner();
+        self.transfer_locked(&mut inner, &CMD_CLOSE, &[mode], false)?;
+        self.transfer_locked(&mut inner, &CMD_OPEN, &[mode], false)?;
 
-        // Open for the requested mode
-        self.transfer(&CMD_OPEN, &[mode])?;
-
-        // Read data
-        let response = self.transfer(&CMD_READ, &[])?;
-
-        // Close endpoint
-        self.transfer(&CMD_CLOSE, &[])?;
-
-        Ok(response)
+        let operation = self.transfer_locked(&mut inner, &CMD_READ, &[], false);
+        let close = self
+            .transfer_locked(&mut inner, &CMD_CLOSE, &[mode], false)
+            .map(|_| ());
+        combine_operation_and_close(operation, close)
     }
 
     /// Endpoint write: close → open(mode) → write(data) → close
     fn write_endpoint(&self, mode: u8, data: &[u8]) -> Result<()> {
-        self.transfer(&CMD_CLOSE, &[])?;
-        self.transfer(&CMD_OPEN, &[mode])?;
-        self.transfer(&CMD_WRITE, data)?;
-        self.transfer(&CMD_CLOSE, &[])?;
-        Ok(())
+        let mut inner = self.lock_inner();
+        self.transfer_locked(&mut inner, &CMD_CLOSE, &[mode], false)?;
+        self.transfer_locked(&mut inner, &CMD_OPEN, &[mode], false)?;
+
+        let operation = self
+            .transfer_locked(&mut inner, &CMD_WRITE, data, false)
+            .map(|_| ());
+        let close = self
+            .transfer_locked(&mut inner, &CMD_CLOSE, &[mode], false)
+            .map(|_| ());
+        combine_operation_and_close(operation, close)
     }
 
     // --- High-level API ---
@@ -408,14 +471,8 @@ impl IcueLinkHub {
     pub fn enter_software_mode(&self) -> Result<()> {
         debug!(serial = self.serial.as_ref(), "Entering software mode");
         let resp = self.transfer(&CMD_WAKE, &[])?;
-
-        if resp.len() > 3 && resp[3] != STATUS_OK {
-            warn!(
-                serial = self.serial.as_ref(),
-                status = resp[3],
-                "Non-OK status entering software mode"
-            );
-        }
+        debug_assert_eq!(resp[3], STATUS_OK);
+        self.lock_inner().software_mode_active = true;
 
         thread::sleep(Duration::from_millis(SOFTWARE_MODE_DELAY_MS));
         Ok(())
@@ -425,16 +482,15 @@ impl IcueLinkHub {
     /// Closes the color endpoint if open, then sends the sleep command.
     pub fn enter_hardware_mode(&self) -> Result<()> {
         debug!(serial = self.serial.as_ref(), "Entering hardware mode");
-        // Snapshot the flag under the lock so we don't race with another thread
-        // toggling it. If it was open, close_color_endpoint will re-lock and
-        // flip it to false.
-        let was_open = self.lock_inner().color_endpoint_open;
-        if was_open {
-            if let Err(e) = self.close_color_endpoint() {
+        let mut inner = self.lock_inner();
+        if inner.color_endpoint_open {
+            if let Err(e) = self.transfer_locked(&mut inner, &CMD_CLOSE_COLOR, &[], false) {
                 warn!(serial = self.serial.as_ref(), error = %e, "Failed to close color EP before hardware mode");
             }
+            inner.color_endpoint_open = false;
         }
-        self.transfer(&CMD_SLEEP, &[])?;
+        self.transfer_locked(&mut inner, &CMD_SLEEP, &[], false)?;
+        inner.software_mode_active = false;
         Ok(())
     }
 
@@ -444,19 +500,35 @@ impl IcueLinkHub {
     /// Closes any stale endpoint first, then opens with mode 0x22.
     pub fn open_color_endpoint(&self) -> Result<()> {
         debug!(serial = self.serial.as_ref(), "Opening color endpoint");
-        // Close any stale data endpoint first
-        self.transfer(&CMD_CLOSE, &[])?;
-        // Open color endpoint (0x0D, 0x00) with mode 0x22
-        self.transfer(&CMD_OPEN_COLOR, &[MODE_SET_COLOR])?;
-        self.lock_inner().color_endpoint_open = true;
+        let mut inner = self.lock_inner();
+        self.open_color_endpoint_locked(&mut inner)
+    }
+
+    fn open_color_endpoint_locked(&self, inner: &mut IcueLinkHubInner) -> Result<()> {
+        if inner.color_endpoint_open {
+            return Ok(());
+        }
+
+        self.transfer_locked(inner, &CMD_CLOSE, &[MODE_SET_COLOR], false)?;
+        inner.color_endpoint_open = false;
+        let response = self.transfer_locked(inner, &CMD_OPEN_COLOR, &[MODE_SET_COLOR], true)?;
+        validate_color_endpoint_open_response(&response)?;
+        if response[3] == STATUS_WRONG_MODE {
+            debug!(
+                serial = self.serial.as_ref(),
+                "Hub returned firmware-compatible status 0x03 for color endpoint open"
+            );
+        }
+        inner.color_endpoint_open = true;
         Ok(())
     }
 
     /// Close the color endpoint.
     pub fn close_color_endpoint(&self) -> Result<()> {
         debug!(serial = self.serial.as_ref(), "Closing color endpoint");
-        self.transfer(&CMD_CLOSE_COLOR, &[])?;
-        self.lock_inner().color_endpoint_open = false;
+        let mut inner = self.lock_inner();
+        self.transfer_locked(&mut inner, &CMD_CLOSE_COLOR, &[], false)?;
+        inner.color_endpoint_open = false;
         Ok(())
     }
 
@@ -465,7 +537,11 @@ impl IcueLinkHub {
     /// and chunking at 508-byte boundaries.
     pub fn write_color(&self, rgb_data: &[u8]) -> Result<()> {
         let payload = build_rgb_payload(rgb_data);
+        let mut inner = self.lock_inner();
+        self.write_color_locked(&mut inner, &payload)
+    }
 
+    fn write_color_locked(&self, inner: &mut IcueLinkHubInner, payload: &[u8]) -> Result<()> {
         // Send in chunks of MAX_COLOR_PAYLOAD bytes
         for (i, chunk) in payload.chunks(MAX_COLOR_PAYLOAD).enumerate() {
             let cmd = if i == 0 {
@@ -473,7 +549,7 @@ impl IcueLinkHub {
             } else {
                 &CMD_WRITE_COLOR_CONT
             };
-            self.transfer(cmd, chunk)?;
+            self.transfer_locked(inner, cmd, chunk, false)?;
         }
 
         Ok(())
@@ -483,11 +559,6 @@ impl IcueLinkHub {
     /// flattens into one contiguous RGB buffer, and sends to hardware.
     /// Each LED is `[R, G, B]`. Auto-opens the color endpoint if not already open.
     pub fn set_rgb(&self, channel_leds: &[(u8, &[[u8; 3]])]) -> Result<()> {
-        let is_open = self.lock_inner().color_endpoint_open;
-        if !is_open {
-            self.open_color_endpoint()?;
-        }
-
         // Flatten all LEDs into one contiguous R,G,B byte buffer, sorted by channel
         let mut sorted: Vec<_> = channel_leds.to_vec();
         sorted.sort_by_key(|(ch, _)| *ch);
@@ -500,7 +571,14 @@ impl IcueLinkHub {
             }
         }
 
-        self.write_color(&rgb_bytes)
+        let payload = build_rgb_payload(&rgb_bytes);
+        let mut inner = self.lock_inner();
+        self.open_color_endpoint_locked(&mut inner)?;
+        let result = self.write_color_locked(&mut inner, &payload);
+        if result.is_err() {
+            inner.color_endpoint_open = false;
+        }
+        result
     }
 
     /// Whether the color endpoint is currently open.
@@ -538,12 +616,18 @@ impl IcueLinkHub {
                 thread::sleep(backoff);
             }
 
-            // Open color endpoint with LED count mode (0x1d)
-            self.transfer(&CMD_OPEN_COLOR, &[0x1d])?;
-            // Read
-            resp = self.transfer(&[0x08, 0x00], &[])?;
-            // Close
-            self.transfer(&CMD_CLOSE_COLOR, &[])?;
+            // Treat the query as one endpoint session so other traffic cannot
+            // change the active mode between open, read, and close.
+            let mut inner = self.lock_inner();
+            self.transfer_locked(&mut inner, &CMD_CLOSE, &[0x1d], false)?;
+            inner.color_endpoint_open = false;
+            self.transfer_locked(&mut inner, &CMD_OPEN_COLOR, &[0x1d], false)?;
+            let operation = self.transfer_locked(&mut inner, &[0x08, 0x00], &[], true);
+            let close = self
+                .transfer_locked(&mut inner, &CMD_CLOSE_COLOR, &[], false)
+                .map(|_| ());
+            inner.color_endpoint_open = false;
+            resp = combine_operation_and_close(operation, close)?;
 
             if resp.len() < 8 {
                 bail!("LED count response too short: {} bytes", resp.len());
@@ -647,9 +731,7 @@ impl IcueLinkHub {
             );
 
             // Validate data type header: bytes [4:6] must be DATA_TYPE_DEVICES (0x21, 0x00)
-            if resp.len() > 5
-                && resp[4] == DATA_TYPE_DEVICES[0]
-                && resp[5] == DATA_TYPE_DEVICES[1]
+            if resp.len() > 5 && resp[4] == DATA_TYPE_DEVICES[0] && resp[5] == DATA_TYPE_DEVICES[1]
             {
                 break; // Got valid device data
             }
@@ -665,12 +747,13 @@ impl IcueLinkHub {
         }
 
         // Final validation
-        if resp.len() > 5
-            && (resp[4] != DATA_TYPE_DEVICES[0] || resp[5] != DATA_TYPE_DEVICES[1])
-        {
+        if resp.len() > 5 && (resp[4] != DATA_TYPE_DEVICES[0] || resp[5] != DATA_TYPE_DEVICES[1]) {
             bail!(
                 "Device enumeration returned wrong data type after 3 attempts: {:02X} {:02X} (expected {:02X} {:02X})",
-                resp[4], resp[5], DATA_TYPE_DEVICES[0], DATA_TYPE_DEVICES[1]
+                resp[4],
+                resp[5],
+                DATA_TYPE_DEVICES[0],
+                DATA_TYPE_DEVICES[1]
             );
         }
 
@@ -692,6 +775,21 @@ impl IcueLinkHub {
     /// Set fan/pump speeds. Each entry is (channel, percent 0-100).
     /// Minimum 20% for fans, 50% for pumps (caller must enforce pump minimum).
     pub fn set_speeds(&self, targets: &[(u8, u8)]) -> Result<()> {
+        if targets.is_empty() {
+            bail!("Speed command requires at least one target");
+        }
+        let mut channels = std::collections::HashSet::new();
+        for (channel, percent) in targets {
+            if *channel == 0 {
+                bail!("Speed command channel must be non-zero");
+            }
+            if *percent > 100 {
+                bail!("Speed command duty must be 0..100, got {}", percent);
+            }
+            if !channels.insert(*channel) {
+                bail!("Speed command contains duplicate channel {}", channel);
+            }
+        }
         let data = build_speed_payload(targets);
 
         // Retry up to 3 times on failure
@@ -726,6 +824,22 @@ impl IcueLinkHub {
 
         self.enter_software_mode()?;
 
+        match self.initialize_software_mode(firmware) {
+            Ok(info) => Ok(info),
+            Err(init_error) => {
+                if let Err(restore_error) = self.enter_hardware_mode() {
+                    warn!(
+                        serial = self.serial.as_ref(),
+                        error = %restore_error,
+                        "Hub initialization failed and hardware-mode restoration also failed"
+                    );
+                }
+                Err(init_error)
+            }
+        }
+    }
+
+    fn initialize_software_mode(&self, firmware: FirmwareVersion) -> Result<HubInfo> {
         // Read LED count table before device enumeration (matches OpenLinkHub init order)
         let raw_counts = match self.read_led_counts() {
             Ok(counts) => counts,
@@ -789,12 +903,78 @@ impl IcueLinkHub {
             );
         };
 
-        Ok(HubInfo {
+        let info = HubInfo {
             firmware,
             devices,
             led_counts,
-        })
+        };
+
+        // The color endpoint is independent of the transactional data endpoint.
+        // Keep it open while telemetry and speed sessions come and go.
+        let mut inner = self.lock_inner();
+        self.open_color_endpoint_locked(&mut inner)?;
+        Ok(info)
     }
+}
+
+fn combine_operation_and_close<T>(operation: Result<T>, close: Result<()>) -> Result<T> {
+    match (operation, close) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(operation_error), Ok(())) => Err(operation_error),
+        (Ok(_), Err(close_error)) => {
+            Err(close_error.context("Endpoint operation succeeded but close failed"))
+        }
+        (Err(operation_error), Err(close_error)) => {
+            Err(operation_error.context(format!("Endpoint close also failed: {close_error:#}")))
+        }
+    }
+}
+
+fn validate_response(resp: &[u8], cmd: &[u8], allow_non_ok_status: bool) -> Result<()> {
+    if resp.len() < 4 {
+        bail!(
+            "Hub response too short: {} bytes (need at least 4)",
+            resp.len()
+        );
+    }
+    let expected_echo = *cmd.first().context("Cannot transfer an empty command")?;
+    if resp[2] != expected_echo {
+        bail!(
+            "Hub response command echo mismatch: got 0x{:02X}, expected 0x{:02X}",
+            resp[2],
+            expected_echo
+        );
+    }
+    if !allow_non_ok_status && resp[3] != STATUS_OK {
+        bail!(
+            "Hub rejected command 0x{:02X} with status 0x{:02X}",
+            expected_echo,
+            resp[3]
+        );
+    }
+    Ok(())
+}
+
+fn validate_color_endpoint_open_response(resp: &[u8]) -> Result<()> {
+    validate_response(resp, &CMD_OPEN_COLOR, true)?;
+    match resp[3] {
+        STATUS_OK | STATUS_WRONG_MODE => Ok(()),
+        status => bail!(
+            "Hub rejected color endpoint open with status 0x{:02X}",
+            status
+        ),
+    }
+}
+
+fn best_effort_exchange(device: &HidDevice, cmd: &[u8], data: &[u8]) -> Result<()> {
+    device
+        .write(&build_packet(cmd, data))
+        .context("Failed to write cleanup command")?;
+    let mut response = [0u8; PACKET_SIZE];
+    let bytes_read = device
+        .read_timeout(&mut response, READ_TIMEOUT_MS)
+        .context("Failed to read cleanup response")?;
+    validate_response(&response[..bytes_read], cmd, false)
 }
 
 // --- Packet building ---
@@ -821,11 +1001,9 @@ fn build_packet(cmd: &[u8], data: &[u8]) -> Vec<u8> {
 fn parse_firmware_version(resp: &[u8]) -> Result<FirmwareVersion> {
     // Response layout: [xx, xx, 0x02, status, major, minor, patch_lo, patch_hi, ...]
     if resp.len() < 8 {
-        bail!(
-            "Firmware response too short: {} bytes (need 8)",
-            resp.len()
-        );
+        bail!("Firmware response too short: {} bytes (need 8)", resp.len());
     }
+    validate_response(resp, &CMD_FIRMWARE, false)?;
     Ok(FirmwareVersion {
         major: resp[4],
         minor: resp[5],
@@ -841,6 +1019,8 @@ fn parse_device_entries(resp: &[u8]) -> Result<Vec<LinkDevice>> {
             resp.len()
         );
     }
+    validate_response(resp, &CMD_READ, false)?;
+    validate_data_type(resp, DATA_TYPE_DEVICES, "Device enumeration")?;
 
     let count = resp[6] as usize;
     let mut devices = Vec::new();
@@ -852,7 +1032,10 @@ fn parse_device_entries(resp: &[u8]) -> Result<Vec<LinkDevice>> {
 
         // Each entry: [reserved, reserved, type, model, reserved, reserved, reserved, id_len, id_bytes...]
         if pos + 8 > resp.len() {
-            break; // Ran out of data
+            bail!(
+                "Device enumeration truncated at channel {}: missing entry header",
+                channel
+            );
         }
 
         let device_type_byte = resp[pos + 2];
@@ -866,10 +1049,17 @@ fn parse_device_entries(resp: &[u8]) -> Result<Vec<LinkDevice>> {
         }
 
         if pos + id_len > resp.len() {
-            break; // Ran out of data for ID string
+            bail!(
+                "Device enumeration truncated at channel {}: id length {} exceeds remaining {} bytes",
+                channel,
+                id_len,
+                resp.len().saturating_sub(pos)
+            );
         }
 
-        let device_id = String::from_utf8_lossy(&resp[pos..pos + id_len]).to_string();
+        let device_id = std::str::from_utf8(&resp[pos..pos + id_len])
+            .with_context(|| format!("Device id at channel {channel} is not valid UTF-8"))?
+            .to_string();
         pos += id_len;
 
         devices.push(LinkDevice {
@@ -890,8 +1080,11 @@ fn parse_speed_entries(resp: &[u8]) -> Result<Vec<FanSpeed>> {
     if resp.len() < 7 {
         bail!("Speed response too short: {} bytes", resp.len());
     }
+    validate_response(resp, &CMD_READ, false)?;
+    validate_data_type(resp, DATA_TYPE_SPEEDS, "Speed")?;
 
     let count = resp[6] as usize;
+    validate_fixed_entry_length(resp, count, 3, "Speed")?;
     let mut speeds = Vec::new();
     let entry_start = 7;
 
@@ -922,8 +1115,11 @@ fn parse_temperature_entries(resp: &[u8]) -> Result<Vec<TemperatureReading>> {
     if resp.len() < 7 {
         bail!("Temperature response too short: {} bytes", resp.len());
     }
+    validate_response(resp, &CMD_READ, false)?;
+    validate_data_type(resp, DATA_TYPE_TEMPS, "Temperature")?;
 
     let count = resp[6] as usize;
+    validate_fixed_entry_length(resp, count, 3, "Temperature")?;
     let mut temps = Vec::new();
     let entry_start = 7;
 
@@ -952,6 +1148,45 @@ fn parse_temperature_entries(resp: &[u8]) -> Result<Vec<TemperatureReading>> {
     }
 
     Ok(temps)
+}
+
+fn validate_data_type(resp: &[u8], expected: [u8; 2], label: &str) -> Result<()> {
+    if resp[4..6] != expected {
+        bail!(
+            "{} response data type mismatch: got {:02X} {:02X}, expected {:02X} {:02X}",
+            label,
+            resp[4],
+            resp[5],
+            expected[0],
+            expected[1]
+        );
+    }
+    Ok(())
+}
+
+fn validate_fixed_entry_length(
+    resp: &[u8],
+    count: usize,
+    entry_size: usize,
+    label: &str,
+) -> Result<()> {
+    let required = 7usize
+        .checked_add(
+            count
+                .checked_mul(entry_size)
+                .context("Response entry count overflow")?,
+        )
+        .context("Response length overflow")?;
+    if resp.len() < required {
+        bail!(
+            "{} response truncated: count {} requires {} bytes, got {}",
+            label,
+            count,
+            required,
+            resp.len()
+        );
+    }
+    Ok(())
 }
 
 fn build_speed_payload(targets: &[(u8, u8)]) -> Vec<u8> {
@@ -1048,6 +1283,15 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_close_packet_includes_selected_mode() {
+        let data_close = build_packet(&CMD_CLOSE, &[MODE_SPEEDS]);
+        assert_eq!(&data_close[3..7], &[0x05, 0x01, 0x01, MODE_SPEEDS]);
+
+        let color_close = build_packet(&CMD_CLOSE, &[MODE_SET_COLOR]);
+        assert_eq!(&color_close[3..7], &[0x05, 0x01, 0x01, MODE_SET_COLOR]);
+    }
+
+    #[test]
     fn test_parse_firmware_version() {
         // Simulate response: [00, 00, 0x02, 0x00, major=2, minor=9, patch_lo=0xE8, patch_hi=0x01]
         let mut resp = vec![0u8; PACKET_SIZE];
@@ -1063,6 +1307,29 @@ mod tests {
         assert_eq!(fw.minor, 9);
         assert_eq!(fw.patch, 488);
         assert_eq!(fw.to_string(), "2.9.488");
+    }
+
+    #[test]
+    fn response_validation_rejects_short_wrong_echo_and_status() {
+        assert!(validate_response(&[0, 0, 0x02], &CMD_FIRMWARE, false).is_err());
+        assert!(validate_response(&[0, 0, 0x08, 0], &CMD_FIRMWARE, false).is_err());
+        assert!(validate_response(&[0, 0, 0x02, 3], &CMD_FIRMWARE, false).is_err());
+        assert!(validate_response(&[0, 0, 0x02, 3], &CMD_FIRMWARE, true).is_ok());
+    }
+
+    #[test]
+    fn color_endpoint_open_accepts_only_observed_live_statuses() {
+        let ok = [0, 0, CMD_OPEN_COLOR[0], STATUS_OK];
+        let firmware_compatible = [0, 0, CMD_OPEN_COLOR[0], STATUS_WRONG_MODE];
+        let other_error = [0, 0, CMD_OPEN_COLOR[0], 0x04];
+
+        assert!(validate_color_endpoint_open_response(&ok).is_ok());
+        assert!(validate_color_endpoint_open_response(&firmware_compatible).is_ok());
+        assert!(validate_color_endpoint_open_response(&other_error).is_err());
+
+        // The exception is command-specific; generic strict validation still
+        // rejects status 0x03 for firmware, data, and write operations.
+        assert!(validate_response(&firmware_compatible, &CMD_OPEN_COLOR, false).is_err());
     }
 
     #[test]
@@ -1151,6 +1418,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_speed_entries_rejects_truncated_or_wrong_type_response() {
+        let mut resp = vec![0u8; 10];
+        resp[2] = CMD_READ[0];
+        resp[3] = STATUS_OK;
+        resp[4..6].copy_from_slice(&DATA_TYPE_SPEEDS);
+        resp[6] = 2;
+        assert!(parse_speed_entries(&resp).is_err());
+
+        resp.resize(13, 0);
+        resp[4..6].copy_from_slice(&DATA_TYPE_TEMPS);
+        assert!(parse_speed_entries(&resp).is_err());
+    }
+
+    #[test]
+    fn parse_device_entries_rejects_truncated_id() {
+        let mut resp = vec![0u8; 15];
+        resp[2] = CMD_READ[0];
+        resp[3] = STATUS_OK;
+        resp[4..6].copy_from_slice(&DATA_TYPE_DEVICES);
+        resp[6] = 1;
+        resp[14] = 4;
+        assert!(parse_device_entries(&resp).is_err());
+    }
+
+    #[test]
     fn test_parse_temperature_entries() {
         // Mock response: 2 entries (index 0 = validity, 1 = real channel)
         let mut resp = vec![0u8; 64];
@@ -1180,10 +1472,7 @@ mod tests {
     fn test_device_type_from_byte() {
         assert_eq!(LinkDeviceType::from_byte(0x01), LinkDeviceType::QxFan);
         assert_eq!(LinkDeviceType::from_byte(0x02), LinkDeviceType::LxFan);
-        assert_eq!(
-            LinkDeviceType::from_byte(0x03),
-            LinkDeviceType::RxMaxRgbFan
-        );
+        assert_eq!(LinkDeviceType::from_byte(0x03), LinkDeviceType::RxMaxRgbFan);
         assert_eq!(LinkDeviceType::from_byte(0x04), LinkDeviceType::RxMaxFan);
         assert_eq!(LinkDeviceType::from_byte(0x05), LinkDeviceType::LinkAdapter);
         assert_eq!(
@@ -1197,10 +1486,7 @@ mod tests {
         assert_eq!(LinkDeviceType::from_byte(0x0D), LinkDeviceType::Xg7Block);
         assert_eq!(LinkDeviceType::from_byte(0x0F), LinkDeviceType::RxRgbFan);
         assert_eq!(LinkDeviceType::from_byte(0x10), LinkDeviceType::VrmCooler);
-        assert_eq!(
-            LinkDeviceType::from_byte(0x11),
-            LinkDeviceType::TitanCooler
-        );
+        assert_eq!(LinkDeviceType::from_byte(0x11), LinkDeviceType::TitanCooler);
         assert_eq!(LinkDeviceType::from_byte(0x13), LinkDeviceType::RxFan);
         assert_eq!(LinkDeviceType::from_byte(0x19), LinkDeviceType::PumpXd6);
         assert_eq!(
@@ -1254,10 +1540,7 @@ mod tests {
 
         // Length prefix: 2(len) + 2(reserved) + 2(dataType) + 9(data) = 15
         let expected_len: u16 = 15;
-        assert_eq!(
-            u16::from_le_bytes([payload[0], payload[1]]),
-            expected_len
-        );
+        assert_eq!(u16::from_le_bytes([payload[0], payload[1]]), expected_len);
         // Reserved bytes
         assert_eq!(payload[2], 0x00);
         assert_eq!(payload[3], 0x00);

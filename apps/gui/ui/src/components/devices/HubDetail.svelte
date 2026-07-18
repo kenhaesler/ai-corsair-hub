@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { HubSnapshot } from '../../lib/types';
   import { displayNameFromTree, shortHubSerial } from '../../lib/identity';
-  import { configStore, loadConfig } from '../../lib/stores/config.svelte';
+  import { acceptDeviceName, configStore } from '../../lib/stores/config.svelte';
   import { renameDevice } from '../../lib/api';
 
   interface Props {
@@ -56,7 +56,7 @@
       await renameDevice(device_id, name);
       // Refresh config so the UI reflects the backend's authoritative
       // state (in particular so displayName() picks up the new label).
-      await loadConfig();
+      acceptDeviceName(device_id, name);
     } catch (e) {
       console.error('rename_device failed', e);
     } finally {

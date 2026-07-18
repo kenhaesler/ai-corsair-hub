@@ -37,13 +37,24 @@ Two iCUE LINK System Hubs detected:
 - **USB**: hidapi crate (via system hid.dll)
 - **Config**: TOML (serde)
 - **Logging**: tracing + tracing-subscriber
-- **Windows**: windows crate for service integration
+- **Windows**: windows and windows-service crates for native APIs and SCM integration
 
 ### Frontend (Tauri 2.0 + Svelte 5)
 - **Shell**: Tauri 2.0 (uses system WebView2, no bundled Chromium)
 - **UI**: Svelte 5 with runes (compiled reactivity, near-zero runtime)
-- **Graphs**: uPlot or D3.js for real-time temperature/fan curves
+- **Graphs**: Svelte components with SVG for real-time temperature/fan curves
 - **System tray**: Tauri tray plugin for background monitoring
+
+### Current Runtime Topology
+
+The Tauri GUI owns its hardware thread, sensor polling, fan control, RGB rendering,
+configuration updates, and telemetry events. The `apps/service` binary can install as
+an automatic Windows service, handles SCM stop/shutdown controls, stores its config and
+daily logs under `%ProgramData%\ai-corsair-hub`, and can also run interactively with
+`--console`. There is no GUI/service IPC yet, so they are alternative hardware owners.
+A shared Windows named mutex refuses a second owner before HID discovery. Release
+installers bundle the service binary but do not register or start it automatically.
+Service-backed GUI control and automatic SCM failure recovery remain Phase 6 work.
 
 ### Resource Budget
 | Component | RAM Target | CPU Target |
@@ -87,7 +98,7 @@ ai-corsair-hub/
 │   ├── gui/                   # Tauri 2.0 + Svelte 5 desktop app
 │   ├── scanner/               # CLI: USB device scanner + protocol probe
 │   ├── rgb-test/              # CLI: RGB protocol validation tool
-│   └── service/               # Windows Service daemon [stub]
+│   └── service/               # Windows SCM fan-control service + console mode
 ├── docs/
 │   ├── architecture.md        # This file
 │   └── rgb-protocol.md        # iCUE LINK RGB protocol reference
@@ -162,13 +173,13 @@ Fan Groups (per-group PID):
   - Side intake (3x QX140)
   - Bottom intake (3x QX140)
   - Rear exhaust (1x QX120)
-  - Pump (D5 G3 via motherboard)
+  - Pump (future motherboard PWM integration)
 ```
 
 ## Implementation Phases
 
 ### Phase 0: Foundation (COMPLETE)
-- [x] Rust workspace with 6 crates
+- [x] Rust workspace foundation
 - [x] USB HID device discovery (hidapi)
 - [x] iCUE LINK Hub detection and identification
 - [x] Initial protocol probe (512-byte responses, 0x0F status)
@@ -190,15 +201,16 @@ Fan Groups (per-group PID):
 - [ ] Motherboard sensors (VRM, chipset) via WMI
 - [ ] Water temperature (when user adds inline sensor)
 
-### Phase 3: Fan Control Service (COMPLETE)
+### Phase 3: Fan Control Core (COMPLETE)
 - [x] Wire PID controller to real sensor inputs
 - [x] Wire fan output to iCUE LINK Hub set-duty commands
 - [x] Implement fan groups with per-group PID
 - [x] Implement acoustic filter (ramp rates, hysteresis)
 - [x] TOML config file loading + live reload
 - [x] Hub health monitoring and automatic recovery
-- [ ] Windows Service registration and lifecycle
-- [ ] Auto-start on boot
+- [x] Console daemon entry point
+- [x] Windows Service registration and lifecycle
+- [x] Auto-start on boot through SCM
 
 ### Phase 4: Tauri UI (COMPLETE)
 - [x] Tauri 2.0 + Svelte 5 desktop app
@@ -219,11 +231,15 @@ Fan Groups (per-group PID):
     - See `docs/rgb-protocol.md` for byte-level reference
     - RGB test binary: `cargo run --bin corsair-rgb-test`
 
-### Phase 6: Polish & Community
-- [ ] Installer (WiX or NSIS)
-- [ ] Auto-update mechanism
-- [ ] Documentation for other Corsair LINK users
-- [ ] Publish iCUE LINK protocol documentation
+### Phase 6: Polish & Community (IN PROGRESS)
+- [x] NSIS installer configuration, including the manually enabled service binary
+- [x] Signed updater artifacts and Tauri updater integration
+- [x] Pull-request and release quality gates
+- [x] Publish iCUE LINK RGB protocol documentation
+- [x] Windows Service registration, SCM lifecycle, boot startup, and service-safe logging
+- [x] Cross-process exclusion between GUI and service direct hardware modes
+- [ ] GUI/service IPC and automatic SCM failure recovery policy
+- [ ] Broader community documentation and hardware validation
 - [ ] Support for additional iCUE LINK devices
 
 ## Key Design Decisions
@@ -233,7 +249,7 @@ Fan Groups (per-group PID):
 | Language | Rust | Near-zero overhead, memory safety, hidapi crate |
 | UI framework | Tauri 2.0 + Svelte 5 | WebView2 native, no Chromium, tiny bundle |
 | Fan algorithm | PID + acoustic filter | Best thermal performance with noise optimization |
-| Architecture | Service + UI separated | Service runs 24/7 at ~3MB, UI only when needed |
+| Runtime ownership | Mutex-protected GUI and SCM-service direct modes | GUI/service IPC and graceful handoff remain planned |
 | Config format | TOML | Human-readable, good Rust ecosystem support |
 | Protocol approach | OpenLinkHub reference + own RE | Protocol sourced from Go OSS project, ported to Rust |
 | RGB | Implemented (Phase 5) | Effect engine + hardware output via color endpoint |
@@ -241,7 +257,7 @@ Fan Groups (per-group PID):
 ## Development Environment
 
 - **OS**: Windows 11 Pro (10.0.26200)
-- **Rust**: 1.94.0 (2024 edition)
-- **Node.js**: v24.14.0 (for Tauri UI)
+- **Rust**: 1.94.0, pinned by `rust-toolchain.toml` (2024 edition)
+- **Node.js**: v24.14.0, pinned by `.nvmrc` (for Tauri UI)
 - **Build tools**: MSVC Build Tools 2022
 - **IDE**: Claude Code CLI

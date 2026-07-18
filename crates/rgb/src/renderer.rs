@@ -1,18 +1,24 @@
 use std::time::Instant;
 
+use crate::Rgb;
 use crate::effect::EffectContext;
 use crate::flow::FlowConfig;
 use crate::frame::RgbFrame;
 use crate::layer::{Layer, LayerStack};
 use crate::layout::LedLayout;
 use crate::transition::CrossFade;
-use crate::Rgb;
 
 /// Central RGB renderer — manages zones, layers, and frame output.
 pub struct RgbRenderer {
     zones: Vec<ZoneState>,
     start_time: Instant,
     brightness: f32,
+}
+
+impl Default for RgbRenderer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 struct ZoneState {
@@ -126,10 +132,10 @@ impl RgbRenderer {
                 let mut leds = zone.layer_stack.render(&positions, dev_elapsed, ctx);
 
                 // Apply crossfade transition if active
-                if let Some(ref transition) = zone.transition {
-                    if !transition.is_done(elapsed) {
-                        leds = transition.blend(&leds, elapsed);
-                    }
+                if let Some(ref transition) = zone.transition
+                    && !transition.is_done(elapsed)
+                {
+                    leds = transition.blend(&leds, elapsed);
                 }
 
                 // Apply zone brightness then master brightness
@@ -160,11 +166,7 @@ impl RgbRenderer {
             }
 
             // Clear completed transitions
-            if zone
-                .transition
-                .as_ref()
-                .is_some_and(|t| t.is_done(elapsed))
-            {
+            if zone.transition.as_ref().is_some_and(|t| t.is_done(elapsed)) {
                 zone.transition = None;
             }
         }

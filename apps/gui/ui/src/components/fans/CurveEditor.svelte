@@ -114,6 +114,33 @@
   }
 
   // Right-click to remove a point
+  function onPointKeydown(event: KeyboardEvent, index: number) {
+    if ((event.key === 'Delete' || event.key === 'Backspace') && points.length > 2) {
+      event.preventDefault();
+      onchange(points.filter((_, pointIndex) => pointIndex !== index));
+      return;
+    }
+
+    const step = event.shiftKey ? 5 : 1;
+    const point = points[index];
+    let temp = point.temp;
+    let duty = point.duty;
+    if (event.key === 'ArrowLeft') temp -= step;
+    else if (event.key === 'ArrowRight') temp += step;
+    else if (event.key === 'ArrowDown') duty -= step;
+    else if (event.key === 'ArrowUp') duty += step;
+    else return;
+
+    event.preventDefault();
+    const next = [...points];
+    next[index] = {
+      temp: Math.max(TEMP_MIN, Math.min(TEMP_MAX, temp)),
+      duty: Math.max(DUTY_MIN, Math.min(DUTY_MAX, duty)),
+    };
+    next.sort((a, b) => a.temp - b.temp);
+    onchange(next);
+  }
+
   function onPointContext(e: MouseEvent, index: number) {
     e.preventDefault();
     if (points.length <= 2) return;
@@ -224,6 +251,8 @@
   });
 </script>
 
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <svg
   bind:this={svg}
   viewBox="0 0 {PAD * 2 + W} {PAD * 2 + H}"
@@ -338,6 +367,7 @@
       onpointerdown={(e) => onPointerDown(e, i)}
       onpointerenter={() => { hoveredPoint = i; }}
       onpointerleave={() => { hoveredPoint = null; }}
+      onkeydown={(event) => onPointKeydown(event, i)}
       oncontextmenu={(e) => onPointContext(e, i)}
     />
     <!-- Tooltip on hover -->

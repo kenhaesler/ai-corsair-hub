@@ -219,10 +219,7 @@ impl SystemSnapshot {
             std::collections::HashMap::new();
         for gd in &result.group_duties {
             for &(ch, duty) in &gd.channels {
-                channel_duty.insert(
-                    (gd.hub_serial.clone(), ch),
-                    (duty, gd.name.clone()),
-                );
+                channel_duty.insert((gd.hub_serial.clone(), ch), (duty, gd.name.clone()));
             }
         }
 

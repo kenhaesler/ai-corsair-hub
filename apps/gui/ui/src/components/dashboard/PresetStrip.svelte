@@ -8,13 +8,24 @@
   let presets = $state<FanPresetDef[]>([]);
   let applying = $state<string | null>(null);
   let selectedGroup = $state<string | null>(null); // null = all groups
+  let loading = $state(true);
+  let error = $state<string | null>(null);
 
-  onMount(async () => {
+  async function loadPresets() {
+    loading = true;
+    error = null;
     try {
       presets = await getFanPresets();
-    } catch {
+    } catch (loadError) {
       presets = [];
+      error = String(loadError);
+    } finally {
+      loading = false;
     }
+  }
+
+  onMount(() => {
+    void loadPresets();
   });
 
   // Available group names — derived from the live config so adding a
@@ -63,15 +74,20 @@
   }
 
   async function doApply(preset: FanPresetDef) {
+    if (configStore.dirty) {
+      error = 'Save or discard configuration changes before applying a preset.';
+      return;
+    }
     applying = preset.id;
+    error = null;
     try {
       await applyPresetToGroup(preset.id, selectedGroup);
-      await loadConfig();
-    } catch {
-      // Swallow — the caller sees the unchanged indicator and the error
-      // bubble is handled globally by the hardware-error toast.
+      await loadConfig(true);
+    } catch (applyError) {
+      error = String(applyError);
+    } finally {
+      applying = null;
     }
-    applying = null;
   }
 </script>
 
@@ -90,7 +106,15 @@
     </div>
   {/if}
 
-  {#if presets.length === 0}
+  {#if error}
+    <div class="banner error preset-error" aria-live="polite">
+      <span>{error}</span>
+      {#if presets.length === 0}
+        <button onclick={loadPresets}>Retry</button>
+      {/if}
+    </div>
+  {/if}
+  {#if loading}
     <div class="empty">Loading presets…</div>
   {:else}
     <div class="preset-rail">

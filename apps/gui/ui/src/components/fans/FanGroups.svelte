@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { configStore, loadConfig, saveCurrentConfig } from '../../lib/stores/config.svelte';
+  import { configStore, replaceConfig, saveCurrentConfig } from '../../lib/stores/config.svelte';
+  import { discardAllConfigChanges } from '../../lib/stores/rgb.svelte';
   import { sensors } from '../../lib/stores/sensors.svelte';
   import { getDevices, listAvailableSensors } from '../../lib/api';
   import type { FanGroupConfig, HubSnapshot } from '../../lib/types';
@@ -19,7 +20,6 @@
   let availableSensors = $state<string[]>([]);
 
   onMount(async () => {
-    loadConfig();
     try {
       const tree = await getDevices();
       availableHubs = tree.hubs;
@@ -52,13 +52,13 @@
     if (!configStore.config) return;
     const groups = [...configStore.config.fan_groups];
     groups[index] = group;
-    configStore.config = { ...configStore.config, fan_groups: groups };
+    replaceConfig({ ...configStore.config, fan_groups: groups });
   }
 
   function addGroup(group: FanGroupConfig) {
     if (!configStore.config) return;
     const groups = [...configStore.config.fan_groups, group];
-    configStore.config = { ...configStore.config, fan_groups: groups };
+    replaceConfig({ ...configStore.config, fan_groups: groups });
     selectedIndex = groups.length - 1;
     newGroupOpen = false;
     // Persist immediately — no value in leaving the group un-saved; the
@@ -79,7 +79,7 @@
     }
     const groups = [...configStore.config.fan_groups];
     groups[index] = { ...groups[index], name: newName };
-    configStore.config = { ...configStore.config, fan_groups: groups };
+    replaceConfig({ ...configStore.config, fan_groups: groups });
     saveCurrentConfig();
   }
 
@@ -93,7 +93,7 @@
     }
     const idx = deleteTargetIndex;
     const groups = configStore.config.fan_groups.filter((_, i) => i !== idx);
-    configStore.config = { ...configStore.config, fan_groups: groups };
+    replaceConfig({ ...configStore.config, fan_groups: groups });
     // Clear any error state for the removed index so the Save gate
     // doesn't latch on a stale key.
     const nextErrors: Record<number, boolean> = {};
@@ -212,13 +212,19 @@
           {/if}
 
           <div class="actions">
+            {#if configStore.dirty}
+              <button
+                onclick={() => void discardAllConfigChanges()}
+                disabled={configStore.saving}
+              >Discard Changes</button>
+            {/if}
             <button
               class="primary"
               onclick={saveCurrentConfig}
-              disabled={configStore.saving || anyGroupHasError}
+              disabled={configStore.saving || anyGroupHasError || !configStore.dirty}
               title={anyGroupHasError ? 'Fix curve errors before saving' : undefined}
             >
-              {configStore.saving ? 'Saving...' : 'Save Configuration'}
+              {configStore.saving ? 'Saving...' : configStore.dirty ? 'Save Configuration' : 'Saved'}
             </button>
           </div>
         </div>

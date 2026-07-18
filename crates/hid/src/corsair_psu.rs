@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use hidapi::HidDevice;
 use serde::Serialize;
 use tracing::{debug, trace};

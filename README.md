@@ -63,7 +63,7 @@ The iCUE LINK protocol was sourced from [OpenLinkHub](https://github.com/jurkovi
 
 ## Architecture
 
-Rust workspace with 7 crates and 3 CLI/GUI applications:
+Rust workspace with five library crates and four application crates:
 
 ```
 ai-corsair-hub/
@@ -77,7 +77,7 @@ ai-corsair-hub/
 │   ├── gui/           Tauri 2.0 + Svelte 5 desktop application
 │   ├── scanner/       CLI: USB device scanner and iCUE LINK hub probe
 │   ├── rgb-test/      CLI: RGB protocol validation (cycles red/green/blue on hardware)
-│   └── service/       Windows Service daemon [stub]
+│   └── service/       Windows SCM fan-control service with console mode
 └── docs/
     ├── architecture.md    Full architecture, protocol status, and roadmap
     └── rgb-protocol.md    iCUE LINK RGB byte-level protocol reference
@@ -109,8 +109,8 @@ Sensors (CPU/GPU/PSU)
 ### Prerequisites
 
 - **Windows 11** (only platform currently supported)
-- [Rust](https://rustup.rs/) 1.94+ with MSVC toolchain
-- [Node.js](https://nodejs.org/) v24+ (for the Tauri/Svelte frontend)
+- [Rust](https://rustup.rs/) 1.94.0 with MSVC toolchain (pinned in `rust-toolchain.toml`)
+- [Node.js](https://nodejs.org/) 24.14.0 (pinned in `.nvmrc`)
 - MSVC Build Tools 2022 (`winget install Microsoft.VisualStudio.2022.BuildTools`)
 - [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) running with its HTTP server enabled (for CPU/PSU sensor data)
 - Corsair iCUE LINK hardware connected via USB
@@ -125,11 +125,10 @@ cd ai-corsair-hub
 # Set PATH (if not already configured)
 export PATH="$USERPROFILE/.cargo/bin:/c/Program Files/nodejs:$PATH"
 
-# Build entire workspace
-cargo build
-
-# Run tests
-cargo test
+# Run the backend quality gate
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-targets
 
 # --- CLI Tools ---
 
@@ -147,14 +146,22 @@ RUST_LOG=corsair_hid=trace cargo run --bin corsair-rgb-test
 
 # --- Desktop Application ---
 
-# Run the GUI (Tauri dev mode)
-cd apps/gui/ui && npm install && cd ../../..
-cargo tauri dev --manifest-path apps/gui/Cargo.toml
+# Install locked dependencies and run the GUI (Tauri dev mode)
+npm --prefix apps/gui ci
+npm --prefix apps/gui/ui ci
+npm --prefix apps/gui run tauri dev
+
+# --- Windows Service (elevated PowerShell) ---
+
+# Source build: install and later remove the boot-time fan-control service
+cargo build --release --bin corsair-service
+target\release\corsair-service.exe install
+target\release\corsair-service.exe uninstall
 ```
 
 ### Configuration
 
-The application uses a TOML configuration file. On first run, a default config is created. Fan groups, PID parameters, curve points, and RGB zones are all configurable through the GUI or by editing the config file directly.
+The application uses a TOML configuration file. On first run, a default config is created. Fan groups, PID parameters, curve points, and RGB zones are all configurable through the GUI or by editing the config file directly. The Windows service uses `%ProgramData%\ai-corsair-hub\config.toml` by default and writes daily logs under the adjacent `logs` directory. Release installers include `corsair-service.exe`, but do not install or start it automatically until GUI/service IPC exists. The GUI and service are alternative direct hardware owners; a cross-process mutex makes the second mode fail clearly instead of accessing HID concurrently.
 
 Example fan group configuration:
 
@@ -191,9 +198,11 @@ weights = [0.7, 0.3]
 | Config | TOML (serde) | Human-readable, first-class Rust ecosystem support |
 | Logging | tracing + tracing-subscriber | Structured, filterable logging with env-filter |
 
-### Resource Budget
+### Resource Targets
 
-| Component | RAM | CPU |
+These are design targets, not benchmark guarantees across all systems.
+
+| Component | RAM target | CPU target |
 |-----------|-----|-----|
 | Fan control loop | < 5 MB | < 0.1% |
 | System tray (idle) | < 5 MB | 0% |
@@ -211,14 +220,18 @@ weights = [0.7, 0.3]
 | 3 | Fan Control: PID + acoustic filter, fan groups, hub health monitoring | **Complete** |
 | 4 | Desktop UI: Tauri + Svelte dashboard, curve editor, device panel, presets | **Complete** |
 | 5 | RGB: Effect engine, multi-layer renderer, lighting UI, hardware output | **Complete** |
-| 6 | Polish: installer, auto-update, Windows Service, community docs | **Next** |
+| 6 | Polish: packaging, auto-update, CI, Windows Service, community docs | **In progress** |
 
-### Phase 6 Planned Work
-- MSI/NSIS installer for one-click setup
-- Auto-update mechanism
-- Windows Service registration for boot-time fan control
-- Publish iCUE LINK protocol documentation for the community
-- Support for additional iCUE LINK device types
+### Phase 6 Status
+- [x] NSIS installer configuration, including the manually enabled service binary
+- [x] GitHub release workflow with signed updater artifacts
+- [x] Tauri updater integration
+- [x] Pull-request and release quality gates
+- [x] iCUE LINK RGB protocol documentation
+- [x] Windows Service registration, SCM lifecycle, and boot-time startup
+- [x] Cross-process exclusion between GUI and service hardware ownership
+- [ ] GUI/service IPC and automatic SCM failure recovery policy
+- [ ] Validation and support for additional iCUE LINK device types
 
 ## iCUE LINK Protocol
 

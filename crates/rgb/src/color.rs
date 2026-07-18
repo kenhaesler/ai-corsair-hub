@@ -124,19 +124,14 @@ impl Hsv {
 }
 
 /// Blend modes for compositing layers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlendMode {
+    #[default]
     Normal,
     Add,
     Multiply,
     Screen,
     Overlay,
-}
-
-impl Default for BlendMode {
-    fn default() -> Self {
-        BlendMode::Normal
-    }
 }
 
 impl BlendMode {
@@ -150,9 +145,11 @@ impl BlendMode {
             BlendMode::Normal => (lr, lg, lb),
             BlendMode::Add => ((br + lr).min(1.0), (bg + lg).min(1.0), (bb + lb).min(1.0)),
             BlendMode::Multiply => (br * lr, bg * lg, bb * lb),
-            BlendMode::Screen => {
-                (1.0 - (1.0 - br) * (1.0 - lr), 1.0 - (1.0 - bg) * (1.0 - lg), 1.0 - (1.0 - bb) * (1.0 - lb))
-            }
+            BlendMode::Screen => (
+                1.0 - (1.0 - br) * (1.0 - lr),
+                1.0 - (1.0 - bg) * (1.0 - lg),
+                1.0 - (1.0 - bb) * (1.0 - lb),
+            ),
             BlendMode::Overlay => {
                 fn overlay_ch(base: f32, layer: f32) -> f32 {
                     if base < 0.5 {
@@ -192,9 +189,18 @@ mod tests {
             let hsv = Hsv::from_rgb(c);
             let back = Rgb::from_hsv(hsv);
             // Allow ±1 rounding error per channel
-            assert!((c.r as i16 - back.r as i16).abs() <= 1, "R mismatch for {c:?}: got {back:?}");
-            assert!((c.g as i16 - back.g as i16).abs() <= 1, "G mismatch for {c:?}: got {back:?}");
-            assert!((c.b as i16 - back.b as i16).abs() <= 1, "B mismatch for {c:?}: got {back:?}");
+            assert!(
+                (c.r as i16 - back.r as i16).abs() <= 1,
+                "R mismatch for {c:?}: got {back:?}"
+            );
+            assert!(
+                (c.g as i16 - back.g as i16).abs() <= 1,
+                "G mismatch for {c:?}: got {back:?}"
+            );
+            assert!(
+                (c.b as i16 - back.b as i16).abs() <= 1,
+                "B mismatch for {c:?}: got {back:?}"
+            );
         }
     }
 

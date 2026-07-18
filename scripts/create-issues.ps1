@@ -62,31 +62,33 @@ Users should be able to configure Corsair Hub to start automatically when Window
 "@
     },
     @{
-        Title = "Implement Windows Service daemon (apps/service)"
+        Title = "Connect the GUI to the Windows Service over IPC"
         Labels = "enhancement"
         Body = @"
 ## Description
 
-``apps/service`` is currently a stub. A proper Windows Service would allow fan control to run without a logged-in user session (e.g., after reboot before login, or on headless/remote machines).
+``apps/service`` now runs the fan-control core under the Windows Service Control Manager. The GUI can still own hardware directly, and a shared named mutex rejects concurrent ownership. Add IPC so the service can remain the single hardware owner while the GUI is open.
 
 ## Architecture
 
-- Service binary in ``apps/service/`` manages the hardware control loop
-- GUI app (``apps/gui/``) becomes a frontend that connects to the service via IPC (named pipe or localhost TCP)
-- Service handles: device discovery, fan control, RGB rendering, sensor polling
-- GUI handles: display, configuration, user interaction
+- Service binary in ``apps/service/`` remains the single hardware owner
+- GUI app (``apps/gui/``) connects via an authenticated local named pipe
+- Service handles device discovery, fan control, RGB rendering, sensor polling, and persistence
+- GUI handles display, configuration, and user interaction
 
 ## Considerations
 
 - Service needs to run as LocalSystem or a service account with USB HID access
 - LHM integration may need adjustment (LHM has its own service mode)
 - Config changes from GUI need to be sent to service and persisted
-- Graceful handoff: if service isn't running, GUI should fall back to direct hardware control
+- Preserve the ownership mutex as a fail-safe around direct HID access
+- Graceful handoff: if the service is not running, the GUI should fall back to direct hardware control
 
 ## Acceptance Criteria
 
-- [ ] ``apps/service`` builds as a Windows Service (``sc create`` compatible)
-- [ ] Fan control runs without GUI open
+- [x] ``apps/service`` installs and runs as a native Windows Service
+- [x] Fan control runs without GUI open
+- [x] Concurrent direct hardware ownership is rejected before HID discovery
 - [ ] GUI connects to service for status and configuration
 - [ ] Fallback to direct mode when service is unavailable
 "@
@@ -120,22 +122,21 @@ After v1.0, publish Corsair Hub to Windows package managers so users can install
 "@
     },
     @{
-        Title = "Add version bump script for release automation"
+        Title = "Extend release version automation"
         Labels = "enhancement,developer-experience"
         Body = @"
 ## Problem
 
-Version lives in 4 files that must stay in sync:
-1. ``Cargo.toml`` -> ``[workspace.package] version``
-2. ``apps/gui/tauri.conf.json`` -> ``version``
-3. ``apps/gui/package.json`` -> ``version``
-4. ``apps/gui/ui/package.json`` -> ``version``
+Release versions are synchronized across the Cargo workspace, Cargo.lock, Tauri config,
+both npm packages, and both npm lockfiles by ``scripts/bump-version.ps1``. The release
+workflows verify the metadata and tag with ``scripts/check-version.ps1``.
 
-A basic ``scripts/bump-version.ps1`` was added but could be improved.
+The remaining work is optional release ergonomics.
 
 ## Improvements
 
-- [ ] Add a ``Cargo.lock`` update step (``cargo check`` after bump)
+- [x] Update and verify ``Cargo.lock`` after each bump
+- [x] Validate release metadata and tag consistency in CI
 - [ ] Validate that the new version is greater than the current version
 - [ ] Optionally create the git commit and tag (``--commit`` flag)
 - [ ] Add a cross-platform shell script (``scripts/bump-version.sh``) for CI

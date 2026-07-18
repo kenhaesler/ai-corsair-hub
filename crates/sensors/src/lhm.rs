@@ -7,17 +7,23 @@
 //! Also provides PSU telemetry when LHM has the Corsair PSU plugin active,
 //! avoiding USB HID contention with our direct reads.
 
-use std::path::PathBuf;
+use std::os::windows::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use anyhow::{Context, Result};
 use corsair_hid::{PsuStatus, RailReading};
 use serde::Deserialize;
 use tracing::{debug, info, warn};
+use windows::Win32::UI::Shell::{SHELLEXECUTEINFOW, ShellExecuteExW};
+use windows::Win32::UI::WindowsAndMessaging::SW_SHOWMINIMIZED;
+use windows::core::PCWSTR;
 
 const LHM_URL: &str = "http://127.0.0.1:8085/data.json";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_LHM_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Ensure LibreHardwareMonitor is running with its webserver enabled.
 ///
@@ -62,18 +68,21 @@ fn find_lhm_executable(custom_path: Option<&str>) -> Option<PathBuf> {
     // 1. User-configured path
     if let Some(path) = custom_path {
         let p = PathBuf::from(path);
-        if p.exists() {
-            info!("Using configured LHM path: {}", p.display());
-            return Some(p);
+        if let Ok(validated) = validate_lhm_executable(&p) {
+            info!("Using configured LHM path: {}", validated.display());
+            return Some(validated);
         }
-        warn!("Configured LHM path not found: {}", path);
+        warn!(
+            "Configured LHM path is not a valid LibreHardwareMonitor executable: {}",
+            path
+        );
     }
 
     // 2. Standard install path (MSI)
     let standard = PathBuf::from(r"C:\Program Files\LibreHardwareMonitor\LibreHardwareMonitor.exe");
-    if standard.exists() {
-        info!("Found LHM at standard path: {}", standard.display());
-        return Some(standard);
+    if let Ok(validated) = validate_lhm_executable(&standard) {
+        info!("Found LHM at standard path: {}", validated.display());
+        return Some(validated);
     }
 
     // 3. Winget per-user install path
@@ -85,11 +94,14 @@ fn find_lhm_executable(custom_path: Option<&str>) -> Option<PathBuf> {
         if let Ok(entries) = std::fs::read_dir(&winget_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name();
-                if name.to_string_lossy().starts_with("LibreHardwareMonitor.LibreHardwareMonitor") {
+                if name
+                    .to_string_lossy()
+                    .starts_with("LibreHardwareMonitor.LibreHardwareMonitor")
+                {
                     let exe = entry.path().join("LibreHardwareMonitor.exe");
-                    if exe.exists() {
-                        info!("Found LHM at winget path: {}", exe.display());
-                        return Some(exe);
+                    if let Ok(validated) = validate_lhm_executable(&exe) {
+                        info!("Found LHM at winget path: {}", validated.display());
+                        return Some(validated);
                     }
                 }
             }
@@ -101,32 +113,24 @@ fn find_lhm_executable(custom_path: Option<&str>) -> Option<PathBuf> {
 
 /// Launch LHM and poll until its webserver responds (or timeout).
 ///
-/// LHM requires admin privileges to access hardware sensors, so we use
-/// PowerShell Start-Process -Verb RunAs to trigger UAC elevation.
-fn launch_and_wait(exe_path: &PathBuf) -> bool {
-    info!("Launching LibreHardwareMonitor (elevated): {}", exe_path.display());
-
-    // Use PowerShell to launch with UAC elevation (runas verb)
-    let exe_str = exe_path.to_string_lossy();
-    match std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            &format!(
-                "Start-Process -FilePath '{}' -Verb RunAs -WindowStyle Minimized",
-                exe_str
-            ),
-        ])
-        .spawn()
-    {
-        Ok(mut child) => {
-            // Wait for the PowerShell process to finish (UAC prompt)
-            let _ = child.wait();
-        }
-        Err(e) => {
-            warn!("Failed to launch LibreHardwareMonitor: {}", e);
+/// LHM requires admin privileges to access hardware sensors. Use the native
+/// `runas` shell verb so the configured path is never parsed as shell code.
+fn launch_and_wait(exe_path: &Path) -> bool {
+    let exe_path = match validate_lhm_executable(exe_path) {
+        Ok(path) => path,
+        Err(error) => {
+            warn!(%error, "Refusing to launch invalid LibreHardwareMonitor path");
             return false;
         }
+    };
+    info!(
+        "Launching LibreHardwareMonitor (elevated): {}",
+        exe_path.display()
+    );
+
+    if let Err(error) = launch_elevated(&exe_path) {
+        warn!(%error, "Failed to launch LibreHardwareMonitor");
+        return false;
     }
 
     // Poll for webserver readiness
@@ -148,6 +152,55 @@ fn launch_and_wait(exe_path: &PathBuf) -> bool {
         STARTUP_TIMEOUT.as_secs()
     );
     false
+}
+
+fn validate_lhm_executable(path: &Path) -> Result<PathBuf> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("Cannot canonicalize {}", path.display()))?;
+    let metadata = std::fs::metadata(&canonical)
+        .with_context(|| format!("Cannot inspect {}", canonical.display()))?;
+    if !metadata.is_file() {
+        anyhow::bail!("{} is not a regular file", canonical.display());
+    }
+    let file_name = canonical
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("Executable path has no valid UTF-8 filename")?;
+    if !file_name.eq_ignore_ascii_case("LibreHardwareMonitor.exe") {
+        anyhow::bail!("Executable must be named LibreHardwareMonitor.exe");
+    }
+    Ok(canonical)
+}
+
+fn launch_elevated(exe_path: &Path) -> Result<()> {
+    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+    let file: Vec<u16> = exe_path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut execute_info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        lpVerb: PCWSTR(verb.as_ptr()),
+        lpFile: PCWSTR(file.as_ptr()),
+        nShow: SW_SHOWMINIMIZED.0,
+        ..Default::default()
+    };
+
+    // SAFETY: verb and file are NUL-terminated and remain alive for the call;
+    // the remaining structure fields are initialized to documented defaults.
+    unsafe { ShellExecuteExW(&mut execute_info) }.context("ShellExecuteExW(runas) failed")
+}
+
+pub(crate) fn read_lhm_body(url: &str) -> Result<String> {
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(HTTP_TIMEOUT))
+        .build();
+    let agent = ureq::Agent::new_with_config(config);
+    let mut response = agent.get(url).call().context("LHM HTTP request failed")?;
+    response
+        .body_mut()
+        .with_config()
+        .limit(MAX_LHM_RESPONSE_BYTES)
+        .read_to_string()
+        .context("LHM response exceeded size limit or was not valid text")
 }
 
 // --- LHM PSU reader ---
@@ -175,11 +228,7 @@ struct LhmNode {
 /// Returns `Some(PsuStatus)` if LHM has a Corsair PSU node (`/psu/corsair/*`).
 /// This avoids USB HID contention — LHM already has the device open.
 pub fn read_psu_from_lhm() -> Option<PsuStatus> {
-    let config = ureq::Agent::config_builder()
-        .timeout_global(Some(HTTP_TIMEOUT))
-        .build();
-    let agent = ureq::Agent::new_with_config(config);
-    let body: String = agent.get(LHM_URL).call().ok()?.body_mut().read_to_string().ok()?;
+    let body = read_lhm_body(LHM_URL).ok()?;
     let root: LhmNode = serde_json::from_str(&body).ok()?;
 
     // Find the PSU hardware node (HardwareId starts with /psu/corsair)
@@ -187,36 +236,33 @@ pub fn read_psu_from_lhm() -> Option<PsuStatus> {
     let prefix = &psu_node.HardwareId; // e.g. "/psu/corsair/0"
 
     // Extract sensor values by SensorId pattern
-    let temp_vrm = find_sensor(&psu_node, &format!("{}/temperature/0", prefix))?;
-    let temp_case = find_sensor(&psu_node, &format!("{}/temperature/1", prefix))?;
-    let fan_rpm = find_sensor(&psu_node, &format!("{}/fan/", prefix)).unwrap_or(0.0) as u16;
-    let input_voltage = find_sensor(&psu_node, &format!("{}/voltage/3", prefix))?;
+    let temp_vrm = find_sensor(psu_node, &format!("{}/temperature/0", prefix))?;
+    let temp_case = find_sensor(psu_node, &format!("{}/temperature/1", prefix))?;
+    let fan_rpm = find_sensor(psu_node, &format!("{}/fan/", prefix)).unwrap_or(0.0) as u16;
+    let input_voltage = find_sensor(psu_node, &format!("{}/voltage/3", prefix))?;
 
     let rail_12v = RailReading {
-        voltage: find_sensor(&psu_node, &format!("{}/voltage/4", prefix))?,
-        current: find_sensor(&psu_node, &format!("{}/current/7", prefix)).unwrap_or(0.0),
-        power: find_sensor(&psu_node, &format!("{}/power/10", prefix)).unwrap_or(0.0),
+        voltage: find_sensor(psu_node, &format!("{}/voltage/4", prefix))?,
+        current: find_sensor(psu_node, &format!("{}/current/7", prefix)).unwrap_or(0.0),
+        power: find_sensor(psu_node, &format!("{}/power/10", prefix)).unwrap_or(0.0),
     };
     let rail_5v = RailReading {
-        voltage: find_sensor(&psu_node, &format!("{}/voltage/5", prefix))?,
-        current: find_sensor(&psu_node, &format!("{}/current/8", prefix)).unwrap_or(0.0),
-        power: find_sensor(&psu_node, &format!("{}/power/11", prefix)).unwrap_or(0.0),
+        voltage: find_sensor(psu_node, &format!("{}/voltage/5", prefix))?,
+        current: find_sensor(psu_node, &format!("{}/current/8", prefix)).unwrap_or(0.0),
+        power: find_sensor(psu_node, &format!("{}/power/11", prefix)).unwrap_or(0.0),
     };
     let rail_3v3 = RailReading {
-        voltage: find_sensor(&psu_node, &format!("{}/voltage/6", prefix))?,
-        current: find_sensor(&psu_node, &format!("{}/current/9", prefix)).unwrap_or(0.0),
-        power: find_sensor(&psu_node, &format!("{}/power/12", prefix)).unwrap_or(0.0),
+        voltage: find_sensor(psu_node, &format!("{}/voltage/6", prefix))?,
+        current: find_sensor(psu_node, &format!("{}/current/9", prefix)).unwrap_or(0.0),
+        power: find_sensor(psu_node, &format!("{}/power/12", prefix)).unwrap_or(0.0),
     };
 
     // Prefer "Total watts" (page 0x96 output-only) over "Total Output" (sum of rails)
-    let total_power = find_sensor(&psu_node, &format!("{}/power/13", prefix))
-        .or_else(|| find_sensor(&psu_node, &format!("{}/power/14", prefix)))
+    let total_power = find_sensor(psu_node, &format!("{}/power/13", prefix))
+        .or_else(|| find_sensor(psu_node, &format!("{}/power/14", prefix)))
         .unwrap_or(rail_12v.power + rail_5v.power + rail_3v3.power);
 
-    debug!(
-        total_power,
-        input_voltage, "PSU data from LHM"
-    );
+    debug!(total_power, input_voltage, "PSU data from LHM");
 
     Some(PsuStatus {
         temp_vrm,
@@ -251,17 +297,12 @@ pub struct CpuMetrics {
 /// (fallback path: the dashboard just hides the CPU extras block the
 /// same way it does for GPU on a non-NVIDIA machine).
 pub fn read_cpu_metrics_from_lhm() -> Option<CpuMetrics> {
-    let config = ureq::Agent::config_builder()
-        .timeout_global(Some(HTTP_TIMEOUT))
-        .build();
-    let agent = ureq::Agent::new_with_config(config);
-    let body: String = agent.get(LHM_URL).call().ok()?.body_mut().read_to_string().ok()?;
+    let body = read_lhm_body(LHM_URL).ok()?;
     let root: LhmNode = serde_json::from_str(&body).ok()?;
 
     // Prefer AMD node (the owner's 9950X3D), fall back to Intel for
     // portability.
-    let cpu_node = find_hw_node(&root, "/amdcpu/")
-        .or_else(|| find_hw_node(&root, "/intelcpu/"))?;
+    let cpu_node = find_hw_node(&root, "/amdcpu/").or_else(|| find_hw_node(&root, "/intelcpu/"))?;
 
     // Load %: "CPU Total" is the canonical aggregate; fall back to the
     // first Load sensor so we still show something on an LHM version
@@ -281,7 +322,11 @@ pub fn read_cpu_metrics_from_lhm() -> Option<CpuMetrics> {
     // Max core clock: we want to see boost, not the idle-core minimum.
     let clock_mhz = find_max_core_clock(cpu_node).unwrap_or(0.0) as u32;
 
-    Some(CpuMetrics { load_pct, power_watts, clock_mhz })
+    Some(CpuMetrics {
+        load_pct,
+        power_watts,
+        clock_mhz,
+    })
 }
 
 /// Find the first sensor with both Type and Text matching.
@@ -318,10 +363,11 @@ fn find_max_core_clock(node: &LhmNode) -> Option<f64> {
 }
 
 fn walk_cpu_core_clocks(node: &LhmNode, max: &mut Option<f64>) {
-    if node.Type == "Clock" && node.Text.starts_with("CPU Core") {
-        if let Some(v) = parse_lhm_value(&node.Value) {
-            *max = Some(max.map_or(v, |m: f64| m.max(v)));
-        }
+    if node.Type == "Clock"
+        && node.Text.starts_with("CPU Core")
+        && let Some(v) = parse_lhm_value(&node.Value)
+    {
+        *max = Some(max.map_or(v, |m: f64| m.max(v)));
     }
     for child in &node.Children {
         walk_cpu_core_clocks(child, max);
@@ -356,5 +402,44 @@ fn find_sensor(node: &LhmNode, sensor_id: &str) -> Option<f64> {
 
 /// Parse LHM value strings like "12.072 V", "50.8 °C", "0 RPM" → f64
 fn parse_lhm_value(s: &str) -> Option<f64> {
-    s.split_whitespace().next()?.replace(',', ".").parse().ok()
+    let value: f64 = s
+        .split_whitespace()
+        .next()?
+        .replace(',', ".")
+        .parse()
+        .ok()?;
+    value.is_finite().then_some(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_canonical_lhm_executable_name() {
+        let root = std::env::temp_dir().join(format!(
+            "corsair-lhm-validation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let valid = root.join("LibreHardwareMonitor.exe");
+        let invalid = root.join("anything-else.exe");
+        std::fs::write(&valid, b"test").unwrap();
+        std::fs::write(&invalid, b"test").unwrap();
+
+        assert!(validate_lhm_executable(&valid).is_ok());
+        assert!(validate_lhm_executable(&invalid).is_err());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_non_finite_sensor_values() {
+        assert_eq!(parse_lhm_value("NaN C"), None);
+        assert_eq!(parse_lhm_value("inf W"), None);
+    }
 }

@@ -9,18 +9,13 @@ pub struct FlowConfig {
     pub direction: FlowDirection,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FlowDirection {
+    #[default]
     Forward,
     Reverse,
     CenterOut,
     EdgeIn,
-}
-
-impl Default for FlowDirection {
-    fn default() -> Self {
-        FlowDirection::Forward
-    }
 }
 
 impl FlowConfig {

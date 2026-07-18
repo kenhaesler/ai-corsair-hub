@@ -12,7 +12,9 @@ corsair-fancontrol = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 ctrlc = { workspace = true }
+windows-service = { workspace = true }

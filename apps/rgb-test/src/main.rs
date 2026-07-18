@@ -21,7 +21,7 @@
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use tracing::{error, info, warn};
 
 use corsair_common::CorsairDevice;
@@ -49,8 +49,9 @@ fn main() -> Result<()> {
     }
 }
 
-fn open_hub(hub_suffix_match: Option<&str>) -> Result<(IcueLinkHub, corsair_hid::icue_link::HubInfo)>
-{
+fn open_hub(
+    hub_suffix_match: Option<&str>,
+) -> Result<(IcueLinkHub, corsair_hid::icue_link::HubInfo)> {
     let scanner = DeviceScanner::new().context("Failed to initialize HID API")?;
     let groups = scanner.scan_grouped();
 
@@ -84,7 +85,9 @@ fn open_hub(hub_suffix_match: Option<&str>) -> Result<(IcueLinkHub, corsair_hid:
 
     let device = scanner
         .open_device(group.pid, &group.serial, IcueLinkHub::data_interface())
-        .context("Failed to open hub — another process may have it open (exit corsair-hub-gui first)")?;
+        .context(
+            "Failed to open hub — another process may have it open (exit corsair-hub-gui first)",
+        )?;
 
     let hub = IcueLinkHub::new(device, group.serial.clone());
     let hub_info = hub.initialize().context("Failed to initialize hub")?;
@@ -193,11 +196,12 @@ fn run_walk(args: &[String]) -> Result<()> {
 
     info!("iCUE LINK RGB Walk — LED Count Diagnostic");
     info!("==========================================");
-    info!("Target: hub ending in '{}', channel {}", hub_suffix, target_channel);
-    info!("Probing up to {} LED positions", max_leds);
     info!(
-        "Color legend: 0-9 RED, 10-19 GREEN, 20-29 BLUE, 30-39 YELLOW,"
+        "Target: hub ending in '{}', channel {}",
+        hub_suffix, target_channel
     );
+    info!("Probing up to {} LED positions", max_leds);
+    info!("Color legend: 0-9 RED, 10-19 GREEN, 20-29 BLUE, 30-39 YELLOW,");
     info!("              40-49 MAGENTA, 50-59 CYAN, 60-69 WHITE, 70-79 ORANGE");
     info!("");
 
@@ -234,7 +238,10 @@ fn run_walk(args: &[String]) -> Result<()> {
         .collect();
 
     info!("");
-    info!("Starting walk — count the highest LIT position you observe on CH{}.", target_channel);
+    info!(
+        "Starting walk — count the highest LIT position you observe on CH{}.",
+        target_channel
+    );
     info!("(Each LED stays lit for 500 ms.)");
     info!("");
 
@@ -278,20 +285,23 @@ fn run_walk(args: &[String]) -> Result<()> {
         .context("Failed to restore hardware mode")?;
     info!("");
     info!("Now tell me: what was the HIGHEST position that actually lit up");
-    info!("on channel {}? That's the real LED count minus 1.", target_channel);
+    info!(
+        "on channel {}? That's the real LED count minus 1.",
+        target_channel
+    );
     Ok(())
 }
 
 fn walk_color_for(position: u16) -> [u8; 3] {
     match position / 10 {
-        0 => [255, 0, 0],    // RED
-        1 => [0, 255, 0],    // GREEN
-        2 => [0, 0, 255],    // BLUE
-        3 => [255, 255, 0],  // YELLOW
-        4 => [255, 0, 255],  // MAGENTA
-        5 => [0, 255, 255],  // CYAN
+        0 => [255, 0, 0],     // RED
+        1 => [0, 255, 0],     // GREEN
+        2 => [0, 0, 255],     // BLUE
+        3 => [255, 255, 0],   // YELLOW
+        4 => [255, 0, 255],   // MAGENTA
+        5 => [0, 255, 255],   // CYAN
         6 => [255, 255, 255], // WHITE
-        _ => [255, 128, 0],  // ORANGE
+        _ => [255, 128, 0],   // ORANGE
     }
 }
 

@@ -8,7 +8,9 @@ use std::sync::OnceLock;
 
 use tracing::info;
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{
+    EnvFilter, Registry, fmt, layer::SubscriberExt, reload, util::SubscriberInitExt,
+};
 
 use corsair_common::config::AppConfig;
 use corsair_fancontrol::control_loop;
@@ -16,9 +18,9 @@ use corsair_fancontrol::control_loop;
 use state::AppState;
 
 use tauri::{
+    Manager,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager,
 };
 
 /// Retention: keep the most recent N daily log files. Older files are pruned
@@ -29,6 +31,8 @@ const LOG_RETENTION_DAYS: usize = 14;
 /// otherwise the background flushing thread is dropped and queued log lines
 /// are silently lost. Stored in a OnceLock so it's never dropped until exit.
 static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
+static LOG_FILTER: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
+static LOG_FILTER_FROM_ENV: OnceLock<bool> = OnceLock::new();
 
 pub fn run() {
     init_tracing();
@@ -46,25 +50,21 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            let config = load_config_or_default();
-            let hw_sender = hardware_thread::spawn(config, app.handle().clone());
-            app.manage(AppState { hw_sender });
+            let (config, startup_config_error) = load_config_or_default();
+            reload_log_level(&config.general.log_level);
+            let (hw_sender, hw_join) = hardware_thread::spawn(config, app.handle().clone());
+            app.manage(AppState::new(hw_sender, hw_join, startup_config_error));
 
             // --- System tray ---
-            let silent =
-                MenuItem::with_id(app, "silent", "Silent", true, None::<&str>)?;
-            let balanced =
-                MenuItem::with_id(app, "balanced", "Balanced", true, None::<&str>)?;
+            let silent = MenuItem::with_id(app, "silent", "Silent", true, None::<&str>)?;
+            let balanced = MenuItem::with_id(app, "balanced", "Balanced", true, None::<&str>)?;
             let performance =
                 MenuItem::with_id(app, "performance", "Performance", true, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;
-            let open =
-                MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)?;
+            let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(
-                app,
-                &[&silent, &balanced, &performance, &sep, &open, &quit],
-            )?;
+            let menu =
+                Menu::with_items(app, &[&silent, &balanced, &performance, &sep, &open, &quit])?;
 
             TrayIconBuilder::new()
                 .tooltip("Corsair Hub")
@@ -76,14 +76,12 @@ pub fn run() {
                         "silent" | "balanced" | "performance" => {
                             let state = app.state::<AppState>();
                             let (tx, _rx) = tokio::sync::oneshot::channel();
-                            let _ = state.hw_sender.send(
-                                crate::state::HwCommand::ApplyPreset {
-                                    preset: id.to_string(),
-                                    // Tray quick-switch is always global.
-                                    group_name: None,
-                                    reply: tx,
-                                },
-                            );
+                            let _ = state.hw_sender.send(crate::state::HwCommand::ApplyPreset {
+                                preset: id.to_string(),
+                                // Tray quick-switch is always global.
+                                group_name: None,
+                                reply: tx,
+                            });
                             info!("Tray preset applied: {}", id);
                         }
                         "open" => {
@@ -94,10 +92,25 @@ pub fn run() {
                             }
                         }
                         "quit" => {
-                            let state = app.state::<AppState>();
-                            let _ =
-                                state.hw_sender.send(crate::state::HwCommand::Shutdown);
-                            app.exit(0);
+                            let shutdown = app.state::<AppState>().shutdown_handle();
+                            let exit_app = app.clone();
+                            if std::thread::Builder::new()
+                                .name("tray-shutdown".to_string())
+                                .spawn(move || {
+                                    let exit_code = match shutdown.shutdown_and_join() {
+                                        Ok(()) => 0,
+                                        Err(error) => {
+                                            tracing::error!(%error, "Hardware shutdown failed");
+                                            1
+                                        }
+                                    };
+                                    exit_app.exit(exit_code);
+                                })
+                                .is_err()
+                            {
+                                tracing::error!("Could not start hardware shutdown worker");
+                                app.exit(1);
+                            }
                         }
                         _ => {}
                     }
@@ -108,12 +121,11 @@ pub fn run() {
                         button_state: MouseButtonState::Up,
                         ..
                     } = event
+                        && let Some(w) = tray.app_handle().get_webview_window("main")
                     {
-                        if let Some(w) = tray.app_handle().get_webview_window("main") {
-                            let _ = w.unminimize();
-                            let _ = w.show();
-                            let _ = w.set_focus();
-                        }
+                        let _ = w.unminimize();
+                        let _ = w.show();
+                        let _ = w.set_focus();
                     }
                 })
                 .build(app)?;
@@ -144,6 +156,8 @@ pub fn run() {
             commands::set_rgb_config,
             commands::set_rgb_enabled,
             commands::rgb_identify_channels,
+            commands::prepare_for_relaunch,
+            commands::relaunch_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -189,13 +203,16 @@ fn init_tracing() {
     let log_dir = log_dir_path();
     let dir_ready = std::fs::create_dir_all(&log_dir).is_ok();
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+    let env_filter = EnvFilter::try_from_default_env();
+    let from_env = env_filter.is_ok();
+    let filter = env_filter.unwrap_or_else(|_| {
         EnvFilter::new("corsair=info,corsair_hub_gui=info,corsair_fancontrol=info,corsair_hid=info")
     });
+    let (filter_layer, filter_handle) = reload::Layer::new(filter);
+    let _ = LOG_FILTER.set(filter_handle);
+    let _ = LOG_FILTER_FROM_ENV.set(from_env);
 
-    let stderr_layer = fmt::layer()
-        .with_writer(std::io::stderr)
-        .with_ansi(false);
+    let stderr_layer = fmt::layer().with_writer(std::io::stderr).with_ansi(false);
 
     if dir_ready {
         let file_appender = tracing_appender::rolling::daily(&log_dir, "corsair-hub.log");
@@ -209,7 +226,7 @@ fn init_tracing() {
             .with_target(true);
 
         tracing_subscriber::registry()
-            .with(filter)
+            .with(filter_layer)
             .with(stderr_layer)
             .with(file_layer)
             .init();
@@ -218,13 +235,28 @@ fn init_tracing() {
         prune_old_logs(&log_dir, LOG_RETENTION_DAYS);
     } else {
         tracing_subscriber::registry()
-            .with(filter)
+            .with(filter_layer)
             .with(stderr_layer)
             .init();
         tracing::warn!(
             log_dir = %log_dir.display(),
             "Could not create log directory — falling back to stderr only"
         );
+    }
+}
+
+pub(crate) fn reload_log_level(level: &str) {
+    if LOG_FILTER_FROM_ENV.get().copied().unwrap_or(false) {
+        return;
+    }
+    let Some(handle) = LOG_FILTER.get() else {
+        return;
+    };
+    let filter = EnvFilter::new(format!(
+        "corsair={level},corsair_hub_gui={level},corsair_fancontrol={level},corsair_hid={level}"
+    ));
+    if let Err(error) = handle.reload(filter) {
+        tracing::warn!(%error, "Failed to reload log filter");
     }
 }
 
@@ -270,7 +302,7 @@ fn prune_old_logs(dir: &std::path::Path, keep: usize) {
     }
 }
 
-fn load_config_or_default() -> AppConfig {
+fn load_config_or_default() -> (AppConfig, Option<String>) {
     let path = config_path();
 
     // Also try legacy location (cwd/config.toml) for migration
@@ -278,20 +310,31 @@ fn load_config_or_default() -> AppConfig {
         .unwrap_or_default()
         .join("config.toml");
 
-    for p in [&path, &legacy_path] {
-        if p.exists() {
-            match control_loop::load_config(p) {
-                Ok(config) => {
-                    info!("Loaded config from {}", p.display());
-                    return config;
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to load config from {}: {}", p.display(), e);
-                }
+    let selected = if path.exists() {
+        Some(path.as_path())
+    } else if legacy_path.exists() {
+        Some(legacy_path.as_path())
+    } else {
+        None
+    };
+    if let Some(config_path) = selected {
+        return match control_loop::load_config(config_path) {
+            Ok(config) => {
+                info!("Loaded config from {}", config_path.display());
+                (config, None)
             }
-        }
+            Err(error) => {
+                let message = format!(
+                    "Failed to load configuration from {}: {}. The file was not modified.",
+                    config_path.display(),
+                    error
+                );
+                tracing::error!("{}", message);
+                (AppConfig::default(), Some(message))
+            }
+        };
     }
 
     info!("Using default config");
-    AppConfig::default()
+    (AppConfig::default(), None)
 }

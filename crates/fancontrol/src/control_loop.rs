@@ -1,20 +1,25 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use tracing::{error, info, warn};
 
-use corsair_common::config::{AppConfig, FanGroupConfig, FanMode, TempSourceConfig};
-use corsair_common::identity::{DeviceEnumEntry, DeviceRegistry};
 use corsair_common::CorsairDevice;
-use corsair_hid::{DeviceScanner, FanSpeed, HubInfo, IcueLinkHub, IcueLinkTransport, LinkDeviceType};
+use corsair_common::config::{
+    AppConfig, EffectConfig, FanGroupConfig, FanMode, RgbConfig, RgbZoneConfig, TempSourceConfig,
+};
+use corsair_common::identity::{DeviceEnumEntry, DeviceRegistry};
+use corsair_hid::{
+    DeviceScanner, FanSpeed, HubInfo, IcueLinkHub, IcueLinkTransport, LinkDeviceType,
+    TemperatureReading,
+};
+use corsair_sensors::TemperatureSource;
 use corsair_sensors::cpu::CpuSensor;
 use corsair_sensors::gpu::GpuSensor;
 use corsair_sensors::psu::{PsuReading, PsuSensor};
-use corsair_sensors::TemperatureSource;
 
 use crate::acoustic::AcousticFilter;
 use crate::curve::FanCurve;
@@ -24,6 +29,8 @@ const FAILSAFE_DUTY: f64 = 70.0;
 const EMERGENCY_DUTY: f64 = 100.0;
 const CRITICAL_CPU_TEMP: f64 = 95.0;
 const CRITICAL_GPU_TEMP: f64 = 90.0;
+const CRITICAL_COOLANT_TEMP: f64 = 55.0;
+const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// B3: sensor reading is considered stale after this duration of no success.
 /// Tightened from 10s to 5s so the failsafe path engages sooner when LHM or
 /// NVML stop producing readings (prevents the controller from running on
@@ -84,6 +91,7 @@ pub struct ControlLoop {
     sensors: HashMap<String, Box<dyn TemperatureSource>>,
     sensor_state: HashMap<String, SensorState>,
     hubs: HashMap<String, HubConnection>,
+    missing_hubs: HashMap<String, HubRecoveryState>,
     groups: Vec<FanGroup>,
     /// Current device_id ↔ (hub_serial, channel) index. Rebuilt at every
     /// hub init and every successful hub recovery. Used by the dual-key
@@ -101,8 +109,11 @@ pub struct ControlLoop {
     /// if it disappears again later.
     logged_orphan_rgb_ids: HashSet<String>,
     shutdown: Arc<AtomicBool>,
+    hardware_shutdown: bool,
+    hardware_shutdown_error: Option<String>,
 }
 
+#[derive(Clone)]
 struct SensorState {
     last_value: f64,
     last_success: Instant,
@@ -124,8 +135,33 @@ struct HubConnection {
     /// Reset to 0 when `set_speeds` succeeds.
     recovery_attempts: u32,
     pump_channels: Vec<u8>,
+    temperature_sensors: HashMap<u8, String>,
     info: HubInfo,
+    base_led_counts: HashMap<u8, u16>,
     color_logged: bool,
+}
+
+struct HubRecoveryState {
+    last_attempt: Instant,
+    attempts: u32,
+}
+
+impl HubRecoveryState {
+    fn new() -> Self {
+        Self {
+            last_attempt: Instant::now(),
+            attempts: 0,
+        }
+    }
+
+    fn is_due(&self) -> bool {
+        self.attempts == 0 || self.last_attempt.elapsed() >= recovery_backoff(self.attempts)
+    }
+
+    fn mark_attempted(&mut self) {
+        self.last_attempt = Instant::now();
+        self.attempts = self.attempts.saturating_add(1);
+    }
 }
 
 struct FanGroup {
@@ -168,6 +204,7 @@ impl ControlLoop {
     ) -> Result<Self> {
         let mut sensors: HashMap<String, Box<dyn TemperatureSource>> = HashMap::new();
         let mut hubs: HashMap<String, HubConnection> = HashMap::new();
+        let mut missing_hubs: HashMap<String, HubRecoveryState> = HashMap::new();
 
         let mut needed_serials = std::collections::HashSet::new();
 
@@ -180,6 +217,7 @@ impl ControlLoop {
                 needed_serials.insert(serial.clone());
             }
         }
+        needed_serials.extend(configured_v1_hub_serials(&config));
         if config.is_v2() {
             // V2: enumerate all iCUE LINK hubs on the bus so the registry
             // can resolve any device_id the config references.
@@ -303,18 +341,37 @@ impl ControlLoop {
 
         // Discover and initialize hubs
         for serial in &needed_serials {
-            let hid_device = scanner
-                .open_device(
-                    CorsairDevice::IcueLinkHub.pid(),
-                    serial,
-                    IcueLinkHub::data_interface(),
-                )
-                .with_context(|| format!("Hub serial '{}' not found on USB bus", serial))?;
+            let hid_device = match scanner.open_device(
+                CorsairDevice::IcueLinkHub.pid(),
+                serial,
+                IcueLinkHub::data_interface(),
+            ) {
+                Ok(device) => device,
+                Err(error) => {
+                    warn!(
+                        serial = serial.as_str(),
+                        %error,
+                        "Configured hub is unavailable; control will stay active and retry"
+                    );
+                    missing_hubs.insert(serial.clone(), HubRecoveryState::new());
+                    continue;
+                }
+            };
 
             let hub = IcueLinkHub::new(hid_device, serial.clone());
-            let mut hub_info = hub
-                .initialize()
-                .with_context(|| format!("Failed to initialize hub '{}'", serial))?;
+            let mut hub_info = match hub.initialize() {
+                Ok(info) => info,
+                Err(error) => {
+                    warn!(
+                        serial = serial.as_str(),
+                        %error,
+                        "Configured hub initialization failed; control will stay active and retry"
+                    );
+                    missing_hubs.insert(serial.clone(), HubRecoveryState::new());
+                    continue;
+                }
+            };
+            let base_led_counts = hub_info.led_counts.clone();
 
             // Apply user-configured device overrides. These take precedence over
             // both the hub's 0x1d LED-count table and the device-type defaults,
@@ -345,6 +402,17 @@ impl ControlLoop {
                 .filter(|d| d.device_type.is_pump())
                 .map(|d| d.channel)
                 .collect();
+            let temperature_sensors = match hub.get_temperatures() {
+                Ok(readings) => temperature_sensor_map(serial, &hub_info, &readings),
+                Err(error) => {
+                    warn!(
+                        serial = serial.as_str(),
+                        %error,
+                        "Initial iCUE LINK temperature discovery failed; will retry while polling"
+                    );
+                    HashMap::new()
+                }
+            };
 
             info!(
                 serial = serial.as_str(),
@@ -381,7 +449,9 @@ impl ControlLoop {
                     last_recovery_attempt: Instant::now(),
                     recovery_attempts: 0,
                     pump_channels,
+                    temperature_sensors,
                     info: hub_info,
+                    base_led_counts,
                     color_logged: false,
                 },
             );
@@ -423,9 +493,17 @@ impl ControlLoop {
         // Build fan groups. Each group carries both (channels, hub_serial)
         // for the V1 path and `device_ids` for the V2 path; the cycle code
         // picks whichever is non-empty.
+        let mut available_sensor_names: HashSet<String> = sensors.keys().cloned().collect();
+        available_sensor_names.extend(
+            hubs.values()
+                .flat_map(|connection| connection.temperature_sensors.values().cloned()),
+        );
+        if water_inline_source(&hubs).is_some() {
+            available_sensor_names.insert("water_inline".to_string());
+        }
         let mut groups = Vec::new();
         for group_cfg in &config.fan_groups {
-            let group = build_fan_group(group_cfg, &sensors)?;
+            let group = build_fan_group(group_cfg, &available_sensor_names)?;
             groups.push(group);
         }
 
@@ -433,7 +511,7 @@ impl ControlLoop {
             warn!("No fan groups configured — control loop will run idle");
         }
 
-        let sensor_state = sensors
+        let mut sensor_state: HashMap<String, SensorState> = sensors
             .keys()
             .map(|k| {
                 (
@@ -446,23 +524,32 @@ impl ControlLoop {
                 )
             })
             .collect();
+        register_hub_temperature_states(&hubs, &mut sensor_state);
 
         Ok(Self {
             config,
             sensors,
             sensor_state,
             hubs,
+            missing_hubs,
             groups,
             registry,
             logged_orphan_rgb_ids: HashSet::new(),
             shutdown,
+            hardware_shutdown: false,
+            hardware_shutdown_error: None,
         })
     }
 
     /// Execute one control cycle: poll sensors -> compute -> send to hubs.
     /// Returns a CycleResult for the frontend/logging.
     pub fn tick(&mut self) -> CycleResult {
-        let dt_secs = self.config.general.poll_interval_ms as f64 / 1000.0;
+        self.tick_with_elapsed(Duration::from_millis(self.config.general.poll_interval_ms))
+    }
+
+    /// Execute one control cycle using the actual elapsed wall-clock time.
+    pub fn tick_with_elapsed(&mut self, elapsed: Duration) -> CycleResult {
+        let dt_secs = elapsed.as_secs_f64().clamp(0.001, 30.0);
 
         // 1. Poll all sensors
         let readings = self.poll_sensors();
@@ -471,7 +558,12 @@ impl ControlLoop {
         let emergency = self.check_emergency(&readings);
 
         // 3. Check sensor staleness
-        let any_stale = self.sensor_state.values().any(|s| s.is_stale);
+        let group_stale: Vec<bool> = self
+            .groups
+            .iter()
+            .map(|group| group_has_stale_source(group, &self.sensor_state))
+            .collect();
+        let any_stale = group_stale.iter().any(|stale| *stale);
 
         // B3: reset PID integral on any-stale cycle so the controller doesn't
         // carry accumulated windup into the post-recovery cycles. Without this,
@@ -482,7 +574,10 @@ impl ControlLoop {
         // tick anyway — the PID output isn't used while stale, and on the
         // recovery tick we want to start from clean state.
         if any_stale {
-            for group in &mut self.groups {
+            for (group, source_stale) in self.groups.iter_mut().zip(&group_stale) {
+                if !source_stale {
+                    continue;
+                }
                 if let FanController::Pid { pid, .. } = &mut group.controller {
                     pid.reset_integral();
                 }
@@ -493,14 +588,14 @@ impl ControlLoop {
         let mut hub_commands: HashMap<String, Vec<(u8, u8)>> = HashMap::new();
         let mut group_duties = Vec::new();
 
-        for group in &mut self.groups {
+        for (group, source_stale) in self.groups.iter_mut().zip(group_stale) {
             let duty = if emergency {
                 // Emergency: bypass everything
                 if let Some(ref mut acoustic) = group.acoustic {
                     acoustic.override_duty(EMERGENCY_DUTY);
                 }
                 EMERGENCY_DUTY
-            } else if any_stale {
+            } else if source_stale {
                 // Sensor stale: failsafe
                 if let Some(ref mut acoustic) = group.acoustic {
                     acoustic.override_duty(FAILSAFE_DUTY);
@@ -563,9 +658,7 @@ impl ControlLoop {
                 let commands = hub_commands.entry(group.hub_serial.clone()).or_default();
                 let mut group_channels = Vec::new();
                 for &ch in &group.channels {
-                    let is_pump = pump_channels
-                        .map(|pcs| pcs.contains(&ch))
-                        .unwrap_or(false);
+                    let is_pump = pump_channels.map(|pcs| pcs.contains(&ch)).unwrap_or(false);
                     let min = if is_pump { MIN_PUMP_DUTY } else { MIN_FAN_DUTY };
                     let final_duty = duty.max(min).round().clamp(0.0, 100.0) as u8;
                     commands.push((ch, final_duty));
@@ -646,7 +739,7 @@ impl ControlLoop {
         }
 
         // 7. Build hub health reports
-        let hub_health: Vec<HubHealthReport> = self
+        let mut hub_health: Vec<HubHealthReport> = self
             .hubs
             .iter()
             .map(|(serial, conn)| HubHealthReport {
@@ -655,6 +748,16 @@ impl ControlLoop {
                 consecutive_failures: conn.consecutive_failures,
             })
             .collect();
+        hub_health.extend(
+            self.missing_hubs
+                .iter()
+                .map(|(serial, state)| HubHealthReport {
+                    serial: serial.clone(),
+                    healthy: false,
+                    consecutive_failures: state.attempts.saturating_add(1),
+                }),
+        );
+        hub_health.sort_by(|left, right| left.serial.cmp(&right.serial));
 
         CycleResult {
             readings,
@@ -682,15 +785,82 @@ impl ControlLoop {
 
     /// Names of sensors that are currently initialized and available.
     pub fn available_sensors(&self) -> Vec<String> {
-        self.sensors.keys().cloned().collect()
+        let mut names: Vec<String> = self.sensor_state.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Replace RGB-only state without rebuilding fan controllers.
+    pub fn update_rgb_config(&mut self, rgb: RgbConfig) {
+        self.config.rgb = rgb;
     }
 
     /// Replace config and rebuild fan groups (for live config reload).
     pub fn update_config(&mut self, config: AppConfig) -> Result<()> {
+        let mut newly_missing_hubs = HashSet::new();
+        let previously_referenced_sensors: HashSet<String> = self
+            .config
+            .fan_groups
+            .iter()
+            .flat_map(|group| match &group.mode {
+                FanMode::Fixed { .. } => Vec::new(),
+                FanMode::Curve { temp_source, .. } | FanMode::Pid { temp_source, .. } => {
+                    temp_source.sensors.clone()
+                }
+            })
+            .collect();
+        for group in &config.fan_groups {
+            if group.device_ids.is_empty() {
+                let serial = group
+                    .hub_serial
+                    .as_deref()
+                    .context("V1 fan group missing hub")?;
+                if !self.hubs.contains_key(serial) && !self.missing_hubs.contains_key(serial) {
+                    newly_missing_hubs.insert(serial.to_string());
+                }
+            }
+            let source = match &group.mode {
+                FanMode::Fixed { .. } => continue,
+                FanMode::Curve { temp_source, .. } | FanMode::Pid { temp_source, .. } => {
+                    temp_source
+                }
+            };
+            for sensor in &source.sensors {
+                if !self.sensor_state.contains_key(sensor)
+                    && !previously_referenced_sensors.contains(sensor)
+                {
+                    bail!(
+                        "Fan group '{}' adds unavailable sensor '{}'",
+                        group.name,
+                        sensor
+                    );
+                }
+            }
+        }
+        if !config.is_v2() {
+            for serial in configured_v1_hub_serials(&config) {
+                if !self.hubs.contains_key(&serial) && !self.missing_hubs.contains_key(&serial) {
+                    newly_missing_hubs.insert(serial);
+                }
+            }
+        }
         let mut groups = Vec::new();
+        let available_sensor_names: HashSet<String> = self.sensor_state.keys().cloned().collect();
         for group_cfg in &config.fan_groups {
-            let group = build_fan_group(group_cfg, &self.sensors)?;
+            let group = build_fan_group(group_cfg, &available_sensor_names)?;
             groups.push(group);
+        }
+        if config.is_v2() {
+            self.missing_hubs.clear();
+        } else {
+            let configured_serials = configured_v1_hub_serials(&config);
+            self.missing_hubs
+                .retain(|serial, _| configured_serials.contains(serial));
+            for serial in newly_missing_hubs {
+                self.missing_hubs
+                    .entry(serial)
+                    .or_insert_with(HubRecoveryState::new);
+            }
         }
         // Re-apply V2 per-device led_count overrides. A V1→V2 migration or a
         // preset swap may have changed them. Restore the base hub
@@ -699,6 +869,14 @@ impl ControlLoop {
         // refresh — the user-visible led_counts in HubConnection.info
         // already reflect the prior overrides, and we simply lay the new
         // ones on top.
+        for hub in self.hubs.values_mut() {
+            hub.info.led_counts = hub.base_led_counts.clone();
+        }
+        for entry in &config.device_overrides {
+            if let Some(hub) = self.hubs.get_mut(&entry.hub_serial) {
+                hub.info.led_counts.insert(entry.channel, entry.led_count);
+            }
+        }
         for entry in &config.devices {
             if let Some(override_leds) = entry.led_count
                 && let Some(loc) = self.registry.resolve(&entry.device_id)
@@ -740,10 +918,7 @@ impl ControlLoop {
         let mut map = HashMap::new();
         for (serial, hub_conn) in &self.hubs {
             for dev in &hub_conn.info.devices {
-                map.insert(
-                    (serial.clone(), dev.channel),
-                    dev.device_id.clone(),
-                );
+                map.insert((serial.clone(), dev.channel), dev.device_id.clone());
             }
         }
         map
@@ -774,11 +949,48 @@ impl ControlLoop {
 
     /// Set manual duty on a specific hub using its existing initialized handle.
     pub fn set_manual_duty(&self, hub_serial: &str, channels: &[u8], duty: u8) -> Result<()> {
+        if duty > 100 {
+            bail!("Manual duty must be 0..100, got {}", duty);
+        }
+        if channels.is_empty() {
+            bail!("Manual duty requires at least one channel");
+        }
         let hub_conn = self
             .hubs
             .get(hub_serial)
             .with_context(|| format!("Hub '{}' not managed by control loop", hub_serial))?;
-        let targets: Vec<(u8, u8)> = channels.iter().map(|&ch| (ch, duty)).collect();
+        let mut seen = HashSet::new();
+        let mut targets = Vec::with_capacity(channels.len());
+        for &channel in channels {
+            if !seen.insert(channel) {
+                bail!("Manual duty contains duplicate channel {}", channel);
+            }
+            let device = hub_conn
+                .info
+                .devices
+                .iter()
+                .find(|device| device.channel == channel)
+                .with_context(|| {
+                    format!(
+                        "Channel {} is not an enumerated device on hub '{}'",
+                        channel, hub_serial
+                    )
+                })?;
+            if !device.device_type.is_speed_controllable() {
+                bail!(
+                    "Channel {} on hub '{}' is a {} and cannot accept a duty command",
+                    channel,
+                    hub_serial,
+                    device.device_type.name()
+                );
+            }
+            let floor = if device.device_type.is_pump() {
+                MIN_PUMP_DUTY as u8
+            } else {
+                MIN_FAN_DUTY as u8
+            };
+            targets.push((channel, duty.max(floor)));
+        }
         hub_conn.hub.set_speeds(&targets)?;
         Ok(())
     }
@@ -794,7 +1006,8 @@ impl ControlLoop {
     ///   - At least one attempt has been made AND enough time has elapsed
     ///     per the exponential backoff curve (10s, 20s, 40s, 80s, 120s cap).
     pub fn hubs_needing_recovery(&self) -> Vec<String> {
-        self.hubs
+        let mut serials: Vec<String> = self
+            .hubs
             .iter()
             .filter(|(_, conn)| {
                 if conn.healthy {
@@ -806,34 +1019,123 @@ impl ControlLoop {
                 conn.last_recovery_attempt.elapsed() >= recovery_backoff(conn.recovery_attempts)
             })
             .map(|(serial, _)| serial.clone())
-            .collect()
+            .collect();
+        serials.extend(
+            self.missing_hubs
+                .iter()
+                .filter(|(_, state)| state.is_due())
+                .map(|(serial, _)| serial.clone()),
+        );
+        serials.sort();
+        serials.dedup();
+        serials
+    }
+
+    /// Whether a currently enumerated hub should be attached to this loop.
+    /// V2 configs use stable device IDs and therefore attach every LINK hub;
+    /// V1 configs only attach explicitly configured serials.
+    pub fn should_attach_hub(&self, serial: &str) -> bool {
+        self.config.is_v2()
+            || self.hubs.contains_key(serial)
+            || self.missing_hubs.contains_key(serial)
+    }
+
+    pub fn has_connected_hub(&self, serial: &str) -> bool {
+        self.hubs.contains_key(serial)
     }
 
     /// Swap in a freshly initialized hub after successful recovery.
-    pub fn replace_hub(&mut self, serial: &str, new_hub: IcueLinkHub, new_info: HubInfo) {
-        if let Some(conn) = self.hubs.get_mut(serial) {
-            let pump_channels: Vec<u8> = new_info
-                .devices
-                .iter()
-                .filter(|d| d.device_type.is_pump())
-                .map(|d| d.channel)
-                .collect();
+    pub fn replace_hub(&mut self, serial: &str, new_hub: IcueLinkHub, mut new_info: HubInfo) {
+        let initial_temperatures = match new_hub.get_temperatures() {
+            Ok(readings) => readings,
+            Err(error) => {
+                warn!(
+                    serial,
+                    %error,
+                    "Temperature discovery failed on recovered hub; polling will retry"
+                );
+                Vec::new()
+            }
+        };
+        self.attach_hub_transport(
+            serial,
+            Arc::new(new_hub),
+            &mut new_info,
+            &initial_temperatures,
+        );
+    }
 
-            conn.hub = Arc::new(new_hub);
-            conn.info = new_info;
+    fn attach_hub_transport(
+        &mut self,
+        serial: &str,
+        hub: Arc<dyn IcueLinkTransport>,
+        new_info: &mut HubInfo,
+        initial_temperatures: &[TemperatureReading],
+    ) {
+        let base_led_counts = new_info.led_counts.clone();
+        for entry in &self.config.device_overrides {
+            if entry.hub_serial == serial {
+                new_info.led_counts.insert(entry.channel, entry.led_count);
+            }
+        }
+        for entry in &self.config.devices {
+            if let Some(count) = entry.led_count
+                && let Some(device) = new_info
+                    .devices
+                    .iter()
+                    .find(|device| device.device_id == entry.device_id)
+            {
+                new_info.led_counts.insert(device.channel, count);
+            }
+        }
+        let pump_channels: Vec<u8> = new_info
+            .devices
+            .iter()
+            .filter(|d| d.device_type.is_pump())
+            .map(|d| d.channel)
+            .collect();
+        let temperature_sensors = temperature_sensor_map(serial, new_info, initial_temperatures);
+
+        if let Some(conn) = self.hubs.get_mut(serial) {
+            conn.hub = hub;
+            conn.info = new_info.clone();
+            conn.base_led_counts = base_led_counts;
             conn.healthy = true;
             conn.consecutive_failures = 0;
             conn.last_recovery_attempt = Instant::now();
             conn.recovery_attempts = 0;
             conn.pump_channels = pump_channels;
+            conn.temperature_sensors = temperature_sensors;
             conn.color_logged = false;
 
             info!(serial, "Hub handle replaced after recovery");
+        } else {
+            self.hubs.insert(
+                serial.to_string(),
+                HubConnection {
+                    hub,
+                    serial: serial.to_string(),
+                    healthy: true,
+                    consecutive_failures: 0,
+                    last_recovery_attempt: Instant::now(),
+                    recovery_attempts: 0,
+                    pump_channels,
+                    temperature_sensors,
+                    info: new_info.clone(),
+                    base_led_counts,
+                    color_logged: false,
+                },
+            );
+            info!(serial, "Previously unavailable hub attached");
         }
+        self.missing_hubs.remove(serial);
         // Registry may have shifted if channel assignments changed after
         // re-enumeration (fans added/removed/reordered on the chain).
         // Rebuild so subsequent cycles resolve device_ids correctly.
         self.registry = build_registry(&self.hubs);
+        self.sensor_state
+            .retain(|name, _| !name.starts_with("link_temp_") && name != "water_inline");
+        register_hub_temperature_states(&self.hubs, &mut self.sensor_state);
         // Drop the orphan warning dedupe so a device that disappears
         // again after a recovery cycle gets a fresh log entry — the
         // user deserves to know when a reconnected device later goes
@@ -849,6 +1151,8 @@ impl ControlLoop {
             // Saturating: u32::MAX attempts is never reached in practice but
             // the saturation keeps the backoff formula total.
             conn.recovery_attempts = conn.recovery_attempts.saturating_add(1);
+        } else if let Some(state) = self.missing_hubs.get_mut(serial) {
+            state.mark_attempted();
         }
     }
 
@@ -862,7 +1166,15 @@ impl ControlLoop {
     ///
     /// The hub handle is cloned into the worker thread — cheap because
     /// `IcueLinkHub` is `Arc<Mutex<_>>`-internal after the prep refactor.
-    pub fn shutdown_hardware(&mut self) {
+    pub fn shutdown_hardware(&mut self) -> Result<()> {
+        if self.hardware_shutdown {
+            return match &self.hardware_shutdown_error {
+                Some(error) => bail!(error.clone()),
+                None => Ok(()),
+            };
+        }
+        self.hardware_shutdown = true;
+        let mut failures = Vec::new();
         info!("Restoring hardware mode on all hubs");
         for (serial, hub_conn) in &mut self.hubs {
             let hub = Arc::clone(&hub_conn.hub);
@@ -886,6 +1198,9 @@ impl ControlLoop {
                         error = %e,
                         "Failed to spawn shutdown worker thread — skipping hub"
                     );
+                    failures.push(format!(
+                        "{serial_owned}: failed to spawn shutdown worker: {e}"
+                    ));
                     continue;
                 }
             };
@@ -904,6 +1219,7 @@ impl ControlLoop {
                         error = %e,
                         "enter_hardware_mode failed (hub may keep last software-mode duty)"
                     );
+                    failures.push(format!("{serial_owned}: {e}"));
                     let _ = handle.join();
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -912,6 +1228,10 @@ impl ControlLoop {
                         timeout_secs = SHUTDOWN_HARDWARE_MODE_TIMEOUT.as_secs(),
                         "enter_hardware_mode timed out — abandoning worker thread"
                     );
+                    failures.push(format!(
+                        "{serial_owned}: timed out after {}s",
+                        SHUTDOWN_HARDWARE_MODE_TIMEOUT.as_secs()
+                    ));
                     // Deliberately do NOT join: the worker is blocked on HID
                     // I/O and joining would reinstate the hang we just
                     // escaped from. The thread will finish when the I/O
@@ -923,9 +1243,17 @@ impl ControlLoop {
                         serial = serial_owned.as_str(),
                         "Shutdown worker thread panicked before sending result"
                     );
+                    failures.push(format!("{serial_owned}: shutdown worker disconnected"));
                     let _ = handle.join();
                 }
             }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            let error = format!("Failed to restore hardware mode: {}", failures.join("; "));
+            self.hardware_shutdown_error = Some(error.clone());
+            bail!(error)
         }
     }
 
@@ -958,6 +1286,7 @@ impl ControlLoop {
     ///   2. V1 (hub, channel) override: `config.led_count_override(hub, ch)`.
     ///   3. Hub firmware 0x1d table: `hub_info.led_counts`.
     ///   4. Device-type default: `dev.device_type.led_count()`.
+    ///
     /// V2 and V1 overrides are both pre-applied into `hub_info.led_counts`
     /// at build time, so in practice the 0x1d-table lookup already reflects
     /// them. The explicit checks here guard against timing windows where
@@ -980,7 +1309,8 @@ impl ControlLoop {
         // We store `(channel, device_id, leds)` keyed by hub so the
         // per-device LED-count lookup below has the device_id on hand for
         // the V2 override precedence check.
-        let mut by_hub: HashMap<String, BTreeMap<u8, (String, &[[u8; 3]])>> = HashMap::new();
+        type HubFrames<'a> = HashMap<String, BTreeMap<u8, (String, &'a [[u8; 3]])>>;
+        let mut by_hub: HubFrames<'_> = HashMap::new();
         let mut new_orphans: Vec<String> = Vec::new();
         for (device_id, leds) in frames {
             let Some(loc) = self.registry.resolve(device_id) else {
@@ -1084,7 +1414,8 @@ impl ControlLoop {
 
             if !hub_conn.color_logged {
                 let total_bytes: usize = refs.iter().map(|(_, leds)| leds.len() * 3).sum();
-                let channels: Vec<(u8, usize)> = refs.iter().map(|(ch, leds)| (*ch, leds.len())).collect();
+                let channels: Vec<(u8, usize)> =
+                    refs.iter().map(|(ch, leds)| (*ch, leds.len())).collect();
                 info!(
                     serial = serial.as_str(),
                     devices = refs.len(),
@@ -1130,14 +1461,12 @@ impl ControlLoop {
             // Sleep for remaining time
             let elapsed = cycle_start.elapsed();
             if elapsed < poll_interval {
-                std::thread::sleep(poll_interval - elapsed);
+                wait_for_shutdown(&self.shutdown, poll_interval - elapsed);
             }
         }
 
         // Shutdown: restore hardware mode on all hubs
-        self.shutdown_hardware();
-
-        Ok(())
+        self.shutdown_hardware()
     }
 
     fn poll_sensors(&mut self) -> HashMap<String, f64> {
@@ -1158,8 +1487,8 @@ impl ControlLoop {
                     if let Some(state) = self.sensor_state.get_mut(name) {
                         if state.last_success.elapsed() > SENSOR_STALE_TIMEOUT {
                             state.is_stale = true;
-                            warn!(sensor = name.as_str(), "Sensor data stale (>10s)");
-                        } else {
+                            warn!(sensor = name.as_str(), "Sensor data stale (>5s)");
+                        } else if !state.is_stale {
                             // Use last known good value
                             readings.insert(name.clone(), state.last_value);
                         }
@@ -1168,21 +1497,108 @@ impl ControlLoop {
             }
         }
 
+        self.poll_hub_temperatures(&mut readings);
+
         readings
     }
 
-    fn check_emergency(&self, readings: &HashMap<String, f64>) -> bool {
-        if let Some(&cpu) = readings.get("cpu") {
-            if cpu >= CRITICAL_CPU_TEMP {
-                error!(temp = cpu, threshold = CRITICAL_CPU_TEMP, "CPU CRITICAL — emergency override");
-                return true;
+    fn poll_hub_temperatures(&mut self, readings: &mut HashMap<String, f64>) {
+        for (serial, connection) in &mut self.hubs {
+            match connection.hub.get_temperatures() {
+                Ok(temperatures) => {
+                    let mut seen_channels = HashSet::new();
+                    for temperature in temperatures {
+                        if !temperature.temp_celsius.is_finite()
+                            || !(0.0..150.0).contains(&temperature.temp_celsius)
+                        {
+                            warn!(
+                                serial = serial.as_str(),
+                                channel = temperature.channel,
+                                value = temperature.temp_celsius,
+                                "Ignoring invalid iCUE LINK temperature"
+                            );
+                            continue;
+                        }
+                        seen_channels.insert(temperature.channel);
+                        let name = connection
+                            .temperature_sensors
+                            .entry(temperature.channel)
+                            .or_insert_with(|| {
+                                temperature_sensor_name(
+                                    serial,
+                                    &connection.info,
+                                    temperature.channel,
+                                )
+                            })
+                            .clone();
+                        record_sensor_success(
+                            &mut self.sensor_state,
+                            readings,
+                            &name,
+                            temperature.temp_celsius,
+                        );
+                    }
+                    for (channel, name) in &connection.temperature_sensors {
+                        if !seen_channels.contains(channel) {
+                            record_sensor_failure(&mut self.sensor_state, readings, name);
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        serial = serial.as_str(),
+                        %error,
+                        "iCUE LINK temperature read failed"
+                    );
+                    for name in connection.temperature_sensors.values() {
+                        record_sensor_failure(&mut self.sensor_state, readings, name);
+                    }
+                }
             }
         }
-        if let Some(&gpu) = readings.get("gpu") {
-            if gpu >= CRITICAL_GPU_TEMP {
-                error!(temp = gpu, threshold = CRITICAL_GPU_TEMP, "GPU CRITICAL — emergency override");
-                return true;
+
+        register_hub_temperature_states(&self.hubs, &mut self.sensor_state);
+        if let Some(source_name) = water_inline_source(&self.hubs)
+            && let Some(source_state) = self.sensor_state.get(&source_name).cloned()
+        {
+            self.sensor_state
+                .insert("water_inline".to_string(), source_state.clone());
+            if !source_state.is_stale {
+                readings.insert("water_inline".to_string(), source_state.last_value);
             }
+        }
+    }
+
+    fn check_emergency(&self, readings: &HashMap<String, f64>) -> bool {
+        if let Some(&cpu) = readings.get("cpu")
+            && cpu >= CRITICAL_CPU_TEMP
+        {
+            error!(
+                temp = cpu,
+                threshold = CRITICAL_CPU_TEMP,
+                "CPU CRITICAL — emergency override"
+            );
+            return true;
+        }
+        if let Some(&gpu) = readings.get("gpu")
+            && gpu >= CRITICAL_GPU_TEMP
+        {
+            error!(
+                temp = gpu,
+                threshold = CRITICAL_GPU_TEMP,
+                "GPU CRITICAL — emergency override"
+            );
+            return true;
+        }
+        if let Some(&coolant) = readings.get("water_inline")
+            && coolant >= CRITICAL_COOLANT_TEMP
+        {
+            error!(
+                temp = coolant,
+                threshold = CRITICAL_COOLANT_TEMP,
+                "Coolant temperature CRITICAL - emergency override"
+            );
+            return true;
         }
         false
     }
@@ -1217,11 +1633,7 @@ impl ControlLoop {
 }
 
 /// Compute the duty for a fan group in normal operation.
-fn compute_group_duty(
-    group: &mut FanGroup,
-    readings: &HashMap<String, f64>,
-    dt_secs: f64,
-) -> f64 {
+fn compute_group_duty(group: &mut FanGroup, readings: &HashMap<String, f64>, dt_secs: f64) -> f64 {
     match &mut group.controller {
         FanController::Fixed(duty) => *duty,
         FanController::Curve { curve, source } => {
@@ -1259,6 +1671,35 @@ fn apply_acoustic_filter(
     }
 }
 
+impl Drop for ControlLoop {
+    fn drop(&mut self) {
+        let _ = self.shutdown_hardware();
+    }
+}
+
+fn wait_for_shutdown(shutdown: &AtomicBool, duration: Duration) {
+    let deadline = Instant::now() + duration;
+    while !shutdown.load(Ordering::Relaxed) {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        std::thread::sleep((deadline - now).min(SHUTDOWN_POLL_INTERVAL));
+    }
+}
+
+fn group_has_stale_source(group: &FanGroup, states: &HashMap<String, SensorState>) -> bool {
+    let source = match &group.controller {
+        FanController::Fixed(_) => return false,
+        FanController::Curve { source, .. } | FanController::Pid { source, .. } => source,
+    };
+
+    source
+        .sensors
+        .iter()
+        .any(|name| states.get(name).map(|state| state.is_stale).unwrap_or(true))
+}
+
 /// Weighted average of sensor readings.
 pub fn compute_weighted_temp(
     source: &TempSourceConfig,
@@ -1282,10 +1723,7 @@ pub fn compute_weighted_temp(
     }
 }
 
-fn build_fan_group(
-    cfg: &FanGroupConfig,
-    sensors: &HashMap<String, Box<dyn TemperatureSource>>,
-) -> Result<FanGroup> {
+fn build_fan_group(cfg: &FanGroupConfig, available_sensors: &HashSet<String>) -> Result<FanGroup> {
     // V2 groups don't carry hub_serial on the config. For those we fall
     // back to an empty string — the control-loop bucketing sees
     // `device_ids` non-empty first and takes the registry path, never
@@ -1309,7 +1747,7 @@ fn build_fan_group(
         } => {
             // Warn about missing sensors but continue — will use failsafe duty
             for s in &temp_source.sensors {
-                if !sensors.contains_key(s) {
+                if !available_sensors.contains(s) {
                     warn!(
                         "Fan group '{}' references unavailable sensor '{}' — will use failsafe duty until sensor comes online",
                         cfg.name, s
@@ -1341,7 +1779,7 @@ fn build_fan_group(
             temp_source,
         } => {
             for s in &temp_source.sensors {
-                if !sensors.contains_key(s) {
+                if !available_sensors.contains(s) {
                     warn!(
                         "Fan group '{}' references unavailable sensor '{}' — will use failsafe duty until sensor comes online",
                         cfg.name, s
@@ -1370,6 +1808,132 @@ fn build_fan_group(
         acoustic,
         last_duty: 0.0,
     })
+}
+
+fn configured_v1_hub_serials(config: &AppConfig) -> HashSet<String> {
+    if config.is_v2() {
+        return HashSet::new();
+    }
+    config
+        .fan_groups
+        .iter()
+        .filter_map(|group| group.hub_serial.clone())
+        .chain(
+            config
+                .rgb
+                .zones
+                .iter()
+                .flat_map(|zone| zone.devices.iter())
+                .map(|device| device.hub_serial.clone()),
+        )
+        .chain(
+            config
+                .device_overrides
+                .iter()
+                .map(|entry| entry.hub_serial.clone()),
+        )
+        .filter(|serial| !serial.is_empty())
+        .collect()
+}
+
+fn temperature_sensor_name(serial: &str, info: &HubInfo, channel: u8) -> String {
+    info.devices
+        .iter()
+        .find(|device| device.channel == channel)
+        .filter(|device| !device.device_id.is_empty())
+        .map(|device| format!("link_temp_{}", device.device_id))
+        .unwrap_or_else(|| format!("link_temp_{serial}_ch{channel}"))
+}
+
+fn temperature_sensor_map(
+    serial: &str,
+    info: &HubInfo,
+    readings: &[TemperatureReading],
+) -> HashMap<u8, String> {
+    readings
+        .iter()
+        .map(|reading| {
+            (
+                reading.channel,
+                temperature_sensor_name(serial, info, reading.channel),
+            )
+        })
+        .collect()
+}
+
+fn water_inline_source(hubs: &HashMap<String, HubConnection>) -> Option<String> {
+    hubs.values()
+        .flat_map(|connection| {
+            connection
+                .temperature_sensors
+                .iter()
+                .filter_map(|(channel, name)| {
+                    connection
+                        .info
+                        .devices
+                        .iter()
+                        .find(|device| device.channel == *channel)
+                        .filter(|device| device.device_type.is_pump())
+                        .map(|_| name.clone())
+                })
+        })
+        .min()
+}
+
+fn register_hub_temperature_states(
+    hubs: &HashMap<String, HubConnection>,
+    sensor_state: &mut HashMap<String, SensorState>,
+) {
+    for name in hubs
+        .values()
+        .flat_map(|connection| connection.temperature_sensors.values())
+    {
+        sensor_state.entry(name.clone()).or_insert(SensorState {
+            last_value: 0.0,
+            last_success: Instant::now(),
+            is_stale: true,
+        });
+    }
+    if water_inline_source(hubs).is_some() {
+        sensor_state
+            .entry("water_inline".to_string())
+            .or_insert(SensorState {
+                last_value: 0.0,
+                last_success: Instant::now(),
+                is_stale: true,
+            });
+    }
+}
+
+fn record_sensor_success(
+    sensor_state: &mut HashMap<String, SensorState>,
+    readings: &mut HashMap<String, f64>,
+    name: &str,
+    value: f64,
+) {
+    readings.insert(name.to_string(), value);
+    sensor_state.insert(
+        name.to_string(),
+        SensorState {
+            last_value: value,
+            last_success: Instant::now(),
+            is_stale: false,
+        },
+    );
+}
+
+fn record_sensor_failure(
+    sensor_state: &mut HashMap<String, SensorState>,
+    readings: &mut HashMap<String, f64>,
+    name: &str,
+) {
+    if let Some(state) = sensor_state.get_mut(name) {
+        if state.last_success.elapsed() > SENSOR_STALE_TIMEOUT {
+            state.is_stale = true;
+        } else if !state.is_stale {
+            readings.insert(name.to_string(), state.last_value);
+        }
+    }
 }
 
 /// Build the identity registry from current hub state. Called at every
@@ -1410,15 +1974,17 @@ fn build_registry(hubs: &HashMap<String, HubConnection>) -> DeviceRegistry {
         })
         .collect();
 
-    DeviceRegistry::rebuild(entries.iter().map(|(serial, id, channel, type_byte, leds)| {
-        DeviceEnumEntry {
-            hub_serial: serial.as_str(),
-            device_id: id.as_str(),
-            channel: *channel,
-            device_type_byte: *type_byte,
-            led_count: *leds,
-        }
-    }))
+    DeviceRegistry::rebuild(
+        entries
+            .iter()
+            .map(|(serial, id, channel, type_byte, leds)| DeviceEnumEntry {
+                hub_serial: serial.as_str(),
+                device_id: id.as_str(),
+                channel: *channel,
+                device_type_byte: *type_byte,
+                led_count: *leds,
+            }),
+    )
 }
 
 /// Round-trip a `LinkDeviceType` back to its protocol byte. Kept local to
@@ -1476,14 +2042,16 @@ fn chrono_time() -> String {
 pub fn load_config(path: &Path) -> Result<AppConfig> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("Cannot read config: {}", path.display()))?;
-    let config: AppConfig =
-        toml::from_str(&contents).context("Invalid TOML config")?;
+    let config: AppConfig = toml::from_str(&contents).context("Invalid TOML config")?;
     validate_config(&config)?;
     Ok(config)
 }
 
 /// Validate config constraints.
 pub fn validate_config(config: &AppConfig) -> Result<()> {
+    if !matches!(config.schema_version, 1 | 2) {
+        bail!("Unsupported schema_version {}", config.schema_version);
+    }
     // Poll interval bounds
     if config.general.poll_interval_ms < 100 || config.general.poll_interval_ms > 10000 {
         bail!(
@@ -1491,10 +2059,29 @@ pub fn validate_config(config: &AppConfig) -> Result<()> {
             config.general.poll_interval_ms
         );
     }
+    if !matches!(
+        config.general.log_level.to_ascii_lowercase().as_str(),
+        "trace" | "debug" | "info" | "warn" | "error"
+    ) {
+        bail!("log_level must be trace, debug, info, warn, or error");
+    }
+    if config
+        .general
+        .lhm_exe_path
+        .as_deref()
+        .is_some_and(|path| path.trim().is_empty())
+    {
+        bail!("lhm_exe_path cannot be empty");
+    }
 
     let mut group_names = std::collections::HashSet::new();
+    let mut assigned_v1_channels = HashSet::new();
+    let mut assigned_device_ids = HashSet::new();
 
     for group in &config.fan_groups {
+        if group.name.trim().is_empty() {
+            bail!("Fan group name cannot be empty");
+        }
         // No duplicate group names
         if !group_names.insert(&group.name) {
             bail!("Duplicate fan group name: '{}'", group.name);
@@ -1504,8 +2091,29 @@ pub fn validate_config(config: &AppConfig) -> Result<()> {
         // V2: must have at least one device_id; hub_serial / channels are
         // optional (and expected empty post-migration).
         let has_v2_ids = !group.device_ids.is_empty();
-        if !has_v2_ids {
-            if group.hub_serial.is_none() {
+        if has_v2_ids {
+            let mut local_ids = HashSet::new();
+            for device_id in &group.device_ids {
+                if device_id.trim().is_empty() {
+                    bail!("Fan group '{}': device_id cannot be empty", group.name);
+                }
+                if !local_ids.insert(device_id) {
+                    bail!(
+                        "Fan group '{}': duplicate device_id '{}'",
+                        group.name,
+                        device_id
+                    );
+                }
+                if !assigned_device_ids.insert(device_id) {
+                    bail!("Device '{}' is assigned to multiple fan groups", device_id);
+                }
+            }
+        } else {
+            if group
+                .hub_serial
+                .as_deref()
+                .is_none_or(|serial| serial.trim().is_empty())
+            {
                 bail!(
                     "Fan group '{}' missing hub_serial (and no device_ids)",
                     group.name
@@ -1517,23 +2125,45 @@ pub fn validate_config(config: &AppConfig) -> Result<()> {
                     group.name
                 );
             }
+            let serial = group.hub_serial.as_deref().expect("validated above");
+            let mut local_channels = HashSet::new();
+            for channel in &group.channels {
+                if !(1..=20).contains(channel) {
+                    bail!(
+                        "Fan group '{}': channel {} must be 1..20",
+                        group.name,
+                        channel
+                    );
+                }
+                if !local_channels.insert(*channel) {
+                    bail!("Fan group '{}': duplicate channel {}", group.name, channel);
+                }
+                if !assigned_v1_channels.insert((serial, *channel)) {
+                    bail!(
+                        "Hub '{}' channel {} is assigned to multiple fan groups",
+                        serial,
+                        channel
+                    );
+                }
+            }
         }
 
         // Mode-specific validation
         match &group.mode {
             FanMode::Fixed { duty_percent } => {
-                if *duty_percent < 0.0 || *duty_percent > 100.0 {
-                    bail!(
-                        "Fan group '{}': duty_percent must be 0..100, got {}",
-                        group.name,
-                        duty_percent
-                    );
-                }
+                validate_f64_range(
+                    *duty_percent,
+                    0.0,
+                    100.0,
+                    &format!("Fan group '{}': duty_percent", group.name),
+                )?;
             }
             FanMode::Curve {
                 points,
+                hysteresis,
+                ramp_rate,
+                ramp_down_rate,
                 temp_source,
-                ..
             } => {
                 if points.len() < 2 {
                     bail!(
@@ -1542,14 +2172,39 @@ pub fn validate_config(config: &AppConfig) -> Result<()> {
                         points.len()
                     );
                 }
+                validate_f64_range(
+                    *hysteresis,
+                    0.0,
+                    50.0,
+                    &format!("Fan group '{}': hysteresis", group.name),
+                )?;
+                validate_f64_range(
+                    *ramp_rate,
+                    f64::EPSILON,
+                    100.0,
+                    &format!("Fan group '{}': ramp_rate", group.name),
+                )?;
+                if let Some(rate) = ramp_down_rate {
+                    validate_f64_range(
+                        *rate,
+                        f64::EPSILON,
+                        100.0,
+                        &format!("Fan group '{}': ramp_down_rate", group.name),
+                    )?;
+                }
                 for p in points {
-                    if p.duty < 0.0 || p.duty > 100.0 {
-                        bail!(
-                            "Fan group '{}': curve duty must be 0..100, got {}",
-                            group.name,
-                            p.duty
-                        );
-                    }
+                    validate_f64_range(
+                        p.temp,
+                        -10.0,
+                        150.0,
+                        &format!("Fan group '{}': curve temperature", group.name),
+                    )?;
+                    validate_f64_range(
+                        p.duty,
+                        0.0,
+                        100.0,
+                        &format!("Fan group '{}': curve duty", group.name),
+                    )?;
                 }
                 // v0.3: reject duplicate temp points. Two points at the
                 // same temp make the interpolator's behavior undefined
@@ -1571,23 +2226,25 @@ pub fn validate_config(config: &AppConfig) -> Result<()> {
                 validate_temp_source(&group.name, temp_source)?;
             }
             FanMode::Pid {
+                target_temp,
                 kp,
                 ki,
                 kd,
                 min_duty,
                 max_duty,
                 temp_source,
-                ..
             } => {
-                if *kp <= 0.0 {
-                    bail!("Fan group '{}': kp must be > 0", group.name);
-                }
-                if *ki < 0.0 {
-                    bail!("Fan group '{}': ki must be >= 0", group.name);
-                }
-                if *kd < 0.0 {
-                    bail!("Fan group '{}': kd must be >= 0", group.name);
-                }
+                validate_f64_range(
+                    *target_temp,
+                    -10.0,
+                    150.0,
+                    &format!("Fan group '{}': target_temp", group.name),
+                )?;
+                validate_f64_range(*kp, f64::EPSILON, 1000.0, "PID kp")?;
+                validate_f64_range(*ki, 0.0, 1000.0, "PID ki")?;
+                validate_f64_range(*kd, 0.0, 1000.0, "PID kd")?;
+                validate_f64_range(*min_duty, 0.0, 100.0, "PID min_duty")?;
+                validate_f64_range(*max_duty, 0.0, 100.0, "PID max_duty")?;
                 if *min_duty >= *max_duty {
                     bail!(
                         "Fan group '{}': min_duty ({}) must be < max_duty ({})",
@@ -1600,6 +2257,9 @@ pub fn validate_config(config: &AppConfig) -> Result<()> {
             }
         }
     }
+
+    validate_device_overrides(config)?;
+    validate_rgb_config(config)?;
 
     Ok(())
 }
@@ -1616,13 +2276,278 @@ fn validate_temp_source(group_name: &str, source: &TempSourceConfig) -> Result<(
             source.weights.len()
         );
     }
-    for w in &source.weights {
-        if *w <= 0.0 {
+    let mut sensor_names = HashSet::new();
+    for (sensor, w) in source.sensors.iter().zip(&source.weights) {
+        if sensor.trim().is_empty() {
+            bail!("Fan group '{}': sensor name cannot be empty", group_name);
+        }
+        if !sensor_names.insert(sensor) {
+            bail!("Fan group '{}': duplicate sensor '{}'", group_name, sensor);
+        }
+        if !w.is_finite() || *w <= 0.0 || *w > 1_000.0 {
             bail!(
-                "Fan group '{}': all weights must be > 0, got {}",
+                "Fan group '{}': all weights must be finite and in (0, 1000], got {}",
                 group_name,
                 w
             );
+        }
+    }
+    Ok(())
+}
+
+fn validate_f64_range(value: f64, min: f64, max: f64, label: &str) -> Result<()> {
+    if !value.is_finite() || value < min || value > max {
+        bail!(
+            "{} must be finite and in {}..={}, got {}",
+            label,
+            min,
+            max,
+            value
+        );
+    }
+    Ok(())
+}
+
+fn validate_f32_range(value: f32, min: f32, max: f32, label: &str) -> Result<()> {
+    if !value.is_finite() || value < min || value > max {
+        bail!(
+            "{} must be finite and in {}..={}, got {}",
+            label,
+            min,
+            max,
+            value
+        );
+    }
+    Ok(())
+}
+
+fn validate_device_overrides(config: &AppConfig) -> Result<()> {
+    let mut v1 = HashSet::new();
+    for device in &config.device_overrides {
+        if device.hub_serial.trim().is_empty() {
+            bail!("device_override hub_serial cannot be empty");
+        }
+        if !(1..=20).contains(&device.channel) {
+            bail!(
+                "device_override channel must be 1..20, got {}",
+                device.channel
+            );
+        }
+        if !(1..=255).contains(&device.led_count) {
+            bail!(
+                "device_override led_count must be 1..255, got {}",
+                device.led_count
+            );
+        }
+        if !v1.insert((&device.hub_serial, device.channel)) {
+            bail!(
+                "Duplicate device_override for hub '{}' channel {}",
+                device.hub_serial,
+                device.channel
+            );
+        }
+    }
+
+    let mut v2 = HashSet::new();
+    for device in &config.devices {
+        if device.device_id.trim().is_empty() {
+            bail!("devices.device_id cannot be empty");
+        }
+        if !v2.insert(&device.device_id) {
+            bail!("Duplicate devices entry for '{}'", device.device_id);
+        }
+        if device
+            .name
+            .as_deref()
+            .is_some_and(|name| name.trim().is_empty())
+        {
+            bail!("Device '{}' name cannot be empty", device.device_id);
+        }
+        if device
+            .led_count
+            .is_some_and(|count| !(1..=255).contains(&count))
+        {
+            bail!("Device '{}' led_count must be 1..255", device.device_id);
+        }
+    }
+    Ok(())
+}
+
+fn validate_rgb_config(config: &AppConfig) -> Result<()> {
+    if config.rgb.brightness > 100 {
+        bail!("RGB brightness must be 0..100");
+    }
+    if !matches!(config.rgb.fps, 30 | 60) {
+        bail!("RGB fps must be 30 or 60, got {}", config.rgb.fps);
+    }
+
+    let mut zone_names = HashSet::new();
+    for zone in &config.rgb.zones {
+        validate_rgb_zone(zone, "RGB zone")?;
+        if !zone_names.insert(&zone.name) {
+            bail!("Duplicate RGB zone name '{}'", zone.name);
+        }
+    }
+
+    let mut preset_names = HashSet::new();
+    for preset in &config.rgb.presets {
+        if preset.name.trim().is_empty() {
+            bail!("RGB preset name cannot be empty");
+        }
+        if !preset_names.insert(&preset.name) {
+            bail!("Duplicate RGB preset name '{}'", preset.name);
+        }
+        let mut names = HashSet::new();
+        for zone in &preset.zones {
+            validate_rgb_zone(zone, &format!("RGB preset '{}' zone", preset.name))?;
+            if !names.insert(&zone.name) {
+                bail!(
+                    "RGB preset '{}' has duplicate zone '{}'",
+                    preset.name,
+                    zone.name
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_rgb_zone(zone: &RgbZoneConfig, label: &str) -> Result<()> {
+    if zone.name.trim().is_empty() {
+        bail!("{} name cannot be empty", label);
+    }
+    if zone.brightness > 100 {
+        bail!("{} '{}' brightness must be 0..100", label, zone.name);
+    }
+    let mut devices = HashSet::new();
+    for device in &zone.devices {
+        let identity = if !device.device_id.trim().is_empty() {
+            format!("id:{}", device.device_id)
+        } else {
+            if device.hub_serial.trim().is_empty() || !(1..=20).contains(&device.channel) {
+                bail!(
+                    "{} '{}' contains an invalid device reference",
+                    label,
+                    zone.name
+                );
+            }
+            format!("v1:{}:{}", device.hub_serial, device.channel)
+        };
+        if !devices.insert(identity) {
+            bail!("{} '{}' contains a duplicate device", label, zone.name);
+        }
+    }
+    for (index, layer) in zone.layers.iter().enumerate() {
+        validate_f32_range(
+            layer.opacity,
+            0.0,
+            1.0,
+            &format!("{} '{}' layer {} opacity", label, zone.name, index),
+        )?;
+        validate_effect(&layer.effect, label, &zone.name, index)?;
+    }
+    if let Some(flow) = &zone.flow {
+        validate_f32_range(
+            flow.delay_per_device_ms,
+            0.0,
+            60_000.0,
+            &format!("{} '{}' flow delay", label, zone.name),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_effect(effect: &EffectConfig, label: &str, zone: &str, index: usize) -> Result<()> {
+    let field = |name: &str| format!("{} '{}' layer {} {}", label, zone, index, name);
+    let speed = |value: f32, name: &str| validate_f32_range(value, 0.0, 100.0, &field(name));
+    let unit = |value: f32, name: &str| validate_f32_range(value, 0.0, 1.0, &field(name));
+
+    match effect {
+        EffectConfig::Static { .. }
+        | EffectConfig::DutyMeter { .. }
+        | EffectConfig::GpuMeter { .. } => {}
+        EffectConfig::Breathing { speed: value, .. }
+        | EffectConfig::SpectrumShift { speed: value }
+        | EffectConfig::Candle {
+            flicker_speed: value,
+            ..
+        } => speed(*value, "speed")?,
+        EffectConfig::ColorCycle {
+            speed: value,
+            saturation,
+        } => {
+            speed(*value, "speed")?;
+            unit(*saturation, "saturation")?;
+        }
+        EffectConfig::RainbowWave {
+            speed: value,
+            wavelength,
+        } => {
+            speed(*value, "speed")?;
+            validate_f32_range(*wavelength, f32::EPSILON, 100.0, &field("wavelength"))?;
+        }
+        EffectConfig::Fire {
+            intensity,
+            speed: value,
+        } => {
+            unit(*intensity, "intensity")?;
+            speed(*value, "speed")?;
+        }
+        EffectConfig::Aurora {
+            speed: value,
+            color_spread,
+        } => {
+            speed(*value, "speed")?;
+            validate_f32_range(*color_spread, 0.0, 100.0, &field("color_spread"))?;
+        }
+        EffectConfig::Starfield {
+            density,
+            speed: value,
+        }
+        | EffectConfig::Rain {
+            density,
+            speed: value,
+            ..
+        } => {
+            unit(*density, "density")?;
+            speed(*value, "speed")?;
+        }
+        EffectConfig::TemperatureMap { gradient, .. } => {
+            if gradient.len() < 2 {
+                bail!(
+                    "{} requires at least two temperature gradient stops",
+                    field("effect")
+                );
+            }
+            let mut previous = None;
+            for (temperature, _) in gradient {
+                validate_f64_range(*temperature, -10.0, 150.0, &field("temperature"))?;
+                if previous.is_some_and(|value| *temperature <= value) {
+                    bail!(
+                        "{} temperature stops must be strictly increasing",
+                        field("effect")
+                    );
+                }
+                previous = Some(*temperature);
+            }
+        }
+        EffectConfig::ThermalPulse {
+            min_temp, max_temp, ..
+        } => {
+            validate_f64_range(*min_temp, -10.0, 150.0, &field("min_temp"))?;
+            validate_f64_range(*max_temp, -10.0, 150.0, &field("max_temp"))?;
+            if min_temp >= max_temp {
+                bail!("{} min_temp must be less than max_temp", field("effect"));
+            }
+        }
+        EffectConfig::Gradient {
+            colors,
+            speed: value,
+        } => {
+            if colors.len() < 2 {
+                bail!("{} requires at least two colors", field("effect"));
+            }
+            speed(*value, "speed")?;
         }
     }
     Ok(())
@@ -1648,13 +2573,7 @@ impl ControlLoop {
         groups: Vec<FanGroup>,
         sensor_state: HashMap<String, SensorState>,
     ) -> Self {
-        Self::from_parts_for_test_with_devices(
-            config,
-            hubs,
-            HashMap::new(),
-            groups,
-            sensor_state,
-        )
+        Self::from_parts_for_test_with_devices(config, hubs, HashMap::new(), groups, sensor_state)
     }
 
     /// Test-only variant that also supplies enumerated devices per hub so
@@ -1682,6 +2601,7 @@ impl ControlLoop {
                         last_recovery_attempt: Instant::now(),
                         recovery_attempts: 0,
                         pump_channels,
+                        temperature_sensors: HashMap::new(),
                         info: HubInfo {
                             firmware: corsair_hid::FirmwareVersion {
                                 major: 0,
@@ -1691,6 +2611,7 @@ impl ControlLoop {
                             devices,
                             led_counts: std::collections::HashMap::new(),
                         },
+                        base_led_counts: HashMap::new(),
                         color_logged: false,
                     },
                 )
@@ -1704,10 +2625,13 @@ impl ControlLoop {
             sensors: HashMap::new(),
             sensor_state,
             hubs: hub_conns,
+            missing_hubs: HashMap::new(),
             groups,
             registry,
             logged_orphan_rgb_ids: HashSet::new(),
             shutdown: Arc::new(AtomicBool::new(false)),
+            hardware_shutdown: false,
+            hardware_shutdown_error: None,
         }
     }
 }
@@ -1730,6 +2654,7 @@ mod tests {
         /// returning Ok. Used to exercise the shutdown timeout path.
         enter_hardware_mode_delay_ms: u64,
         enter_hardware_mode_calls: AtomicU32,
+        temperatures: std::sync::Mutex<Vec<TemperatureReading>>,
     }
 
     impl MockHub {
@@ -1739,6 +2664,7 @@ mod tests {
                 set_speeds_calls: AtomicU32::new(0),
                 enter_hardware_mode_delay_ms: 0,
                 enter_hardware_mode_calls: AtomicU32::new(0),
+                temperatures: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -1752,19 +2678,29 @@ mod tests {
             self.fail_set_speeds
                 .store(fail, std::sync::atomic::Ordering::SeqCst);
         }
+
+        fn set_temperatures(&self, temperatures: Vec<TemperatureReading>) {
+            *self.temperatures.lock().unwrap() = temperatures;
+        }
     }
 
     impl IcueLinkTransport for MockHub {
         fn set_speeds(&self, _targets: &[(u8, u8)]) -> Result<()> {
             self.set_speeds_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if self.fail_set_speeds.load(std::sync::atomic::Ordering::SeqCst) {
+            if self
+                .fail_set_speeds
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
                 bail!("mock set_speeds failure");
             }
             Ok(())
         }
         fn get_speeds(&self) -> Result<Vec<FanSpeed>> {
             Ok(Vec::new())
+        }
+        fn get_temperatures(&self) -> Result<Vec<TemperatureReading>> {
+            Ok(self.temperatures.lock().unwrap().clone())
         }
         fn set_rgb(&self, _channel_leds: &[(u8, &[[u8; 3]])]) -> Result<()> {
             Ok(())
@@ -1773,9 +2709,7 @@ mod tests {
             self.enter_hardware_mode_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.enter_hardware_mode_delay_ms > 0 {
-                std::thread::sleep(Duration::from_millis(
-                    self.enter_hardware_mode_delay_ms,
-                ));
+                std::thread::sleep(Duration::from_millis(self.enter_hardware_mode_delay_ms));
             }
             Ok(())
         }
@@ -1783,14 +2717,13 @@ mod tests {
 
     /// Build a minimal ControlLoop with one fan group pointing at a single
     /// mock hub. The hub has one pump channel (1) and one fan channel (2).
-    fn loop_with_mock_hub(
-        mock: Arc<MockHub>,
-        mode: FanMode,
-    ) -> (ControlLoop, Arc<MockHub>) {
+    fn loop_with_mock_hub(mock: Arc<MockHub>, mode: FanMode) -> (ControlLoop, Arc<MockHub>) {
         let serial = "TESTHUB0".to_string();
-        let mut hubs: HashMap<String, (Arc<dyn IcueLinkTransport>, Vec<u8>)> =
-            HashMap::new();
-        hubs.insert(serial.clone(), (mock.clone() as Arc<dyn IcueLinkTransport>, vec![1]));
+        let mut hubs: HashMap<String, (Arc<dyn IcueLinkTransport>, Vec<u8>)> = HashMap::new();
+        hubs.insert(
+            serial.clone(),
+            (mock.clone() as Arc<dyn IcueLinkTransport>, vec![1]),
+        );
 
         let (controller, acoustic) = match mode {
             FanMode::Fixed { duty_percent } => (FanController::Fixed(duty_percent), None),
@@ -1964,6 +2897,85 @@ mod tests {
         assert!(validate_config(&config).is_err());
     }
 
+    #[test]
+    fn validation_rejects_non_finite_and_negative_fan_parameters() {
+        for hostile in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut config = valid_config();
+            config.fan_groups[0].mode = FanMode::Fixed {
+                duty_percent: hostile,
+            };
+            assert!(validate_config(&config).is_err());
+        }
+
+        let mut config = valid_config();
+        config.fan_groups[0].mode = FanMode::Curve {
+            points: vec![
+                CurvePoint {
+                    temp: f64::NAN,
+                    duty: 20.0,
+                },
+                CurvePoint {
+                    temp: 80.0,
+                    duty: 100.0,
+                },
+            ],
+            hysteresis: f64::INFINITY,
+            ramp_rate: -1.0,
+            ramp_down_rate: Some(f64::NAN),
+            temp_source: TempSourceConfig {
+                sensors: vec!["cpu".into()],
+                weights: vec![1.0],
+            },
+        };
+        assert!(validate_config(&config).is_err());
+
+        let mut config = valid_config();
+        config.fan_groups[0].mode = FanMode::Pid {
+            target_temp: f64::NAN,
+            kp: f64::INFINITY,
+            ki: -1.0,
+            kd: f64::NAN,
+            min_duty: -10.0,
+            max_duty: 120.0,
+            temp_source: TempSourceConfig {
+                sensors: vec!["cpu".into()],
+                weights: vec![f64::INFINITY],
+            },
+        };
+        assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn validation_rejects_hostile_rgb_values_and_duplicate_assignments() {
+        let mut config = valid_config();
+        config.rgb.fps = 255;
+        assert!(validate_config(&config).is_err());
+
+        let mut config = valid_config();
+        config.rgb.zones.push(RgbZoneConfig {
+            name: "zone".into(),
+            devices: Vec::new(),
+            layers: vec![LayerConfig {
+                effect: EffectConfig::Breathing {
+                    color: RgbColor::new(1, 2, 3),
+                    speed: f32::INFINITY,
+                },
+                blend_mode: BlendMode::Normal,
+                opacity: f32::NAN,
+                enabled: true,
+            }],
+            brightness: 100,
+            flow: None,
+        });
+        assert!(validate_config(&config).is_err());
+
+        let mut config = valid_config();
+        let mut duplicate = config.fan_groups[0].clone();
+        duplicate.name = "other".into();
+        config.fan_groups.push(duplicate);
+        assert!(validate_config(&config).is_err());
+    }
+
     // --- B2: recovery_backoff pure-function curve ---
 
     #[test]
@@ -1990,10 +3002,7 @@ mod tests {
     #[test]
     fn test_healthy_to_failed_transition_schedules_recovery() {
         let mock = Arc::new(MockHub::new());
-        let (mut cl, mock) = loop_with_mock_hub(
-            mock,
-            FanMode::Fixed { duty_percent: 50.0 },
-        );
+        let (mut cl, mock) = loop_with_mock_hub(mock, FanMode::Fixed { duty_percent: 50.0 });
 
         // Initial state: hub is healthy, no recovery scheduled.
         assert!(cl.hubs_needing_recovery().is_empty());
@@ -2001,7 +3010,11 @@ mod tests {
         // First tick — set_speeds succeeds (healthy), no recovery.
         let _ = cl.tick();
         assert!(cl.hubs_needing_recovery().is_empty());
-        assert_eq!(mock.set_speeds_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            mock.set_speeds_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
 
         // Simulate hub failure.
         mock.set_fail(true);
@@ -2023,6 +3036,167 @@ mod tests {
         );
     }
 
+    #[test]
+    fn missing_hub_is_scheduled_and_mock_attach_clears_recovery() {
+        let mut control_loop = ControlLoop::from_parts_for_test(
+            base_v1_config(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+        );
+        control_loop
+            .missing_hubs
+            .insert("LATE_HUB".into(), HubRecoveryState::new());
+
+        assert_eq!(control_loop.hubs_needing_recovery(), vec!["LATE_HUB"]);
+        control_loop.mark_recovery_attempted("LATE_HUB");
+        assert!(control_loop.hubs_needing_recovery().is_empty());
+
+        let mock = Arc::new(MockHub::new());
+        let mut info = HubInfo {
+            firmware: corsair_hid::FirmwareVersion {
+                major: 1,
+                minor: 0,
+                patch: 0,
+            },
+            devices: vec![corsair_hid::LinkDevice {
+                channel: 1,
+                device_type: LinkDeviceType::PumpXd5,
+                model: 0x0c,
+                device_id: "PUMP_STABLE_ID".into(),
+            }],
+            led_counts: HashMap::new(),
+        };
+        control_loop.attach_hub_transport(
+            "LATE_HUB",
+            mock as Arc<dyn IcueLinkTransport>,
+            &mut info,
+            &[TemperatureReading {
+                channel: 1,
+                temp_celsius: 30.0,
+            }],
+        );
+
+        assert!(control_loop.has_connected_hub("LATE_HUB"));
+        assert!(!control_loop.missing_hubs.contains_key("LATE_HUB"));
+        assert!(
+            control_loop
+                .available_sensors()
+                .contains(&"link_temp_PUMP_STABLE_ID".to_string())
+        );
+        assert!(
+            control_loop
+                .available_sensors()
+                .contains(&"water_inline".to_string())
+        );
+    }
+
+    #[test]
+    fn config_update_accepts_disconnected_hub_and_schedules_retry() {
+        let mut control_loop = ControlLoop::from_parts_for_test(
+            base_v1_config(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+        );
+        let mut config = base_v1_config();
+        config.fan_groups.push(FanGroupConfig {
+            name: "late".into(),
+            channels: vec![1],
+            hub_serial: Some("LATE_HUB".into()),
+            device_ids: Vec::new(),
+            mode: FanMode::Fixed { duty_percent: 50.0 },
+            preset_applied: None,
+        });
+
+        control_loop.update_config(config).unwrap();
+
+        assert_eq!(control_loop.hubs_needing_recovery(), vec!["LATE_HUB"]);
+    }
+
+    #[test]
+    fn pump_temperature_gets_stable_name_alias_and_coolant_emergency() {
+        let serial = "HUB_TEMP".to_string();
+        let mock = Arc::new(MockHub::new());
+        mock.set_temperatures(vec![TemperatureReading {
+            channel: 1,
+            temp_celsius: 56.0,
+        }]);
+        let mut hubs: HashMap<String, (Arc<dyn IcueLinkTransport>, Vec<u8>)> = HashMap::new();
+        hubs.insert(
+            serial.clone(),
+            (mock as Arc<dyn IcueLinkTransport>, vec![1]),
+        );
+        let mut pump = mk_link_device(1, "PUMP_STABLE_ID");
+        pump.device_type = LinkDeviceType::PumpXd5;
+        let mut devices = HashMap::new();
+        devices.insert(serial, vec![pump]);
+        let mut control_loop = ControlLoop::from_parts_for_test_with_devices(
+            base_v1_config(),
+            hubs,
+            devices,
+            Vec::new(),
+            HashMap::new(),
+        );
+
+        let cycle = control_loop.tick();
+
+        assert_eq!(cycle.readings.get("link_temp_PUMP_STABLE_ID"), Some(&56.0));
+        assert_eq!(cycle.readings.get("water_inline"), Some(&56.0));
+        assert!(cycle.emergency);
+        assert!(
+            control_loop
+                .available_sensors()
+                .contains(&"water_inline".into())
+        );
+    }
+
+    #[test]
+    fn fan_temperature_does_not_create_coolant_alias() {
+        let serial = "HUB_TEMP".to_string();
+        let mock = Arc::new(MockHub::new());
+        mock.set_temperatures(vec![TemperatureReading {
+            channel: 2,
+            temp_celsius: 60.0,
+        }]);
+        let mut hubs: HashMap<String, (Arc<dyn IcueLinkTransport>, Vec<u8>)> = HashMap::new();
+        hubs.insert(
+            serial.clone(),
+            (mock as Arc<dyn IcueLinkTransport>, Vec::new()),
+        );
+        let mut devices = HashMap::new();
+        devices.insert(serial, vec![mk_link_device(2, "FAN_STABLE_ID")]);
+        let mut control_loop = ControlLoop::from_parts_for_test_with_devices(
+            base_v1_config(),
+            hubs,
+            devices,
+            Vec::new(),
+            HashMap::new(),
+        );
+
+        let cycle = control_loop.tick();
+
+        assert_eq!(cycle.readings.get("link_temp_FAN_STABLE_ID"), Some(&60.0));
+        assert!(!cycle.readings.contains_key("water_inline"));
+        assert!(!cycle.emergency);
+    }
+
+    #[test]
+    fn shutdown_wait_observes_signal_within_poll_interval() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let signal = Arc::clone(&shutdown);
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            signal.store(true, Ordering::Relaxed);
+        });
+
+        let start = Instant::now();
+        wait_for_shutdown(&shutdown, Duration::from_secs(2));
+        setter.join().unwrap();
+
+        assert!(start.elapsed() < Duration::from_millis(250));
+    }
+
     // --- B5: shutdown timeout fires without hanging ---
 
     #[test]
@@ -2032,14 +3206,12 @@ mod tests {
         // shutdown_hardware returns within ~6s — if the timeout path were
         // broken it would hang for the full 10s.
         let mock = Arc::new(MockHub::with_slow_shutdown(10_000));
-        let (mut cl, _mock) = loop_with_mock_hub(
-            mock,
-            FanMode::Fixed { duty_percent: 50.0 },
-        );
+        let (mut cl, _mock) = loop_with_mock_hub(mock, FanMode::Fixed { duty_percent: 50.0 });
 
         let start = Instant::now();
-        cl.shutdown_hardware();
+        let error = cl.shutdown_hardware().unwrap_err();
         let elapsed = start.elapsed();
+        assert!(error.to_string().contains("timed out"));
 
         assert!(
             elapsed < Duration::from_secs(7),
@@ -2050,6 +3222,12 @@ mod tests {
             elapsed >= Duration::from_secs(5),
             "shutdown_hardware took {:?}, expected >=5s (timeout must actually wait)",
             elapsed
+        );
+        assert!(
+            cl.shutdown_hardware()
+                .unwrap_err()
+                .to_string()
+                .contains("timed out")
         );
     }
 
@@ -2160,6 +3338,9 @@ mod tests {
         fn get_speeds(&self) -> Result<Vec<FanSpeed>> {
             Ok(Vec::new())
         }
+        fn get_temperatures(&self) -> Result<Vec<TemperatureReading>> {
+            Ok(Vec::new())
+        }
         fn set_rgb(&self, channel_leds: &[(u8, &[[u8; 3]])]) -> Result<()> {
             let summary: Vec<(u8, usize)> = channel_leds
                 .iter()
@@ -2180,6 +3361,74 @@ mod tests {
             model: 0x01,
             device_id: device_id.to_string(),
         }
+    }
+
+    #[test]
+    fn manual_duty_enforces_floors_and_rejects_uncontrollable_channels() {
+        let serial = "HUB_A".to_string();
+        let mock = Arc::new(RecordingHub::new());
+        let mut hubs: HashMap<String, (Arc<dyn IcueLinkTransport>, Vec<u8>)> = HashMap::new();
+        hubs.insert(
+            serial.clone(),
+            (mock.clone() as Arc<dyn IcueLinkTransport>, vec![1]),
+        );
+        let mut pump = mk_link_device(1, "PUMP");
+        pump.device_type = LinkDeviceType::PumpXd5;
+        let fan = mk_link_device(2, "FAN");
+        let mut lighting = mk_link_device(3, "BLOCK");
+        lighting.device_type = LinkDeviceType::Xg7Block;
+        let mut devices = HashMap::new();
+        devices.insert(serial.clone(), vec![pump, fan, lighting]);
+
+        let control_loop = ControlLoop::from_parts_for_test_with_devices(
+            base_v1_config(),
+            hubs,
+            devices,
+            Vec::new(),
+            HashMap::new(),
+        );
+
+        control_loop.set_manual_duty(&serial, &[1, 2], 0).unwrap();
+        assert_eq!(mock.last_speeds().unwrap(), vec![(1, 50), (2, 20)]);
+        assert!(control_loop.set_manual_duty(&serial, &[3], 50).is_err());
+        assert!(control_loop.set_manual_duty(&serial, &[9], 50).is_err());
+        assert!(control_loop.set_manual_duty(&serial, &[1, 1], 50).is_err());
+        assert!(control_loop.set_manual_duty(&serial, &[1], 101).is_err());
+    }
+
+    #[test]
+    fn unused_stale_sensor_does_not_override_fixed_group() {
+        let serial = "HUB_A".to_string();
+        let mock = Arc::new(RecordingHub::new());
+        let mut hubs: HashMap<String, (Arc<dyn IcueLinkTransport>, Vec<u8>)> = HashMap::new();
+        hubs.insert(
+            serial.clone(),
+            (mock.clone() as Arc<dyn IcueLinkTransport>, Vec::new()),
+        );
+        let group = FanGroup {
+            name: "fixed".into(),
+            channels: vec![1],
+            hub_serial: serial,
+            device_ids: Vec::new(),
+            controller: FanController::Fixed(42.0),
+            acoustic: None,
+            last_duty: 0.0,
+        };
+        let mut states = HashMap::new();
+        states.insert(
+            "unused".into(),
+            SensorState {
+                last_value: 0.0,
+                last_success: Instant::now() - Duration::from_secs(60),
+                is_stale: true,
+            },
+        );
+        let mut control_loop =
+            ControlLoop::from_parts_for_test(base_v1_config(), hubs, vec![group], states);
+
+        let cycle = control_loop.tick();
+        assert!(!cycle.any_stale);
+        assert_eq!(mock.last_speeds().unwrap(), vec![(1, 42)]);
     }
 
     fn base_v1_config() -> AppConfig {
@@ -2215,10 +3464,7 @@ mod tests {
         let mut devices_by_hub: HashMap<String, Vec<corsair_hid::LinkDevice>> = HashMap::new();
         devices_by_hub.insert(
             hub_serial.clone(),
-            vec![
-                mk_link_device(1, "ID_A1"),
-                mk_link_device(2, "ID_A2"),
-            ],
+            vec![mk_link_device(1, "ID_A1"), mk_link_device(2, "ID_A2")],
         );
 
         // V2-shaped FanGroup: device_ids populated, no channels/hub_serial
@@ -2333,14 +3579,8 @@ mod tests {
         // ID_A1 on HUB_A ch 1; ID_B2 on HUB_B ch 2. QxFan device type
         // declares 34 LEDs as its default.
         let mut devices_by_hub: HashMap<String, Vec<corsair_hid::LinkDevice>> = HashMap::new();
-        devices_by_hub.insert(
-            hub_a.clone(),
-            vec![mk_link_device(1, "ID_A1")],
-        );
-        devices_by_hub.insert(
-            hub_b.clone(),
-            vec![mk_link_device(2, "ID_B2")],
-        );
+        devices_by_hub.insert(hub_a.clone(), vec![mk_link_device(1, "ID_A1")]);
+        devices_by_hub.insert(hub_b.clone(), vec![mk_link_device(2, "ID_B2")]);
 
         let mut cl = ControlLoop::from_parts_for_test_with_devices(
             base_v1_config(),
@@ -2366,13 +3606,17 @@ mod tests {
         assert_eq!(sent, 2, "one device per hub should yield sent == 2");
 
         // HUB_A call should include channel 1 with 34 LEDs (not channel 2).
-        let a_call = mock_a.last_rgb().expect("HUB_A should have received set_rgb");
+        let a_call = mock_a
+            .last_rgb()
+            .expect("HUB_A should have received set_rgb");
         assert_eq!(
             a_call,
             vec![(1u8, 34usize)],
             "HUB_A should receive ch1 34 LEDs (ID_A1)"
         );
-        let b_call = mock_b.last_rgb().expect("HUB_B should have received set_rgb");
+        let b_call = mock_b
+            .last_rgb()
+            .expect("HUB_B should have received set_rgb");
         assert_eq!(
             b_call,
             vec![(2u8, 34usize)],
@@ -2504,15 +3748,12 @@ mod tests {
         // Supply a long buffer (34 QxFan defaults); the flat buffer
         // should be truncated to 30 LEDs per the V2 override.
         let long_leds = vec![[7u8, 7, 7]; 34];
-        let frames: Vec<(String, &[[u8; 3]])> =
-            vec![("ID_A1".to_string(), long_leds.as_slice())];
+        let frames: Vec<(String, &[[u8; 3]])> = vec![("ID_A1".to_string(), long_leds.as_slice())];
 
         let sent = cl.send_rgb_frames(&frames);
         assert_eq!(sent, 1);
 
-        let call = mock
-            .last_rgb()
-            .expect("HUB_A should have received set_rgb");
+        let call = mock.last_rgb().expect("HUB_A should have received set_rgb");
         assert_eq!(
             call,
             vec![(1u8, 30usize)],

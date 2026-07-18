@@ -5,9 +5,10 @@
     presets: RgbPreset[];
     currentZones: RgbZoneConfig[];
     onapply: (zones: RgbZoneConfig[]) => void;
+    onpresetsupdate: (presets: RgbPreset[]) => void;
   }
 
-  let { presets, currentZones, onapply }: Props = $props();
+  let { presets, currentZones, onapply, onpresetsupdate }: Props = $props();
 
   let saveName = $state('');
   let showSave = $state(false);
@@ -142,7 +143,11 @@
 
   function savePreset() {
     if (!saveName.trim()) return;
-    presets.push({ name: saveName.trim(), zones: structuredClone(currentZones) });
+    const name = saveName.trim();
+    onpresetsupdate([
+      ...presets.filter((preset) => preset.name !== name),
+      { name, zones: structuredClone(currentZones) },
+    ]);
     saveName = '';
     showSave = false;
   }

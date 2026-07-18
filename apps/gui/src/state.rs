@@ -1,4 +1,8 @@
-use std::sync::mpsc;
+use std::{
+    sync::{Arc, Mutex, mpsc},
+    thread,
+    time::{Duration, Instant},
+};
 
 use corsair_common::config::{AppConfig, RgbConfig};
 
@@ -82,7 +86,9 @@ pub enum HwCommand {
         duration_secs: u64,
         reply: tokio::sync::oneshot::Sender<Result<Vec<ChannelIdentity>, String>>,
     },
-    Shutdown,
+    Shutdown {
+        reply: mpsc::SyncSender<Result<(), String>>,
+    },
 }
 
 /// One row in the channel-identify mapping returned by
@@ -100,4 +106,141 @@ pub struct ChannelIdentity {
 /// Shared state managed by Tauri, accessible from command handlers.
 pub struct AppState {
     pub hw_sender: mpsc::Sender<HwCommand>,
+    hw_join: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
+    pub startup_config_error: Option<String>,
+}
+
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Clone)]
+pub(crate) struct ShutdownHandle {
+    hw_sender: mpsc::Sender<HwCommand>,
+    hw_join: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
+}
+
+impl AppState {
+    pub fn new(
+        hw_sender: mpsc::Sender<HwCommand>,
+        hw_join: std::thread::JoinHandle<()>,
+        startup_config_error: Option<String>,
+    ) -> Self {
+        Self {
+            hw_sender,
+            hw_join: Arc::new(Mutex::new(Some(hw_join))),
+            startup_config_error,
+        }
+    }
+
+    pub fn shutdown_and_join(&self) -> Result<(), String> {
+        self.shutdown_handle().shutdown_and_join()
+    }
+
+    pub(crate) fn shutdown_handle(&self) -> ShutdownHandle {
+        ShutdownHandle {
+            hw_sender: self.hw_sender.clone(),
+            hw_join: Arc::clone(&self.hw_join),
+        }
+    }
+}
+
+impl ShutdownHandle {
+    pub(crate) fn shutdown_and_join(&self) -> Result<(), String> {
+        self.shutdown_and_join_with_timeout(SHUTDOWN_TIMEOUT)
+    }
+
+    fn shutdown_and_join_with_timeout(&self, timeout: Duration) -> Result<(), String> {
+        let Some(handle) = self
+            .hw_join
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
+        else {
+            return Ok(());
+        };
+
+        let deadline = Instant::now() + timeout;
+        let (reply, ack) = mpsc::sync_channel(0);
+        let acknowledgement = if self.hw_sender.send(HwCommand::Shutdown { reply }).is_ok() {
+            ack.recv_timeout(remaining(deadline))
+                .map_err(|error| match error {
+                    mpsc::RecvTimeoutError::Timeout => {
+                        "Timed out waiting for hardware shutdown acknowledgement".to_string()
+                    }
+                    mpsc::RecvTimeoutError::Disconnected => {
+                        "Hardware thread stopped without acknowledging shutdown".to_string()
+                    }
+                })?
+        } else {
+            Ok(())
+        };
+
+        let joined = join_before_deadline(handle, deadline);
+        acknowledgement?;
+        joined
+    }
+}
+
+fn remaining(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
+}
+
+fn join_before_deadline(handle: thread::JoinHandle<()>, deadline: Instant) -> Result<(), String> {
+    while !handle.is_finished() {
+        let remaining = remaining(deadline);
+        if remaining.is_zero() {
+            return Err("Timed out waiting for hardware thread to stop".to_string());
+        }
+        thread::sleep(remaining.min(Duration::from_millis(10)));
+    }
+
+    handle
+        .join()
+        .map_err(|_| "Hardware thread panicked during shutdown".to_string())
+}
+
+impl Drop for AppState {
+    fn drop(&mut self) {
+        let _ = self.shutdown_and_join();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shutdown_waits_for_acknowledgement_and_joins() {
+        let (sender, receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let HwCommand::Shutdown { reply } = receiver.recv().unwrap() else {
+                panic!("unexpected command");
+            };
+            reply.send(Ok(())).unwrap();
+        });
+        let state = AppState::new(sender, worker, None);
+
+        assert!(state.shutdown_and_join().is_ok());
+        assert!(state.shutdown_and_join().is_ok());
+    }
+
+    #[test]
+    fn shutdown_timeout_does_not_block_on_a_stuck_worker() {
+        let (sender, receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let HwCommand::Shutdown { reply: _reply } = receiver.recv().unwrap() else {
+                panic!("unexpected command");
+            };
+            thread::sleep(Duration::from_millis(200));
+        });
+        let state = AppState::new(sender, worker, None);
+        let started = Instant::now();
+
+        let error = state
+            .shutdown_handle()
+            .shutdown_and_join_with_timeout(Duration::from_millis(20))
+            .unwrap_err();
+
+        assert!(error.contains("Timed out"));
+        assert!(started.elapsed() < Duration::from_millis(150));
+    }
 }

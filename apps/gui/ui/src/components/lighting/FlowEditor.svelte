@@ -14,8 +14,8 @@
   const DEFAULT_DELAY_MS = 80;
   const DEFAULT_DIRECTION: FlowDirection = 'Forward';
 
-  let draftDelay = $state(flow?.delay_per_device_ms ?? DEFAULT_DELAY_MS);
-  let draftDirection = $state<FlowDirection>(flow?.direction ?? DEFAULT_DIRECTION);
+  let draftDelay = $state(DEFAULT_DELAY_MS);
+  let draftDirection = $state<FlowDirection>(DEFAULT_DIRECTION);
 
   // Re-sync the drafts whenever the parent hands us a new `flow` value
   // (e.g. after a preset apply, or when switching zones).
@@ -23,9 +23,11 @@
     if (flow) {
       draftDelay = flow.delay_per_device_ms;
       draftDirection = flow.direction;
+    } else {
+      draftDelay = DEFAULT_DELAY_MS;
+      draftDirection = DEFAULT_DIRECTION;
     }
   });
-
   const enabled = $derived(flow !== null);
 
   function toggle(on: boolean) {

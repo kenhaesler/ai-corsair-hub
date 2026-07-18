@@ -62,7 +62,7 @@
         class:active={editingLayer === i}
         class:disabled={!layer.enabled}
       >
-        <div class="layer-header" onclick={() => { editingLayer = editingLayer === i ? null : i; }}>
+        <div class="layer-header">
           <button
             class="layer-toggle"
             onclick={(e: MouseEvent) => { e.stopPropagation(); updateLayer(i, { enabled: !layer.enabled }); }}
@@ -71,7 +71,13 @@
             <div class="toggle-dot" class:on={layer.enabled}></div>
           </button>
 
-          <span class="layer-name">{layer.effect.type}</span>
+          <button
+            class="layer-name layer-expand"
+            aria-expanded={editingLayer === i}
+            onclick={() => { editingLayer = editingLayer === i ? null : i; }}
+          >
+            {layer.effect.type}
+          </button>
 
           <select
             class="blend-select"
@@ -158,6 +164,12 @@
     padding: 6px 8px;
     cursor: pointer;
     font-size: 12px;
+  }
+  .layer-expand {
+    padding: 0;
+    background: transparent;
+    border: 0;
+    color: inherit;
   }
   .layer-header:hover {
     background: var(--bg-card-hover);

@@ -1,5 +1,5 @@
-use crate::effect::{EffectContext, RgbEffect};
 use crate::Rgb;
+use crate::effect::{EffectContext, RgbEffect};
 
 /// Random sparkles that fade in and out.
 pub struct StarfieldEffect {
@@ -22,7 +22,11 @@ impl StarfieldEffect {
             })
             .collect();
 
-        Self { density, speed, seeds }
+        Self {
+            density,
+            speed,
+            seeds,
+        }
     }
 }
 
@@ -45,8 +49,8 @@ impl RgbEffect for StarfieldEffect {
                 }
 
                 // Use density to determine if this LED is active
-                let hash = ((i as u64).wrapping_mul(6364136223846793005) >> 32) as f64
-                    / u32::MAX as f64;
+                let hash =
+                    ((i as u64).wrapping_mul(6364136223846793005) >> 32) as f64 / u32::MAX as f64;
                 if hash > self.density as f64 {
                     return Rgb::BLACK;
                 }
