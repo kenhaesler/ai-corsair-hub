@@ -264,12 +264,30 @@ impl IcueLinkTransport for IcueLinkHub {
 /// consistent view of `color_endpoint_open` and avoids a race where a second
 /// thread flips the flag between our check and our close.
 struct IcueLinkHubInner {
-    device: HidDevice,
+    device: Box<dyn HidIo>,
     color_endpoint_open: bool,
 }
 
+/// Minimal HID I/O surface used by `IcueLinkHub::transfer`. Exists only as a
+/// test seam so packet traffic can be recorded and responses scripted; the
+/// production implementation delegates directly to `hidapi::HidDevice`.
+trait HidIo: Send {
+    fn write(&self, data: &[u8]) -> hidapi::HidResult<usize>;
+    fn read_timeout(&self, buf: &mut [u8], timeout_ms: i32) -> hidapi::HidResult<usize>;
+}
+
+impl HidIo for HidDevice {
+    fn write(&self, data: &[u8]) -> hidapi::HidResult<usize> {
+        HidDevice::write(self, data)
+    }
+    fn read_timeout(&self, buf: &mut [u8], timeout_ms: i32) -> hidapi::HidResult<usize> {
+        HidDevice::read_timeout(self, buf, timeout_ms)
+    }
+}
+
 // SAFETY: `hidapi::HidDevice` is `Send` on all supported platforms (Windows,
-// Linux, macOS) — see hidapi-2.6's platform modules. It is not `Sync`, but we
+// Linux, macOS) — see hidapi-2.6's platform modules, and `HidIo: Send` makes
+// the boxed trait object `Send`. It is not `Sync`, but we
 // never share it across threads concurrently; the `Mutex` enforces single-
 // threaded access. The `Mutex` is itself `Send + Sync`, so the enclosing
 // `Arc<Mutex<IcueLinkHubInner>>` is `Send + Sync` too.
@@ -296,6 +314,10 @@ impl Clone for IcueLinkHub {
 
 impl IcueLinkHub {
     pub fn new(device: HidDevice, serial: String) -> Self {
+        Self::from_io(Box::new(device), serial)
+    }
+
+    fn from_io(device: Box<dyn HidIo>, serial: String) -> Self {
         Self {
             inner: Arc::new(Mutex::new(IcueLinkHubInner {
                 device,
