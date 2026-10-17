@@ -4,6 +4,10 @@ mod hardware_thread;
 mod presets;
 mod state;
 mod worker_env;
+#[cfg(test)]
+mod worker_harness;
+#[cfg(test)]
+mod worker_tests;
 
 use std::sync::OnceLock;
 

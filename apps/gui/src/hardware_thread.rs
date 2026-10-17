@@ -1136,7 +1136,7 @@ fn apply_preset(
 /// as the pre-refactor "orphan" behavior in the control loop — that zone
 /// just doesn't drive the missing fan this tick, and rejoins
 /// automatically when the device reappears and the registry is rebuilt.
-fn apply_rgb_config(
+pub(crate) fn apply_rgb_config(
     renderer: &mut RgbRenderer,
     config: &AppConfig,
     device_types: &std::collections::HashMap<(String, u8), (LinkDeviceType, u16)>,
