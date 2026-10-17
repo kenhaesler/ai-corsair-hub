@@ -230,6 +230,104 @@ pub fn read_psu_from_lhm() -> Option<PsuStatus> {
     })
 }
 
+/// Extended CPU metrics pulled from the LHM JSON tree — load %, package
+/// power (W), and max core clock (MHz). Only available when LHM is
+/// running and exposing `/amdcpu/…` or `/intelcpu/…` nodes.
+#[derive(Debug, Clone)]
+pub struct CpuMetrics {
+    /// Aggregate CPU load percentage (0–100).
+    pub load_pct: f64,
+    /// Package power draw in watts.
+    pub power_watts: f64,
+    /// Peak core clock in MHz (max across cores, since at idle many
+    /// cores park at a low clock and reporting the min/average would
+    /// hide real boost behaviour).
+    pub clock_mhz: u32,
+}
+
+/// Read extended CPU metrics from LHM's HTTP tree.
+///
+/// Returns `None` when LHM is unreachable or has no CPU hardware node
+/// (fallback path: the dashboard just hides the CPU extras block the
+/// same way it does for GPU on a non-NVIDIA machine).
+pub fn read_cpu_metrics_from_lhm() -> Option<CpuMetrics> {
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(HTTP_TIMEOUT))
+        .build();
+    let agent = ureq::Agent::new_with_config(config);
+    let body: String = agent.get(LHM_URL).call().ok()?.body_mut().read_to_string().ok()?;
+    let root: LhmNode = serde_json::from_str(&body).ok()?;
+
+    // Prefer AMD node (the owner's 9950X3D), fall back to Intel for
+    // portability.
+    let cpu_node = find_hw_node(&root, "/amdcpu/")
+        .or_else(|| find_hw_node(&root, "/intelcpu/"))?;
+
+    // Load %: "CPU Total" is the canonical aggregate; fall back to the
+    // first Load sensor so we still show something on an LHM version
+    // that renamed the node.
+    let load_pct = find_by_type_and_text(cpu_node, "Load", "CPU Total")
+        .or_else(|| find_first_by_type(cpu_node, "Load"))
+        .unwrap_or(0.0);
+
+    // Package power — the total CPU domain including IOD + uncore. On
+    // AMD Zen the node is "Package"; keep "CPU Package" as a fallback
+    // for other naming schemes.
+    let power_watts = find_by_type_and_text(cpu_node, "Power", "Package")
+        .or_else(|| find_by_type_and_text(cpu_node, "Power", "CPU Package"))
+        .or_else(|| find_first_by_type(cpu_node, "Power"))
+        .unwrap_or(0.0);
+
+    // Max core clock: we want to see boost, not the idle-core minimum.
+    let clock_mhz = find_max_core_clock(cpu_node).unwrap_or(0.0) as u32;
+
+    Some(CpuMetrics { load_pct, power_watts, clock_mhz })
+}
+
+/// Find the first sensor with both Type and Text matching.
+fn find_by_type_and_text(node: &LhmNode, typ: &str, text: &str) -> Option<f64> {
+    if node.Type == typ && node.Text == text {
+        return parse_lhm_value(&node.Value);
+    }
+    for child in &node.Children {
+        if let Some(v) = find_by_type_and_text(child, typ, text) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// First sensor of a given Type anywhere in the subtree.
+fn find_first_by_type(node: &LhmNode, typ: &str) -> Option<f64> {
+    if node.Type == typ {
+        return parse_lhm_value(&node.Value);
+    }
+    for child in &node.Children {
+        if let Some(v) = find_first_by_type(child, typ) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Walk a CPU subtree and return the highest "CPU Core #N" clock.
+fn find_max_core_clock(node: &LhmNode) -> Option<f64> {
+    let mut max: Option<f64> = None;
+    walk_cpu_core_clocks(node, &mut max);
+    max
+}
+
+fn walk_cpu_core_clocks(node: &LhmNode, max: &mut Option<f64>) {
+    if node.Type == "Clock" && node.Text.starts_with("CPU Core") {
+        if let Some(v) = parse_lhm_value(&node.Value) {
+            *max = Some(max.map_or(v, |m: f64| m.max(v)));
+        }
+    }
+    for child in &node.Children {
+        walk_cpu_core_clocks(child, max);
+    }
+}
+
 /// Find a hardware node whose HardwareId starts with the given prefix.
 fn find_hw_node<'a>(node: &'a LhmNode, prefix: &str) -> Option<&'a LhmNode> {
     if node.HardwareId.starts_with(prefix) {

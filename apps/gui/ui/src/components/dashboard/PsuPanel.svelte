@@ -61,17 +61,21 @@
       <span class="chip-value tabular-nums">{psu.temp_case.toFixed(1)}°C</span>
     </div>
   </div>
-</div>
 
-<div class="rails">
-  {#each psu.rails as rail, i}
-    <div class="rail" class:alt={i % 2 === 1}>
-      <span class="rail-name">{rail.name}</span>
-      <span class="rail-val tabular-nums">{rail.voltage.toFixed(2)}V</span>
-      <span class="rail-val tabular-nums">{rail.current.toFixed(1)}A</span>
-      <span class="rail-val tabular-nums">{rail.power.toFixed(0)}W</span>
-    </div>
-  {/each}
+  <!-- Rails inline, to the right of the hero+chips. Each pill packs
+       all four values (name / power / voltage / current) so the
+       previously-empty ~60% of the row now carries the full rail
+       breakdown without growing the section's height. -->
+  <div class="rails-row">
+    {#each psu.rails as rail}
+      <div class="rail-pill">
+        <span class="rail-name">{rail.name}</span>
+        <span class="rail-power tabular-nums">{rail.power.toFixed(0)}W</span>
+        <span class="rail-sub tabular-nums">{rail.voltage.toFixed(2)}V</span>
+        <span class="rail-sub tabular-nums">{rail.current.toFixed(1)}A</span>
+      </div>
+    {/each}
+  </div>
 </div>
 
 <style>
@@ -79,7 +83,7 @@
     display: flex;
     align-items: center;
     gap: 16px;
-    margin-bottom: 12px;
+    flex-wrap: wrap;
   }
   .hero-power {
     display: flex;
@@ -124,30 +128,43 @@
     font-size: 12px;
     font-weight: 500;
   }
-  .rails {
+  /* Rails row — 3 compact pills side-by-side. Each pill is
+     2×2: rail name + big power on top, voltage + current on
+     the line below. Fills the horizontal space to the right
+     of the chips that was previously dead-empty. */
+  .rails-row {
     display: flex;
-    flex-direction: column;
-    gap: 0;
-  }
-  .rail {
-    display: grid;
-    grid-template-columns: 48px 72px 64px 56px;
     gap: 8px;
-    align-items: baseline;
-    padding: 4px 8px;
-    border-radius: 4px;
+    margin-left: auto; /* push the pills to the right edge */
+    flex-wrap: wrap;
   }
-  .rail.alt {
-    background: rgba(255, 255, 255, 0.02);
+  .rail-pill {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 2px 10px;
+    align-items: baseline;
+    padding: 5px 12px;
+    background: var(--bg-card-inset);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    min-width: 120px;
   }
   .rail-name {
-    font-size: 12px;
-    font-weight: 600;
+    font-size: 11px;
+    font-weight: 700;
     color: var(--text-secondary);
   }
-  .rail-val {
-    font-size: 12px;
-    text-align: right;
+  .rail-power {
+    font-size: 13px;
+    font-weight: 700;
     color: var(--text-primary);
+    text-align: right;
+  }
+  .rail-sub {
+    font-size: 10px;
+    color: var(--text-muted);
+  }
+  .rail-sub:last-child {
+    text-align: right;
   }
 </style>

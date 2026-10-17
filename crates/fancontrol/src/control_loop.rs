@@ -1304,6 +1304,7 @@ fn build_fan_group(
             points,
             hysteresis,
             ramp_rate,
+            ramp_down_rate,
             temp_source,
         } => {
             // Warn about missing sensors but continue — will use failsafe duty
@@ -1316,7 +1317,11 @@ fn build_fan_group(
                 }
             }
             let curve = FanCurve::new(points.clone())?;
-            let ramp_down = ramp_rate * 0.4;
+            // Asymmetric ramp: v0.3+ configs can specify an explicit
+            // ramp_down_rate; older configs (or ones saved with None) fall
+            // back to the legacy 0.4× heuristic that makes fans feel
+            // quieter to the ear.
+            let ramp_down = ramp_down_rate.unwrap_or(ramp_rate * 0.4);
             let filter = AcousticFilter::new(*ramp_rate, ramp_down, *hysteresis);
             (
                 FanController::Curve {
@@ -1543,6 +1548,23 @@ pub fn validate_config(config: &AppConfig) -> Result<()> {
                             "Fan group '{}': curve duty must be 0..100, got {}",
                             group.name,
                             p.duty
+                        );
+                    }
+                }
+                // v0.3: reject duplicate temp points. Two points at the
+                // same temp make the interpolator's behavior undefined
+                // (which duty wins?) and the drag UI would let a user
+                // create them by accident. The client mirrors this
+                // check and disables Save when present, so this is a
+                // belt-and-braces validation.
+                let mut sorted_temps: Vec<f64> = points.iter().map(|p| p.temp).collect();
+                sorted_temps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                for pair in sorted_temps.windows(2) {
+                    if (pair[0] - pair[1]).abs() < 0.001 {
+                        bail!(
+                            "Fan group '{}': curve has duplicate temp points at {}°C",
+                            group.name,
+                            pair[0]
                         );
                     }
                 }
@@ -1776,10 +1798,11 @@ mod tests {
                 points,
                 hysteresis,
                 ramp_rate,
+                ramp_down_rate,
                 temp_source,
             } => {
                 let curve = FanCurve::new(points).expect("test curve");
-                let ramp_down = ramp_rate * 0.4;
+                let ramp_down = ramp_down_rate.unwrap_or(ramp_rate * 0.4);
                 let filter = AcousticFilter::new(ramp_rate, ramp_down, hysteresis);
                 (
                     FanController::Curve {
@@ -1852,6 +1875,7 @@ mod tests {
                 hub_serial: Some("ABCD1234".to_string()),
                 device_ids: Vec::new(),
                 mode: FanMode::Fixed { duty_percent: 50.0 },
+                preset_applied: None,
             }],
             rgb: Default::default(),
             device_overrides: Vec::new(),
@@ -1931,6 +1955,7 @@ mod tests {
             }],
             hysteresis: 3.0,
             ramp_rate: 5.0,
+            ramp_down_rate: None,
             temp_source: TempSourceConfig {
                 sensors: vec!["cpu".to_string()],
                 weights: vec![1.0],

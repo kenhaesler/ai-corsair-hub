@@ -1,14 +1,35 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import type { CurvePoint } from '../../lib/types';
 
   interface Props {
     points: CurvePoint[];
     currentTemp?: number;
     onchange: (points: CurvePoint[]) => void;
+    /**
+     * Optional validity callback. Fires on every change with
+     * `hasError === true` when the curve has a hard error (currently
+     * only: duplicate temp points). Parent forms wire this to disable
+     * the Save button.
+     */
+    onvalidate?: (hasError: boolean) => void;
+    /**
+     * Hysteresis (°C). When provided and `currentTemp` is known, a
+     * translucent band of width `2 × hysteresis` is drawn around the
+     * live temp line so the user can see the deadband graphically.
+     */
+    hysteresis?: number;
     expanded?: boolean;
   }
 
-  let { points, currentTemp, onchange, expanded = false }: Props = $props();
+  let {
+    points,
+    currentTemp,
+    onchange,
+    onvalidate,
+    hysteresis,
+    expanded = false,
+  }: Props = $props();
 
   let svg: SVGSVGElement;
   let dragging: number | null = $state(null);
@@ -150,6 +171,57 @@
   // Grid lines
   const tempGridLines = [30, 40, 50, 60, 70, 80, 90];
   const dutyGridLines = [20, 40, 60, 80, 100];
+
+  // --- Validation ---
+  // Hard errors block Save; soft warnings inform the user but let them
+  // proceed. The server mirrors the hard-error list in validate_config,
+  // so a client bypass still gets rejected on save.
+  interface Warning {
+    level: 'error' | 'warn';
+    message: string;
+  }
+
+  const warnings = $derived.by<Warning[]>(() => {
+    const out: Warning[] = [];
+    const sorted = [...points].sort((a, b) => a.temp - b.temp);
+
+    // Hard error: duplicate temp points — interpolator is undefined
+    // when two points share an x.
+    for (let i = 1; i < sorted.length; i++) {
+      if (Math.abs(sorted[i].temp - sorted[i - 1].temp) < 0.001) {
+        out.push({
+          level: 'error',
+          message: `Duplicate point at ${sorted[i].temp}°C — fan behavior would be ambiguous.`,
+        });
+        break; // one error is enough to communicate the problem
+      }
+    }
+
+    // Soft warn: non-monotonic duty. User may want it (e.g. dip at
+    // idle) so we let them save — just surface it.
+    for (let i = 1; i < sorted.length; i++) {
+      if (sorted[i].duty < sorted[i - 1].duty) {
+        out.push({
+          level: 'warn',
+          message: `Duty drops between ${sorted[i - 1].temp}°C and ${sorted[i].temp}°C — fans may oscillate.`,
+        });
+        break; // one warning is enough
+      }
+    }
+    return out;
+  });
+
+  const hasError = $derived(warnings.some((w) => w.level === 'error'));
+
+  // Only re-run when `hasError` actually changes. Reading `onvalidate`
+  // inside `untrack` keeps a parent re-render (which creates a fresh
+  // inline arrow for the prop) from re-firing this effect — without
+  // that guard, the parent's state write would feed back into this
+  // effect via the new prop identity and we'd tree-loop at render rate.
+  $effect(() => {
+    const v = hasError;
+    untrack(() => onvalidate?.(v));
+  });
 </script>
 
 <svg
@@ -196,6 +268,21 @@
     <text x={PAD - 4} y={dutyToY(d) + 3} fill="rgba(255,255,255,0.3)"
       font-size="9" text-anchor="end">{d}%</text>
   {/each}
+
+  <!-- Hysteresis deadband around the current temp (v0.3: visualize the
+       acoustic filter's "ignore this temp change" window). -->
+  {#if currentTemp !== undefined && hysteresis && hysteresis > 0}
+    {@const bandLeftTemp = Math.max(TEMP_MIN, currentTemp - hysteresis)}
+    {@const bandRightTemp = Math.min(TEMP_MAX, currentTemp + hysteresis)}
+    <rect
+      x={tempToX(bandLeftTemp)}
+      y={PAD}
+      width={tempToX(bandRightTemp) - tempToX(bandLeftTemp)}
+      height={H}
+      fill="var(--accent)"
+      opacity="0.08"
+    />
+  {/if}
 
   <!-- Current temperature indicator line -->
   {#if currentTemp !== undefined}
@@ -267,6 +354,16 @@
   {/each}
 </svg>
 
+{#if warnings.length > 0}
+  <ul class="warnings" role="status">
+    {#each warnings as w}
+      <li class:error={w.level === 'error'} class:warn={w.level === 'warn'}>
+        {w.message}
+      </li>
+    {/each}
+  </ul>
+{/if}
+
 <style>
   .curve-svg {
     width: 100%;
@@ -276,5 +373,30 @@
   }
   .live-dot {
     animation: pulse 2s infinite;
+  }
+  .warnings {
+    list-style: none;
+    margin: 6px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 11px;
+    line-height: 1.4;
+  }
+  .warnings li {
+    padding: 5px 8px;
+    border-radius: 4px;
+    border: 1px solid;
+  }
+  .warnings li.error {
+    color: var(--danger);
+    border-color: var(--danger);
+    background: rgba(248, 113, 113, 0.08);
+  }
+  .warnings li.warn {
+    color: var(--warning);
+    border-color: var(--warning);
+    background: rgba(251, 191, 36, 0.08);
   }
 </style>

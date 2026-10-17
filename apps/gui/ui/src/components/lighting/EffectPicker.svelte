@@ -36,6 +36,7 @@
     { name: 'Temp Map', category: 'Reactive', config: { type: 'TemperatureMap', gradient: [[30, { r: 60, g: 165, b: 250 }], [60, { r: 250, g: 190, b: 40 }], [85, { r: 248, g: 113, b: 113 }]], glow_on_spike: true } },
     { name: 'Thermal Pulse', category: 'Reactive', config: { type: 'ThermalPulse', cold_color: { r: 60, g: 165, b: 250 }, hot_color: { r: 248, g: 113, b: 113 }, min_temp: 30, max_temp: 90 } },
     { name: 'Duty Meter', category: 'Reactive', config: { type: 'DutyMeter', low_color: { r: 52, g: 211, b: 153 }, high_color: { r: 248, g: 113, b: 113 } } },
+    { name: 'GPU Meter', category: 'Reactive', config: { type: 'GpuMeter', low_color: { r: 96, g: 165, b: 250 }, high_color: { r: 192, g: 132, b: 252 } } },
   ];
 
   const categories = ['Basic', 'Motion', 'Organic', 'Reactive'];

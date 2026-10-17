@@ -78,11 +78,47 @@
         <h3 class="section-title">Temperatures</h3>
         <div class="temp-grid">
           {#each data.temperatures as temp}
-            <TempCard
-              label={temp.source.toUpperCase()}
-              value={temp.celsius}
-              history={tempHistory(temp.source)}
-            />
+            <!-- Wrap each temp in a cell so GPU metrics render
+                 directly beneath the GPU card rather than under
+                 the full row — this keeps "GPU" information
+                 visually grouped in one column. -->
+            <div class="temp-cell">
+              <TempCard
+                label={temp.source.toUpperCase()}
+                value={temp.celsius}
+                history={tempHistory(temp.source)}
+              />
+              {#if temp.source === 'cpu' && data.cpu_metrics}
+                {@const c = data.cpu_metrics}
+                <!-- Single-row sensor strip: label + bar + value + metrics
+                     all inline so the Temperatures box doesn't grow too
+                     tall and push the History chart off the bottom. -->
+                <div class="sensor-extras" title="CPU · {c.load_pct.toFixed(0)}% load · {c.power_watts.toFixed(0)} W · {c.clock_mhz} MHz">
+                  <span class="mini-label">LOAD</span>
+                  <div class="util-bar">
+                    <div class="util-fill util-fill-cpu" style="width: {Math.min(c.load_pct, 100)}%"></div>
+                  </div>
+                  <span class="util-value util-value-cpu tabular-nums">{c.load_pct.toFixed(0)}%</span>
+                  <span class="dot"></span>
+                  <span class="metric tabular-nums">{c.power_watts.toFixed(0)} W</span>
+                  <span class="metric tabular-nums">{c.clock_mhz} MHz</span>
+                </div>
+              {/if}
+              {#if temp.source === 'gpu' && data.gpu_metrics}
+                {@const g = data.gpu_metrics}
+                <div class="sensor-extras" title="GPU · {g.utilization_pct}% util · {g.power_watts.toFixed(0)} W · {g.clock_mhz} MHz · {(g.memory_used_mb / 1024).toFixed(1)} GB VRAM">
+                  <span class="mini-label">UTIL</span>
+                  <div class="util-bar">
+                    <div class="util-fill" style="width: {g.utilization_pct}%"></div>
+                  </div>
+                  <span class="util-value tabular-nums">{g.utilization_pct}%</span>
+                  <span class="dot"></span>
+                  <span class="metric tabular-nums">{g.power_watts.toFixed(0)} W</span>
+                  <span class="metric tabular-nums">{g.clock_mhz} MHz</span>
+                  <span class="metric tabular-nums">{(g.memory_used_mb / 1024).toFixed(1)} GB</span>
+                </div>
+              {/if}
+            </div>
           {/each}
           {#if data.temperatures.length === 0}
             <p class="empty">No temperature sources available</p>
@@ -164,7 +200,7 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     grid-template-rows: auto auto auto 1fr auto;
-    gap: 12px;
+    gap: 10px;
     min-height: 0;
   }
   .presets-row {
@@ -184,10 +220,91 @@
     flex: 1;
     min-height: 0;
   }
-  .temp-grid, .fan-grid {
+  /* Temp grid: auto-fit with 180px min so CPU and GPU stretch
+     to ~50% each. align-items: start stops CPU stretching to
+     match GPU's taller cell (which includes the extras block). */
+  .temp-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 8px;
+    align-items: start;
+  }
+  /* Fan grid keeps 130px min so the owner's typical 4 fan groups
+     (top/rear/side/bottom) all fit on one row in the ~620px
+     panel without wrapping. */
+  .fan-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
     gap: 8px;
+  }
+  .temp-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  /* Shared CPU / GPU sensor-extras strip — stacked directly under
+     each sensor's temp card so related info stays in one column.
+     Single compact row: label + bar + value + inline metrics. */
+  .sensor-extras {
+    padding: 5px 8px;
+    background: var(--bg-card-inset);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .mini-label {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+  .util-bar {
+    flex: 1 1 60px;
+    min-width: 50px;
+    height: 5px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .util-fill {
+    height: 100%;
+    background: linear-gradient(to right, var(--accent), #c084fc);
+    transition: width 0.25s ease;
+  }
+  /* CPU uses the same amber → red gradient the CPU temp bar
+     already runs on so a high load visually echoes a rising
+     temp (without literally colour-mixing two different scales). */
+  .util-fill-cpu {
+    background: linear-gradient(to right, #fbbf24, #f87171);
+  }
+  .util-value {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent);
+    min-width: 32px;
+    text-align: right;
+  }
+  .util-value-cpu {
+    color: #fbbf24;
+  }
+  .dot {
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    flex-shrink: 0;
+  }
+  .metric {
+    font-size: 10px;
+    color: var(--text-secondary);
+    white-space: nowrap;
   }
   .empty {
     color: var(--text-muted);

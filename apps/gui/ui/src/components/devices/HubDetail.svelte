@@ -114,12 +114,27 @@
                 maxlength="64"
               />
             {:else}
+              {@const label = displayNameFromTree(device.device_id, { config: configStore.config, hubs: [hub] })}
               <button
                 class="rename-trigger"
                 onclick={() => startEdit(device.device_id)}
                 title="Click to rename"
+                aria-label={`Rename ${label}`}
               >
-                {displayNameFromTree(device.device_id, { config: configStore.config, hubs: [hub] })}
+                <span class="rename-label">{label}</span>
+                <svg
+                  class="rename-icon"
+                  viewBox="0 0 16 16"
+                  width="10"
+                  height="10"
+                  aria-hidden="true"
+                  focusable="false"
+                >
+                  <path
+                    d="M12.146 1.854a2 2 0 0 1 2.828 2.828l-8.5 8.5a1 1 0 0 1-.407.244l-3 1a.5.5 0 0 1-.632-.632l1-3a1 1 0 0 1 .244-.407l8.5-8.5zm2.12 2.121a1 1 0 0 0-1.414-1.414L4.5 11.086V11.5h.414l8.353-8.353z"
+                    fill="currentColor"
+                  />
+                </svg>
               </button>
             {/if}
           </td>
@@ -181,6 +196,9 @@
     max-width: 220px;
   }
   .rename-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     background: transparent;
     border: 1px dashed transparent;
     border-radius: 4px;
@@ -191,13 +209,34 @@
     font-size: 12px;
     text-align: left;
     width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   .rename-trigger:hover {
     border-color: var(--border);
     background: rgba(255, 255, 255, 0.03);
+  }
+  .rename-trigger:focus-visible {
+    outline: none;
+    border-color: var(--accent-dim);
+    border-style: solid;
+    background: rgba(255, 255, 255, 0.03);
+  }
+  .rename-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .rename-icon {
+    flex: 0 0 auto;
+    color: var(--text-muted);
+    opacity: 0;
+    transition: opacity 0.15s, color 0.15s;
+  }
+  .rename-trigger:hover .rename-icon,
+  .rename-trigger:focus-visible .rename-icon {
+    opacity: 1;
+    color: var(--accent);
   }
   .rename-input {
     width: 100%;

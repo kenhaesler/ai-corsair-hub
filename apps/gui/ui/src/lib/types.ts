@@ -9,6 +9,32 @@ export interface SystemSnapshot {
   emergency: boolean;
   any_stale: boolean;
   hub_health: HubHealth[];
+  /**
+   * Extended GPU telemetry (utilisation, power, clock, VRAM, temp).
+   * `null` on non-NVIDIA machines or when NVML is unreachable. The
+   * dashboard GPU card hides itself when this is `null`. Added in v0.4.
+   */
+  gpu_metrics: GpuMetricsDto | null;
+  /**
+   * Extended CPU telemetry (load %, package power, max core clock)
+   * from LibreHardwareMonitor. `null` when LHM isn't running or
+   * doesn't expose a `/amdcpu` / `/intelcpu` node. Added in v0.4.
+   */
+  cpu_metrics: CpuMetricsDto | null;
+}
+
+export interface GpuMetricsDto {
+  utilization_pct: number;
+  power_watts: number;
+  clock_mhz: number;
+  memory_used_mb: number;
+  temp_celsius: number;
+}
+
+export interface CpuMetricsDto {
+  load_pct: number;
+  power_watts: number;
+  clock_mhz: number;
 }
 
 export interface HubHealth {
@@ -130,12 +156,49 @@ export interface FanGroupConfig {
    */
   device_ids?: string[];
   mode: FanMode;
+  /**
+   * Id of the curated preset whose canonical values currently equal this
+   * group's mode. Set by `apply_preset` / `apply_preset_to_group`; cleared
+   * by `save_config` when values drift. Drives the three-state indicator
+   * on the dashboard preset rail.
+   */
+  preset_applied?: string | null;
 }
 
 export type FanMode =
   | { type: 'fixed'; duty_percent: number }
-  | { type: 'curve'; points: CurvePoint[]; hysteresis: number; ramp_rate: number; temp_source: TempSourceConfig }
+  | {
+      type: 'curve';
+      points: CurvePoint[];
+      hysteresis: number;
+      ramp_rate: number;
+      /**
+       * Asymmetric ramp-down rate (%/sec). Introduced in v0.3; absent on
+       * pre-v0.3 configs. When `null`/absent the backend falls back to
+       * `ramp_rate * 0.4` (the legacy heuristic).
+       */
+      ramp_down_rate?: number | null;
+      temp_source: TempSourceConfig;
+    }
   | { type: 'pid'; target_temp: number; kp: number; ki: number; kd: number; min_duty: number; max_duty: number; temp_source: TempSourceConfig };
+
+/**
+ * Curated fan-preset definition, returned by the `get_fan_presets`
+ * Tauri command. The TOML asset lives at
+ * `apps/gui/assets/presets/fans.toml` and is embedded into the binary.
+ */
+export interface FanPresetDef {
+  id: string;
+  name: string;
+  description: string;
+  points: CurvePoint[];
+  hysteresis: number;
+  ramp_up: number;
+  ramp_down: number;
+  cpu_weight: number;
+  gpu_weight: number;
+  water_weight: number;
+}
 
 export interface CurvePoint {
   temp: number;
@@ -220,6 +283,7 @@ export type EffectConfig =
   | { type: 'TemperatureMap'; gradient: [number, RgbColor][]; glow_on_spike: boolean }
   | { type: 'ThermalPulse'; cold_color: RgbColor; hot_color: RgbColor; min_temp: number; max_temp: number }
   | { type: 'DutyMeter'; low_color: RgbColor; high_color: RgbColor }
+  | { type: 'GpuMeter'; low_color: RgbColor; high_color: RgbColor }
   | { type: 'Gradient'; colors: RgbColor[]; speed: number };
 
 export interface RgbFrameDto {

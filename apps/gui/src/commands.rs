@@ -1,10 +1,10 @@
 use tauri::State;
 
-use corsair_common::config::{AppConfig, RgbConfig};
+use corsair_common::config::{AppConfig, FanPresetDef, RgbConfig};
 use corsair_fancontrol::control_loop;
 
 use crate::dto::{DeviceTree, ManualDutyResult, SystemSnapshot};
-use crate::state::{AppState, HwCommand};
+use crate::state::{AppState, ChannelIdentity, HwCommand};
 
 #[tauri::command]
 pub async fn get_snapshot(state: State<'_, AppState>) -> Result<SystemSnapshot, String> {
@@ -39,6 +39,23 @@ pub async fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String>
         .map_err(|_| "Hardware thread dropped".to_string())?
 }
 
+/// Return the set of sensor names the running control loop currently
+/// has initialized (e.g. `cpu`, `gpu`, `psu_vrm`, `psu_case`). Powers
+/// the per-group sensor-weighting UI — the picker only shows sensors
+/// that actually exist on this machine right now.
+#[tauri::command]
+pub async fn list_available_sensors(
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state
+        .hw_sender
+        .send(HwCommand::ListSensors { reply: tx })
+        .map_err(|_| "Hardware thread unavailable".to_string())?;
+    rx.await
+        .map_err(|_| "Hardware thread dropped".to_string())?
+}
+
 #[tauri::command]
 pub async fn save_config(
     state: State<'_, AppState>,
@@ -53,6 +70,9 @@ pub async fn save_config(
         .map_err(|_| "Hardware thread dropped".to_string())?
 }
 
+/// Apply a curated fan preset globally (every configured group).
+/// Retained for back-compat with saved UI state and the tray menu;
+/// the v0.3 UI uses `apply_preset_to_group` for per-group control.
 #[tauri::command]
 pub async fn apply_preset(
     state: State<'_, AppState>,
@@ -61,10 +81,45 @@ pub async fn apply_preset(
     let (tx, rx) = tokio::sync::oneshot::channel();
     state
         .hw_sender
-        .send(HwCommand::ApplyPreset { preset, reply: tx })
+        .send(HwCommand::ApplyPreset {
+            preset,
+            group_name: None,
+            reply: tx,
+        })
         .map_err(|_| "Hardware thread unavailable".to_string())?;
     rx.await
         .map_err(|_| "Hardware thread dropped".to_string())?
+}
+
+/// Apply a curated fan preset to a specific group, or globally if
+/// `group_name` is `None`. Powers the v0.3 preset rail + group
+/// selector — the user can run "Competitive FPS" on radiators while
+/// chassis fans stay on "Quiet Productivity".
+#[tauri::command]
+pub async fn apply_preset_to_group(
+    state: State<'_, AppState>,
+    preset: String,
+    group_name: Option<String>,
+) -> Result<(), String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state
+        .hw_sender
+        .send(HwCommand::ApplyPreset {
+            preset,
+            group_name,
+            reply: tx,
+        })
+        .map_err(|_| "Hardware thread unavailable".to_string())?;
+    rx.await
+        .map_err(|_| "Hardware thread dropped".to_string())?
+}
+
+/// Return the full curated fan-preset library. Read-only, no
+/// hardware-thread round-trip needed — the library is a compile-time
+/// asset.
+#[tauri::command]
+pub fn get_fan_presets() -> Vec<FanPresetDef> {
+    crate::presets::all().to_vec()
 }
 
 /// Legacy V1 duty command — still used by the unmigrated Svelte frontend.
@@ -179,6 +234,28 @@ pub async fn set_rgb_enabled(
     state
         .hw_sender
         .send(HwCommand::SetRgbEnabled { enabled, reply: tx })
+        .map_err(|_| "Hardware thread unavailable".to_string())?;
+    rx.await
+        .map_err(|_| "Hardware thread dropped".to_string())?
+}
+
+/// Debug / identification: paint every enumerated device a unique
+/// colour for `duration_secs` seconds, then resume normal rendering.
+/// The returned mapping lets the UI render a legend so the user can
+/// correlate physical positions in their rig with channel numbers
+/// the firmware actually assigned. No config-label guessing.
+#[tauri::command]
+pub async fn rgb_identify_channels(
+    state: State<'_, AppState>,
+    duration_secs: u64,
+) -> Result<Vec<ChannelIdentity>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state
+        .hw_sender
+        .send(HwCommand::RgbIdentifyChannels {
+            duration_secs,
+            reply: tx,
+        })
         .map_err(|_| "Hardware thread unavailable".to_string())?;
     rx.await
         .map_err(|_| "Hardware thread dropped".to_string())?

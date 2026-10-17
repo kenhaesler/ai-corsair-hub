@@ -4,6 +4,7 @@ pub mod candle;
 pub mod color_cycle;
 pub mod duty_meter;
 pub mod fire;
+pub mod gpu_meter;
 pub mod gradient;
 pub mod rain;
 pub mod rainbow_wave;
