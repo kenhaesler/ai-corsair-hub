@@ -264,12 +264,30 @@ impl IcueLinkTransport for IcueLinkHub {
 /// consistent view of `color_endpoint_open` and avoids a race where a second
 /// thread flips the flag between our check and our close.
 struct IcueLinkHubInner {
-    device: HidDevice,
+    device: Box<dyn HidIo>,
     color_endpoint_open: bool,
 }
 
+/// Minimal HID I/O surface used by `IcueLinkHub::transfer`. Exists only as a
+/// test seam so packet traffic can be recorded and responses scripted; the
+/// production implementation delegates directly to `hidapi::HidDevice`.
+trait HidIo: Send {
+    fn write(&self, data: &[u8]) -> hidapi::HidResult<usize>;
+    fn read_timeout(&self, buf: &mut [u8], timeout_ms: i32) -> hidapi::HidResult<usize>;
+}
+
+impl HidIo for HidDevice {
+    fn write(&self, data: &[u8]) -> hidapi::HidResult<usize> {
+        HidDevice::write(self, data)
+    }
+    fn read_timeout(&self, buf: &mut [u8], timeout_ms: i32) -> hidapi::HidResult<usize> {
+        HidDevice::read_timeout(self, buf, timeout_ms)
+    }
+}
+
 // SAFETY: `hidapi::HidDevice` is `Send` on all supported platforms (Windows,
-// Linux, macOS) — see hidapi-2.6's platform modules. It is not `Sync`, but we
+// Linux, macOS) — see hidapi-2.6's platform modules, and `HidIo: Send` makes
+// the boxed trait object `Send`. It is not `Sync`, but we
 // never share it across threads concurrently; the `Mutex` enforces single-
 // threaded access. The `Mutex` is itself `Send + Sync`, so the enclosing
 // `Arc<Mutex<IcueLinkHubInner>>` is `Send + Sync` too.
@@ -296,6 +314,10 @@ impl Clone for IcueLinkHub {
 
 impl IcueLinkHub {
     pub fn new(device: HidDevice, serial: String) -> Self {
+        Self::from_io(Box::new(device), serial)
+    }
+
+    fn from_io(device: Box<dyn HidIo>, serial: String) -> Self {
         Self {
             inner: Arc::new(Mutex::new(IcueLinkHubInner {
                 device,
@@ -1328,5 +1350,484 @@ mod tests {
         // No LEDs
         assert_eq!(LinkDeviceType::RxMaxFan.led_count(), 0);
         assert_eq!(LinkDeviceType::Psu.led_count(), 0);
+    }
+
+    // =====================================================================
+    // Golden-byte characterization tests (PR 0, RGB part).
+    //
+    // A scripted fake `HidIo` records every written packet and returns
+    // scripted 512-byte responses. All expected bytes below are hand-written
+    // or computed with independent arithmetic, never via `build_packet`,
+    // `build_rgb_payload` or the `set_rgb` flattening.
+    // =====================================================================
+
+    use std::collections::VecDeque;
+
+    #[derive(Clone)]
+    enum Reply {
+        /// Successful read returning exactly these bytes.
+        Resp(Vec<u8>),
+        /// `read_timeout` returns Ok(0) (hub timeout).
+        Timeout,
+        /// `read_timeout` returns Err.
+        ReadErr,
+        /// `write` returns Err (packet is still recorded).
+        WriteErr,
+    }
+
+    type Sent = Arc<Mutex<Vec<Vec<u8>>>>;
+
+    struct FakeIo {
+        sent: Sent,
+        script: Mutex<VecDeque<Reply>>,
+        pending: Mutex<Option<Reply>>,
+    }
+
+    impl HidIo for FakeIo {
+        fn write(&self, data: &[u8]) -> hidapi::HidResult<usize> {
+            self.sent.lock().unwrap().push(data.to_vec());
+            let reply = self
+                .script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Reply::Resp(ok_resp()));
+            if let Reply::WriteErr = reply {
+                return Err(hidapi::HidError::HidApiError {
+                    message: "scripted write error".into(),
+                });
+            }
+            *self.pending.lock().unwrap() = Some(reply);
+            Ok(data.len())
+        }
+
+        fn read_timeout(&self, buf: &mut [u8], _timeout_ms: i32) -> hidapi::HidResult<usize> {
+            match self.pending.lock().unwrap().take() {
+                Some(Reply::Resp(r)) => {
+                    buf[..r.len()].copy_from_slice(&r);
+                    Ok(r.len())
+                }
+                Some(Reply::Timeout) | None => Ok(0),
+                Some(Reply::ReadErr) => Err(hidapi::HidError::HidApiError {
+                    message: "scripted read error".into(),
+                }),
+                Some(Reply::WriteErr) => unreachable!(),
+            }
+        }
+    }
+
+    /// Default response: 512 zero bytes (status byte [3] == 0x00 == OK).
+    fn ok_resp() -> Vec<u8> {
+        vec![0u8; 512]
+    }
+
+    fn scripted_hub(script: Vec<Reply>) -> (IcueLinkHub, Sent) {
+        let sent: Sent = Arc::new(Mutex::new(Vec::new()));
+        let io = FakeIo {
+            sent: Arc::clone(&sent),
+            script: Mutex::new(script.into()),
+            pending: Mutex::new(None),
+        };
+        (IcueLinkHub::from_io(Box::new(io), "TEST".to_string()), sent)
+    }
+
+    fn recording_hub() -> (IcueLinkHub, Sent) {
+        scripted_hub(Vec::new())
+    }
+
+    fn sent_packets(sent: &Sent) -> Vec<Vec<u8>> {
+        sent.lock().unwrap().clone()
+    }
+
+    /// Assert a packet is exactly: 513 bytes, `[0x00, 0x00, 0x01, cmd.., data.., zeros]`.
+    fn assert_packet(packet: &[u8], cmd: [u8; 2], data: &[u8]) {
+        assert_eq!(packet.len(), 513, "packet length");
+        assert_eq!(&packet[0..3], &[0x00, 0x00, 0x01], "report id/normal/flag");
+        assert_eq!(&packet[3..5], &cmd, "command bytes");
+        assert_eq!(&packet[5..5 + data.len()], data, "data region");
+        assert!(
+            packet[5 + data.len()..].iter().all(|&b| b == 0),
+            "tail must be zero padded"
+        );
+    }
+
+    /// Deterministic filler: byte i = (i * 7 + 3) mod 256.
+    fn filler(n: usize) -> Vec<u8> {
+        (0..n).map(|i| ((i * 7 + 3) % 256) as u8).collect()
+    }
+
+    /// Independently framed payload: [len_lo, len_hi, 0, 0, 0x12, 0x00, rgb...]
+    /// where len = rgb.len() + 6.
+    fn framed(rgb: &[u8]) -> Vec<u8> {
+        let len = rgb.len() + 6;
+        let mut v = vec![(len & 0xFF) as u8, (len >> 8) as u8, 0x00, 0x00, 0x12, 0x00];
+        v.extend_from_slice(rgb);
+        v
+    }
+
+    #[test]
+    fn golden_write_color_single_chunk_exact_bytes() {
+        let (hub, sent) = recording_hub();
+        hub.write_color(&[0xAA, 0xBB, 0xCC, 0x11, 0x22, 0x33]).unwrap();
+        let p = sent_packets(&sent);
+        assert_eq!(p.len(), 1);
+        // total length 12 = 0x000C; reserved 00 00; data type 12 00; then RGB.
+        assert_packet(
+            &p[0],
+            [0x06, 0x00],
+            &[0x0C, 0x00, 0x00, 0x00, 0x12, 0x00, 0xAA, 0xBB, 0xCC, 0x11, 0x22, 0x33],
+        );
+    }
+
+    #[test]
+    fn golden_write_color_chunk_boundaries() {
+        // framed length = rgb_len + 6; chunk size is 508 data bytes.
+        // (rgb_len, expected chunk data lengths)
+        let cases: [(usize, &[usize]); 6] = [
+            (501, &[507]),          // one below boundary
+            (502, &[508]),          // exactly on boundary (raw layer; not a multiple of 3)
+            (503, &[508, 1]),       // one above boundary
+            (504, &[508, 2]),       // valid RGB length just above boundary
+            (1010, &[508, 508]),    // exactly two chunks
+            (1014, &[508, 508, 4]), // third chunk of 4 bytes
+        ];
+        for (rgb_len, chunk_lens) in cases {
+            let rgb = filler(rgb_len);
+            let payload = framed(&rgb);
+            let (hub, sent) = recording_hub();
+            hub.write_color(&rgb).unwrap();
+            let p = sent_packets(&sent);
+            assert_eq!(p.len(), chunk_lens.len(), "packet count for rgb_len {rgb_len}");
+            let mut off = 0;
+            for (i, &n) in chunk_lens.iter().enumerate() {
+                let cmd = if i == 0 { [0x06, 0x00] } else { [0x07, 0x00] };
+                assert_packet(&p[i], cmd, &payload[off..off + n]);
+                off += n;
+            }
+            assert_eq!(off, payload.len());
+        }
+    }
+
+    #[test]
+    fn golden_write_color_hand_computed_seam_bytes() {
+        // rgb_len 503 -> framed 509 = 0x01FD. filler byte i = (7i+3)%256:
+        //   i=0 -> 0x03, i=1 -> 0x0A, i=501 -> 3510%256=182=0xB6, i=502 -> 3517%256=189=0xBD.
+        // Payload index = rgb index + 6, so payload[507]=rgb[501], payload[508]=rgb[502].
+        let rgb = filler(503);
+        let (hub, sent) = recording_hub();
+        hub.write_color(&rgb).unwrap();
+        let p = sent_packets(&sent);
+        assert_eq!(p.len(), 2);
+        assert_eq!(&p[0][3..11], &[0x06, 0x00, 0xFD, 0x01, 0x00, 0x00, 0x12, 0x00]);
+        assert_eq!(&p[0][11..13], &[0x03, 0x0A]);
+        assert_eq!(p[0][5 + 507], 0xB6, "last byte of chunk 1");
+        assert_eq!(&p[1][3..6], &[0x07, 0x00, 0xBD], "continuation cmd + first byte of chunk 2");
+        assert!(p[1][6..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn golden_set_rgb_large_multichunk_frame() {
+        // 20 channels x 34 LEDs (two hubs' worth of QX fans) = 2040 RGB bytes,
+        // framed 2046 = 0x07FE -> chunks 508,508,508,508,14.
+        // LED (ch, j) = [ch, j, 0xF0 ^ ch] for ch in 1..=20, j in 0..34.
+        let mut leds: Vec<(u8, Vec<[u8; 3]>)> = Vec::new();
+        for ch in 1..=20u8 {
+            leds.push((ch, (0..34u8).map(|j| [ch, j, 0xF0 ^ ch]).collect()));
+        }
+        let args: Vec<(u8, &[[u8; 3]])> = leds.iter().map(|(c, l)| (*c, l.as_slice())).collect();
+        let mut rgb = Vec::new();
+        for ch in 1..=20u8 {
+            for j in 0..34u8 {
+                rgb.extend_from_slice(&[ch, j, 0xF0 ^ ch]);
+            }
+        }
+        assert_eq!(rgb.len(), 2040);
+        let payload = framed(&rgb);
+        assert_eq!(&payload[0..2], &[0xFE, 0x07]);
+
+        let (hub, sent) = recording_hub();
+        hub.set_rgb(&args).unwrap();
+        let p = sent_packets(&sent);
+        assert_eq!(p.len(), 2 + 5, "close + open + 5 chunks");
+        let chunk_lens = [508usize, 508, 508, 508, 14];
+        let mut off = 0;
+        for (i, &n) in chunk_lens.iter().enumerate() {
+            let cmd = if i == 0 { [0x06, 0x00] } else { [0x07, 0x00] };
+            assert_packet(&p[2 + i], cmd, &payload[off..off + n]);
+            off += n;
+        }
+    }
+
+    #[test]
+    fn golden_set_rgb_sorts_by_channel_without_padding() {
+        let c2: [[u8; 3]; 1] = [[7, 8, 9]];
+        let c5: [[u8; 3]; 2] = [[1, 2, 3], [4, 5, 6]];
+        let c9: [[u8; 3]; 1] = [[10, 11, 12]];
+        let empty: [[u8; 3]; 0] = [];
+        let (hub, sent) = recording_hub();
+        // Out of order, with gaps (3,4,6,7,8 absent) and an empty channel 6.
+        hub.set_rgb(&[(9, &c9), (5, &c5), (6, &empty), (2, &c2)]).unwrap();
+        let p = sent_packets(&sent);
+        assert_eq!(p.len(), 3);
+        // 4 LEDs = 12 RGB bytes; framed 18 = 0x12. Order: ch2, ch5, ch9.
+        assert_packet(
+            &p[2],
+            [0x06, 0x00],
+            &[
+                0x12, 0x00, 0x00, 0x00, 0x12, 0x00, //
+                7, 8, 9, 1, 2, 3, 4, 5, 6, 10, 11, 12,
+            ],
+        );
+    }
+
+    #[test]
+    fn golden_set_rgb_duplicate_channel_keeps_input_order() {
+        // CHARACTERIZATION: current behavior; stable sort keeps caller order for equal channels.
+        let a: [[u8; 3]; 1] = [[1, 2, 3]];
+        let b: [[u8; 3]; 1] = [[4, 5, 6]];
+        let (hub, sent) = recording_hub();
+        hub.set_rgb(&[(3, &a), (3, &b)]).unwrap();
+        let p = sent_packets(&sent);
+        assert_packet(
+            &p[2],
+            [0x06, 0x00],
+            &[0x0C, 0x00, 0x00, 0x00, 0x12, 0x00, 1, 2, 3, 4, 5, 6],
+        );
+    }
+
+    #[test]
+    fn golden_endpoint_lifecycle_opens_once() {
+        let (hub, sent) = recording_hub();
+        let led: [[u8; 3]; 1] = [[1, 2, 3]];
+        assert!(!hub.color_endpoint_open());
+        hub.set_rgb(&[(1, &led)]).unwrap();
+        assert!(hub.color_endpoint_open());
+        {
+            let p = sent_packets(&sent);
+            assert_eq!(p.len(), 3);
+            assert_packet(&p[0], [0x05, 0x01], &[0x01]); // CMD_CLOSE = 05 01 01
+            assert_packet(&p[1], [0x0D, 0x00], &[0x22]); // OPEN_COLOR, mode 0x22
+            assert_packet(
+                &p[2],
+                [0x06, 0x00],
+                &[0x09, 0x00, 0x00, 0x00, 0x12, 0x00, 1, 2, 3],
+            );
+        }
+        hub.set_rgb(&[(1, &led)]).unwrap();
+        hub.set_rgb(&[(1, &led)]).unwrap();
+        let p = sent_packets(&sent);
+        assert_eq!(p.len(), 5, "later frames are one write each, no reopen");
+        assert_eq!(&p[3][3..5], &[0x06, 0x00]);
+        assert_eq!(&p[4][3..5], &[0x06, 0x00]);
+    }
+
+    #[test]
+    fn golden_enter_hardware_mode_sequence() {
+        let (hub, sent) = recording_hub();
+        let led: [[u8; 3]; 1] = [[1, 2, 3]];
+        hub.set_rgb(&[(1, &led)]).unwrap();
+        sent.lock().unwrap().clear();
+        hub.enter_hardware_mode().unwrap();
+        let p = sent_packets(&sent);
+        assert_eq!(p.len(), 2);
+        assert_packet(&p[0], [0x05, 0x01], &[]); // CLOSE_COLOR (no data byte)
+        assert_packet(&p[1], [0x01, 0x03], &[0x00, 0x01]); // SLEEP = 01 03 00 01
+        assert!(!hub.color_endpoint_open());
+
+        // Not open: only SLEEP is sent.
+        sent.lock().unwrap().clear();
+        hub.enter_hardware_mode().unwrap();
+        let p = sent_packets(&sent);
+        assert_eq!(p.len(), 1);
+        assert_packet(&p[0], [0x01, 0x03], &[0x00, 0x01]);
+    }
+
+    #[test]
+    fn golden_partial_failure_on_second_chunk_g04() {
+        // CHARACTERIZATION: current behavior; see plan G04.
+        // Calls: 0 close, 1 open, 2 chunk1 (ok), 3 chunk2 (failure).
+        for failure in [Reply::ReadErr, Reply::Timeout, Reply::WriteErr] {
+            let (hub, sent) = scripted_hub(vec![
+                Reply::Resp(ok_resp()),
+                Reply::Resp(ok_resp()),
+                Reply::Resp(ok_resp()),
+                failure,
+            ]);
+            // 2040 RGB bytes -> 5 chunks if it were to complete.
+            let leds: Vec<[u8; 3]> = (0..680).map(|i| [(i % 256) as u8, 1, 2]).collect();
+            let r = hub.set_rgb(&[(1, &leds)]);
+            assert!(r.is_err());
+            let p = sent_packets(&sent);
+            assert_eq!(p.len(), 4, "close, open, chunk1, failed chunk2, no further chunks");
+            assert_eq!(&p[2][3..5], &[0x06, 0x00]);
+            assert_eq!(&p[3][3..5], &[0x07, 0x00]);
+            assert!(
+                hub.color_endpoint_open(),
+                "CHARACTERIZATION: endpoint flag stays true after a torn frame"
+            );
+
+            // Next frame does NOT reopen and does NOT resync: just a fresh first chunk.
+            let one: [[u8; 3]; 1] = [[9, 9, 9]];
+            hub.set_rgb(&[(1, &one)]).unwrap();
+            let p = sent_packets(&sent);
+            assert_eq!(p.len(), 5);
+            assert_eq!(&p[4][3..5], &[0x06, 0x00]);
+        }
+    }
+
+    // --- LED-count table interpretation (scripted 0x1d responses) ---
+
+    /// Build a 0x1d response: status OK, `channels` entries of [type, count].
+    fn led_table_resp(channels: usize, entries: &[(usize, u8, u8)]) -> Vec<u8> {
+        let mut r = vec![0u8; 512];
+        r[6] = channels as u8;
+        for &(ch, ty, count) in entries {
+            r[6 + ch * 2] = ty;
+            r[6 + ch * 2 + 1] = count;
+        }
+        r
+    }
+
+    #[test]
+    fn golden_read_led_counts_channel15_80_zeros_elsewhere() {
+        let table = led_table_resp(15, &[(1, 0x01, 0), (2, 0x01, 0), (15, 0x05, 80)]);
+        let (hub, sent) = scripted_hub(vec![
+            Reply::Resp(ok_resp()),
+            Reply::Resp(table),
+            Reply::Resp(ok_resp()),
+        ]);
+        let counts = hub.read_led_counts().unwrap();
+        assert_eq!(counts.len(), 1);
+        assert_eq!(counts.get(&15), Some(&80));
+        let p = sent_packets(&sent);
+        assert_eq!(p.len(), 3);
+        assert_packet(&p[0], [0x0D, 0x00], &[0x1D]);
+        assert_packet(&p[1], [0x08, 0x00], &[]);
+        assert_packet(&p[2], [0x05, 0x01], &[]);
+    }
+
+    #[test]
+    fn golden_read_led_counts_absurd_channel_count_is_empty() {
+        let table = led_table_resp(21, &[(15, 0x05, 80)]);
+        let (hub, _s) = scripted_hub(vec![
+            Reply::Resp(ok_resp()),
+            Reply::Resp(table),
+            Reply::Resp(ok_resp()),
+        ]);
+        assert!(hub.read_led_counts().unwrap().is_empty());
+    }
+
+    /// Device-enumeration response with `channels` entries; `devs` = (channel, type byte, id).
+    /// Channels not listed are empty (id_len 0).
+    fn device_resp(channels: usize, devs: &[(usize, u8, &str)]) -> Vec<u8> {
+        let mut r = vec![0u8; 7];
+        r[4] = 0x21;
+        r[5] = 0x00;
+        r[6] = channels as u8;
+        for ch in 1..=channels {
+            let mut entry = [0u8; 8];
+            if let Some(&(_, ty, id)) = devs.iter().find(|d| d.0 == ch) {
+                entry[2] = ty;
+                entry[7] = id.len() as u8;
+                r.extend_from_slice(&entry);
+                r.extend_from_slice(id.as_bytes());
+            } else {
+                r.extend_from_slice(&entry);
+            }
+        }
+        r.resize(512, 0);
+        r
+    }
+
+    fn fw_resp() -> Vec<u8> {
+        let mut r = ok_resp();
+        r[4] = 2;
+        r[5] = 9;
+        r[6] = 0xE8;
+        r[7] = 0x01;
+        r
+    }
+
+    /// Script for `initialize`: fw, wake, <led-table transfers>, then
+    /// enumerate [close, open, read(devices), close].
+    fn init_script(table: Vec<Reply>, devices: Vec<u8>) -> Vec<Reply> {
+        let mut s = vec![Reply::Resp(fw_resp()), Reply::Resp(ok_resp())];
+        s.extend(table);
+        s.extend([
+            Reply::Resp(ok_resp()),
+            Reply::Resp(ok_resp()),
+            Reply::Resp(devices),
+            Reply::Resp(ok_resp()),
+        ]);
+        s
+    }
+
+    fn ok_table(table: Vec<u8>) -> Vec<Reply> {
+        vec![Reply::Resp(ok_resp()), Reply::Resp(table), Reply::Resp(ok_resp())]
+    }
+
+    #[test]
+    fn golden_initialize_keeps_channel15_80_and_drops_zeros() {
+        let devs = device_resp(15, &[(1, 0x01, "FAN1"), (15, 0x05, "ADAPT")]);
+        // ch1 = 0 (fallback marker), ch2 = 50 on a NON-enumerated channel (dropped), ch15 = 80.
+        let table = led_table_resp(15, &[(1, 0x01, 0), (2, 0x01, 50), (15, 0x05, 80)]);
+        let (hub, _s) = scripted_hub(init_script(ok_table(table), devs));
+        let info = hub.initialize().unwrap();
+        assert_eq!(info.devices.len(), 2);
+        assert_eq!(info.devices[1].channel, 15);
+        assert_eq!(info.led_counts.len(), 1);
+        assert_eq!(info.led_counts.get(&15), Some(&80));
+    }
+
+    #[test]
+    fn golden_initialize_partial_table_retains_valid_entries() {
+        let devs = device_resp(15, &[(1, 0x01, "FAN1"), (15, 0x05, "ADAPT")]);
+        let table = led_table_resp(15, &[(1, 0x01, 30), (15, 0x05, 80)]);
+        let (hub, _s) = scripted_hub(init_script(ok_table(table), devs));
+        let info = hub.initialize().unwrap();
+        assert_eq!(info.led_counts.get(&1), Some(&30));
+        assert_eq!(info.led_counts.get(&15), Some(&80));
+        assert_eq!(info.led_counts.len(), 2);
+    }
+
+    #[test]
+    fn golden_initialize_all_zero_table_falls_back_to_defaults() {
+        let devs = device_resp(15, &[(1, 0x01, "FAN1"), (15, 0x05, "ADAPT")]);
+        let table = led_table_resp(15, &[(1, 0x01, 0), (15, 0x05, 0)]);
+        let (hub, _s) = scripted_hub(init_script(ok_table(table), devs));
+        let info = hub.initialize().unwrap();
+        assert!(info.led_counts.is_empty());
+        // Type defaults are applied by callers via LinkDeviceType::led_count().
+        assert_eq!(info.devices[0].device_type.led_count(), 34);
+        assert_eq!(info.devices[1].device_type.led_count(), 21);
+    }
+
+    #[test]
+    fn golden_initialize_query_transfer_error_yields_empty_counts_g01() {
+        // CHARACTERIZATION: current behavior; see plan G01. A failed 0x1d query is
+        // indistinguishable (in HubInfo) from "all channels use type defaults".
+        let devs = device_resp(15, &[(1, 0x01, "FAN1"), (15, 0x05, "ADAPT")]);
+        // fw ok, wake ok, then the 0x1d open (call index 2) fails to read.
+        let (hub, _s) = scripted_hub(init_script(vec![Reply::ReadErr], devs));
+        let info = hub.initialize().unwrap();
+        assert!(info.led_counts.is_empty());
+        assert_eq!(info.devices.len(), 2);
+    }
+
+    #[test]
+    fn golden_initialize_persistent_non_ok_status_yields_empty_counts_g01() {
+        // CHARACTERIZATION: current behavior; see plan G01. Four attempts (with
+        // 100/300/800 ms backoff) all return status 0x03; initialize still
+        // succeeds with an empty table.
+        let devs = device_resp(15, &[(1, 0x01, "FAN1"), (15, 0x05, "ADAPT")]);
+        let mut bad = led_table_resp(15, &[(15, 0x05, 80)]);
+        bad[3] = 0x03;
+        let mut table = Vec::new();
+        for _ in 0..4 {
+            table.extend(ok_table(bad.clone()));
+        }
+        let (hub, _s) = scripted_hub(init_script(table, devs));
+        let info = hub.initialize().unwrap();
+        assert!(info.led_counts.is_empty());
     }
 }

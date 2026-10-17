@@ -2129,6 +2129,9 @@ mod tests {
         /// `(channel, led_count)` so tests can assert routing and
         /// buffer sizing without holding the raw byte slices alive.
         rgb_sent: std::sync::Mutex<Vec<Vec<(u8, usize)>>>,
+        /// Same calls as `rgb_sent`, but with owned per-channel RGB values so
+        /// golden-byte tests can assert exact bytes.
+        rgb_bytes: std::sync::Mutex<Vec<Vec<(u8, Vec<[u8; 3]>)>>>,
     }
 
     impl RecordingHub {
@@ -2136,7 +2139,12 @@ mod tests {
             Self {
                 speeds_sent: std::sync::Mutex::new(Vec::new()),
                 rgb_sent: std::sync::Mutex::new(Vec::new()),
+                rgb_bytes: std::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        fn last_rgb_bytes(&self) -> Option<Vec<(u8, Vec<[u8; 3]>)>> {
+            self.rgb_bytes.lock().unwrap().last().cloned()
         }
 
         fn last_speeds(&self) -> Option<Vec<(u8, u8)>> {
@@ -2166,6 +2174,12 @@ mod tests {
                 .map(|(ch, leds)| (*ch, leds.len()))
                 .collect();
             self.rgb_sent.lock().unwrap().push(summary);
+            self.rgb_bytes.lock().unwrap().push(
+                channel_leds
+                    .iter()
+                    .map(|(ch, leds)| (*ch, leds.to_vec()))
+                    .collect(),
+            );
             Ok(())
         }
         fn enter_hardware_mode(&self) -> Result<()> {
@@ -2518,5 +2532,420 @@ mod tests {
             vec![(1u8, 30usize)],
             "V2 per-device override (30) must win over V1 (21) and type default (34)"
         );
+    }
+
+    // --- PR 0: golden-byte RGB fixtures through send_rgb_frames ---
+    //
+    // Expected values are hand-written / computed with independent loops here,
+    // never by calling the production flattening. Brightness / power scaling
+    // does NOT happen in `send_rgb_frames` (it lives in the GUI worker,
+    // apps/gui/src/hardware_thread.rs), so bytes asserted below are the raw
+    // wire bytes handed to `IcueLinkTransport::set_rgb`; scaling coverage is
+    // left for the integration-harness step.
+
+    fn mk_typed_device(channel: u8, id: &str, ty: LinkDeviceType) -> corsair_hid::LinkDevice {
+        corsair_hid::LinkDevice {
+            channel,
+            device_type: ty,
+            model: 0x01,
+            device_id: id.to_string(),
+        }
+    }
+
+    /// Deterministic marker LED: R = device marker, G = LED index + 1,
+    /// B = marker ^ 0xFF. All three components differ, so R/G/B swaps and
+    /// off-by-one shifts are detectable.
+    fn marker_led(marker: u8, j: usize) -> [u8; 3] {
+        [marker, (j + 1) as u8, marker ^ 0xFF]
+    }
+
+    fn marker_frame(marker: u8, n: usize) -> Vec<[u8; 3]> {
+        (0..n).map(|j| marker_led(marker, j)).collect()
+    }
+
+    fn flatten_bytes(call: &[(u8, Vec<[u8; 3]>)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (_, leds) in call {
+            for l in leds {
+                out.extend_from_slice(l);
+            }
+        }
+        out
+    }
+
+    fn rgb_test_loop(
+        hubs: Vec<(&str, Arc<RecordingHub>, Vec<corsair_hid::LinkDevice>)>,
+        config: AppConfig,
+    ) -> ControlLoop {
+        let mut hub_map: HashMap<String, (Arc<dyn IcueLinkTransport>, Vec<u8>)> = HashMap::new();
+        let mut devs: HashMap<String, Vec<corsair_hid::LinkDevice>> = HashMap::new();
+        for (serial, mock, d) in hubs {
+            hub_map.insert(
+                serial.to_string(),
+                (mock as Arc<dyn IcueLinkTransport>, Vec::new()),
+            );
+            devs.insert(serial.to_string(), d);
+        }
+        ControlLoop::from_parts_for_test_with_devices(
+            config,
+            hub_map,
+            devs,
+            Vec::new(),
+            HashMap::new(),
+        )
+    }
+
+    #[test]
+    fn golden_two_hubs_overlapping_channels_never_mix_frames() {
+        let ma = Arc::new(RecordingHub::new());
+        let mb = Arc::new(RecordingHub::new());
+        let mut cl = rgb_test_loop(
+            vec![
+                (
+                    "HUB_A",
+                    ma.clone(),
+                    vec![
+                        mk_typed_device(1, "A1", LinkDeviceType::QxFan),
+                        mk_typed_device(2, "A2", LinkDeviceType::QxFan),
+                    ],
+                ),
+                (
+                    "HUB_B",
+                    mb.clone(),
+                    vec![
+                        mk_typed_device(1, "B1", LinkDeviceType::LxFan),
+                        mk_typed_device(2, "B2", LinkDeviceType::QxFan),
+                    ],
+                ),
+            ],
+            base_v1_config(),
+        );
+        let a1 = marker_frame(0x11, 34);
+        let a2 = marker_frame(0x12, 34);
+        let b1 = marker_frame(0x21, 18);
+        let b2 = marker_frame(0x22, 34);
+        // Shuffled: B2, A1, B1, A2.
+        let frames: Vec<(String, &[[u8; 3]])> = vec![
+            ("B2".to_string(), b2.as_slice()),
+            ("A1".to_string(), a1.as_slice()),
+            ("B1".to_string(), b1.as_slice()),
+            ("A2".to_string(), a2.as_slice()),
+        ];
+        assert_eq!(cl.send_rgb_frames(&frames), 4);
+
+        let ca = ma.last_rgb_bytes().unwrap();
+        let cb = mb.last_rgb_bytes().unwrap();
+        assert_eq!(ma.rgb_call_count(), 1);
+        assert_eq!(mb.rgb_call_count(), 1);
+        assert_eq!(ca.len(), 2);
+        assert_eq!((ca[0].0, ca[0].1.len()), (1, 34));
+        assert_eq!((ca[1].0, ca[1].1.len()), (2, 34));
+        assert_eq!((cb[0].0, cb[0].1.len()), (1, 18));
+        assert_eq!((cb[1].0, cb[1].1.len()), (2, 34));
+        for j in 0..34 {
+            assert_eq!(ca[0].1[j], [0x11, (j + 1) as u8, 0xEE]);
+            assert_eq!(ca[1].1[j], [0x12, (j + 1) as u8, 0xED]);
+            assert_eq!(cb[1].1[j], [0x22, (j + 1) as u8, 0xDD]);
+        }
+        for j in 0..18 {
+            assert_eq!(cb[0].1[j], [0x21, (j + 1) as u8, 0xDE]);
+        }
+        // Per-hub flat byte totals: A = 68*3, B = 52*3.
+        assert_eq!(flatten_bytes(&ca).len(), 204);
+        assert_eq!(flatten_bytes(&cb).len(), 156);
+    }
+
+    #[test]
+    fn golden_mixed_devices_gaps_zero_led_slot_offsets() {
+        // Enumerated: ch1 QX, ch2 QX, ch3 RX MAX fan (0 LEDs), ch5 LINK Adapter (21),
+        // ch6 LX fan (18, NO frame -> black). Channel 4 and 7+ absent (gaps).
+        let m = Arc::new(RecordingHub::new());
+        let mut cl = rgb_test_loop(
+            vec![(
+                "HUB_A",
+                m.clone(),
+                vec![
+                    mk_typed_device(1, "Q1", LinkDeviceType::QxFan),
+                    mk_typed_device(2, "Q2", LinkDeviceType::QxFan),
+                    mk_typed_device(3, "NOLED", LinkDeviceType::RxMaxFan),
+                    mk_typed_device(5, "AD", LinkDeviceType::LinkAdapter),
+                    mk_typed_device(6, "LX", LinkDeviceType::LxFan),
+                ],
+            )],
+            base_v1_config(),
+        );
+        let q1 = marker_frame(0x31, 34);
+        let q2 = marker_frame(0x32, 34);
+        let ad = marker_frame(0x35, 21);
+        let noled = marker_frame(0x33, 5); // frame for a zero-LED device is ignored
+        let frames: Vec<(String, &[[u8; 3]])> = vec![
+            ("AD".to_string(), ad.as_slice()),
+            ("NOLED".to_string(), noled.as_slice()),
+            ("Q2".to_string(), q2.as_slice()),
+            ("Q1".to_string(), q1.as_slice()),
+        ];
+        // sent counts slots written: Q1, Q2, AD, LX (zero-LED device has no slot).
+        assert_eq!(cl.send_rgb_frames(&frames), 4);
+
+        let call = m.last_rgb_bytes().unwrap();
+        let chans: Vec<(u8, usize)> = call.iter().map(|(c, l)| (*c, l.len())).collect();
+        assert_eq!(chans, vec![(1, 34), (2, 34), (5, 21), (6, 18)]);
+
+        let flat = flatten_bytes(&call);
+        // Hand-computed byte offsets: Q1 0..102, Q2 102..204, AD 204..267, LX 267..321.
+        assert_eq!(flat.len(), 321);
+        assert_eq!(&flat[0..3], &[0x31, 0x01, 0xCE]);
+        assert_eq!(&flat[99..102], &[0x31, 34, 0xCE]);
+        assert_eq!(&flat[102..105], &[0x32, 0x01, 0xCD]);
+        assert_eq!(&flat[201..204], &[0x32, 34, 0xCD]);
+        assert_eq!(&flat[204..207], &[0x35, 0x01, 0xCA]);
+        assert_eq!(&flat[264..267], &[0x35, 21, 0xCA]);
+        assert!(flat[267..321].iter().all(|&b| b == 0), "LX slot is black");
+    }
+
+    #[test]
+    fn golden_unsorted_enumeration_is_passed_in_enumeration_order() {
+        // CHARACTERIZATION: current behavior. send_rgb_frames emits slots in
+        // enumeration order; ascending-channel ordering is enforced later by
+        // IcueLinkHub::set_rgb (covered in corsair-hid golden tests).
+        let m = Arc::new(RecordingHub::new());
+        let mut cl = rgb_test_loop(
+            vec![(
+                "HUB_A",
+                m.clone(),
+                vec![
+                    mk_typed_device(4, "Q4", LinkDeviceType::QxFan),
+                    mk_typed_device(2, "Q2", LinkDeviceType::QxFan),
+                ],
+            )],
+            base_v1_config(),
+        );
+        let q4 = marker_frame(0x44, 34);
+        let frames: Vec<(String, &[[u8; 3]])> = vec![("Q4".to_string(), q4.as_slice())];
+        cl.send_rgb_frames(&frames);
+        let chans: Vec<u8> = m.last_rgb_bytes().unwrap().iter().map(|(c, _)| *c).collect();
+        assert_eq!(chans, vec![4, 2]);
+    }
+
+    #[test]
+    fn golden_channel15_80_leds_with_zeros_elsewhere() {
+        let m = Arc::new(RecordingHub::new());
+        let mut cl = rgb_test_loop(
+            vec![(
+                "HUB_A",
+                m.clone(),
+                vec![
+                    mk_typed_device(1, "Q1", LinkDeviceType::QxFan),
+                    mk_typed_device(14, "Q14", LinkDeviceType::QxFan),
+                    mk_typed_device(15, "AD15", LinkDeviceType::LinkAdapter),
+                ],
+            )],
+            base_v1_config(),
+        );
+        // Post-initialize table: only the nonzero entry survives (zeros are dropped there).
+        cl.hubs.get_mut("HUB_A").unwrap().info.led_counts.insert(15, 80);
+
+        // Adapter frame is the 21-LED layout placeholder: must be padded to 80, not left at 21.
+        let q14 = marker_frame(0x14, 34);
+        let ad_short = marker_frame(0x15, 21);
+        let frames: Vec<(String, &[[u8; 3]])> = vec![
+            ("Q14".to_string(), q14.as_slice()),
+            ("AD15".to_string(), ad_short.as_slice()),
+        ];
+        cl.send_rgb_frames(&frames);
+        let call = m.last_rgb_bytes().unwrap();
+        let chans: Vec<(u8, usize)> = call.iter().map(|(c, l)| (*c, l.len())).collect();
+        assert_eq!(chans, vec![(1, 34), (14, 34), (15, 80)]);
+
+        let flat = flatten_bytes(&call);
+        // Q1 0..102 (black), Q14 102..204, AD15 204..444.
+        assert_eq!(flat.len(), 444);
+        assert_eq!(&flat[201..204], &[0x14, 34, 0xEB], "last LED of neighbor ch14");
+        assert_eq!(&flat[204..207], &[0x15, 0x01, 0xEA], "first LED of ch15");
+        assert_eq!(&flat[204 + 20 * 3..204 + 21 * 3], &[0x15, 21, 0xEA], "last supplied LED");
+        assert!(flat[204 + 21 * 3..444].iter().all(|&b| b == 0), "LEDs 21..80 black-padded");
+        assert_eq!(&flat[441..444], &[0, 0, 0], "final LED (index 79) black");
+
+        // Full-length frame: the final LED (index 79) carries data.
+        let ad_full = marker_frame(0x15, 80);
+        let frames: Vec<(String, &[[u8; 3]])> = vec![
+            ("Q14".to_string(), q14.as_slice()),
+            ("AD15".to_string(), ad_full.as_slice()),
+        ];
+        cl.send_rgb_frames(&frames);
+        let flat = flatten_bytes(&m.last_rgb_bytes().unwrap());
+        assert_eq!(&flat[441..444], &[0x15, 80, 0xEA], "final LED (index 79)");
+        assert_eq!(&flat[201..204], &[0x14, 34, 0xEB], "neighbor boundary unchanged");
+    }
+
+    #[test]
+    fn golden_partial_firmware_table_retains_valid_entries_and_defaults_rest() {
+        let m = Arc::new(RecordingHub::new());
+        let mut cl = rgb_test_loop(
+            vec![(
+                "HUB_A",
+                m.clone(),
+                vec![
+                    mk_typed_device(1, "Q1", LinkDeviceType::QxFan),
+                    mk_typed_device(2, "Q2", LinkDeviceType::QxFan),
+                    mk_typed_device(15, "AD15", LinkDeviceType::LinkAdapter),
+                ],
+            )],
+            base_v1_config(),
+        );
+        {
+            let c = &mut cl.hubs.get_mut("HUB_A").unwrap().info.led_counts;
+            c.insert(2, 30);
+            c.insert(15, 80);
+            // A raw zero (should it ever reach here) is a fallback marker, not a zero-length slot.
+            c.insert(1, 0);
+        }
+        let f = marker_frame(0x01, 1);
+        let frames: Vec<(String, &[[u8; 3]])> = vec![("Q1".to_string(), f.as_slice())];
+        cl.send_rgb_frames(&frames);
+        let chans: Vec<(u8, usize)> = m
+            .last_rgb_bytes()
+            .unwrap()
+            .iter()
+            .map(|(c, l)| (*c, l.len()))
+            .collect();
+        assert_eq!(chans, vec![(1, 34), (2, 30), (15, 80)]);
+    }
+
+    #[test]
+    fn golden_only_one_device_framed_others_black_and_unframed_hub_untouched() {
+        let ma = Arc::new(RecordingHub::new());
+        let mb = Arc::new(RecordingHub::new());
+        let mut cl = rgb_test_loop(
+            vec![
+                (
+                    "HUB_A",
+                    ma.clone(),
+                    vec![
+                        mk_typed_device(1, "A1", LinkDeviceType::QxFan),
+                        mk_typed_device(2, "A2", LinkDeviceType::QxFan),
+                        mk_typed_device(3, "A3", LinkDeviceType::LinkAdapter),
+                    ],
+                ),
+                ("HUB_B", mb.clone(), vec![mk_typed_device(1, "B1", LinkDeviceType::QxFan)]),
+            ],
+            base_v1_config(),
+        );
+        let a2 = marker_frame(0x52, 34);
+        let frames: Vec<(String, &[[u8; 3]])> = vec![("A2".to_string(), a2.as_slice())];
+        assert_eq!(cl.send_rgb_frames(&frames), 3);
+
+        let call = ma.last_rgb_bytes().unwrap();
+        let chans: Vec<(u8, usize)> = call.iter().map(|(c, l)| (*c, l.len())).collect();
+        assert_eq!(chans, vec![(1, 34), (2, 34), (3, 21)]);
+        assert!(call[0].1.iter().all(|l| *l == [0, 0, 0]), "A1 full black slot");
+        assert_eq!(call[1].1, marker_frame(0x52, 34));
+        assert!(call[2].1.iter().all(|l| *l == [0, 0, 0]), "A3 full black slot");
+
+        // CHARACTERIZATION: current behavior. A hub with no frames at all gets
+        // no transaction (no blackout write); see plan PR 0 fixture 4.
+        assert_eq!(mb.rgb_call_count(), 0);
+    }
+
+    #[test]
+    fn golden_led_count_precedence_short_long_zero_and_orphans() {
+        let m = Arc::new(RecordingHub::new());
+        let config = AppConfig {
+            schema_version: corsair_common::config::SCHEMA_VERSION_V2,
+            general: GeneralConfig {
+                poll_interval_ms: 1000,
+                log_level: "info".to_string(),
+                lhm_exe_path: None,
+            },
+            fan_groups: Vec::new(),
+            rgb: Default::default(),
+            device_overrides: vec![
+                DeviceOverride { hub_serial: "HUB_A".to_string(), channel: 1, led_count: 12 },
+                DeviceOverride { hub_serial: "HUB_A".to_string(), channel: 2, led_count: 12 },
+                DeviceOverride { hub_serial: "HUB_A".to_string(), channel: 7, led_count: 0 },
+            ],
+            devices: vec![
+                corsair_common::config::v2::DeviceEntry {
+                    device_id: "D_V2".to_string(),
+                    name: None,
+                    led_count: Some(10),
+                },
+                corsair_common::config::v2::DeviceEntry {
+                    device_id: "D_ZERO_V2".to_string(),
+                    name: None,
+                    led_count: Some(0),
+                },
+            ],
+        };
+        let mut cl = rgb_test_loop(
+            vec![(
+                "HUB_A",
+                m.clone(),
+                vec![
+                    mk_typed_device(1, "D_V2", LinkDeviceType::QxFan),
+                    mk_typed_device(2, "D_V1", LinkDeviceType::QxFan),
+                    mk_typed_device(3, "D_FW", LinkDeviceType::QxFan),
+                    mk_typed_device(4, "D_DEF", LinkDeviceType::QxFan),
+                    mk_typed_device(5, "D_ZERO_V2", LinkDeviceType::QxFan),
+                    mk_typed_device(6, "D_ZERO_FW", LinkDeviceType::QxFan),
+                    mk_typed_device(7, "D_ZERO_V1", LinkDeviceType::QxFan),
+                ],
+            )],
+            config,
+        );
+        {
+            let c = &mut cl.hubs.get_mut("HUB_A").unwrap().info.led_counts;
+            for ch in [1u8, 2, 3, 5, 7] {
+                c.insert(ch, 20); // firmware nonzero everywhere it should lose or be skipped
+            }
+            c.insert(6, 0); // firmware zero => type default
+        }
+
+        let d_v2 = marker_frame(0x61, 34); // long: truncated to 10
+        let d_v1 = marker_frame(0x62, 5); // short: padded to 12
+        let d_fw = marker_frame(0x63, 20); // exact
+        let ghost = marker_frame(0x99, 34);
+        let frames: Vec<(String, &[[u8; 3]])> = vec![
+            ("GHOST".to_string(), ghost.as_slice()),
+            ("D_V2".to_string(), d_v2.as_slice()),
+            ("D_V1".to_string(), d_v1.as_slice()),
+            ("D_FW".to_string(), d_fw.as_slice()),
+        ];
+        cl.send_rgb_frames(&frames);
+
+        let call = m.last_rgb_bytes().unwrap();
+        let chans: Vec<(u8, usize)> = call.iter().map(|(c, l)| (*c, l.len())).collect();
+        // V2(10) > V1(12) > firmware(20) > default(34); explicit zeros (V2 ch5, V1 ch7)
+        // remove the slot entirely; firmware zero (ch6) falls back to default 34.
+        assert_eq!(chans, vec![(1, 10), (2, 12), (3, 20), (4, 34), (6, 34)]);
+        assert_eq!(call[0].1, marker_frame(0x61, 10), "long frame truncated");
+        let mut expect_short = marker_frame(0x62, 5);
+        expect_short.resize(12, [0, 0, 0]);
+        assert_eq!(call[1].1, expect_short, "short frame black-padded");
+        assert_eq!(call[2].1, marker_frame(0x63, 20));
+        assert!(call[3].1.iter().all(|l| *l == [0, 0, 0]));
+        assert!(call[4].1.iter().all(|l| *l == [0, 0, 0]));
+        assert!(cl.logged_orphan_rgb_ids.contains("GHOST"));
+    }
+
+    #[test]
+    fn golden_static_color_channel_order_is_rgb() {
+        let m = Arc::new(RecordingHub::new());
+        let mut cl = rgb_test_loop(
+            vec![(
+                "HUB_A",
+                m.clone(),
+                vec![mk_typed_device(1, "Q1", LinkDeviceType::QxFan)],
+            )],
+            base_v1_config(),
+        );
+        let solid = vec![[200u8, 100, 50]; 34];
+        let frames: Vec<(String, &[[u8; 3]])> = vec![("Q1".to_string(), solid.as_slice())];
+        cl.send_rgb_frames(&frames);
+        let flat = flatten_bytes(&m.last_rgb_bytes().unwrap());
+        assert_eq!(flat.len(), 102);
+        for led in flat.chunks(3) {
+            assert_eq!(led, &[200, 100, 50]);
+        }
     }
 }
