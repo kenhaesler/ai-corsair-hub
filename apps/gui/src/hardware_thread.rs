@@ -15,13 +15,15 @@ use corsair_fancontrol::control_loop::{self, ControlLoop};
 use corsair_hid::{port_power_factor, CorsairPsu, DeviceScanner, IcueLinkHub, LinkDeviceType};
 use corsair_rgb::effect::EffectContext;
 use corsair_rgb::layout::LedLayout;
+use corsair_rgb::frame::RgbFrame;
 use corsair_rgb::renderer::{DeviceConfig, RgbRenderer, ZoneConfig};
 
+use crate::diagnostics::{self, LedMarkerReport};
 use crate::dto::{CpuMetricsDto, DeviceTree, GpuMetricsDto, RgbFrameDto, SystemSnapshot};
 use crate::state::{ChannelIdentity, HwCommand};
 use crate::worker_env::{
-    emit, ConfigStore, DiskConfigStore, HubBackend, SystemClock, TauriEventSink, Telemetry,
-    WorkerEnv,
+    emit, Clock, ConfigStore, DiskConfigStore, DiskDiagnosticsStore, HubBackend, SystemClock,
+    TauriEventSink, Telemetry, WorkerEnv,
 };
 
 /// Drop the cached PSU reading after this many consecutive failed reads.
@@ -49,6 +51,13 @@ const IDENTIFY_PALETTE: &[([u8; 3], &str)] = &[
     ([0, 0, 128], "dark blue"),
     ([255, 128, 128], "pastel red"),
 ];
+
+/// Identify/marker colour for the device on `channel` of the hub at index
+/// `hub_idx`. Offsetting by hub index x 8 makes two hubs cycle through the
+/// palette from different starting colours.
+pub(crate) fn identify_color(hub_idx: usize, channel: u8) -> ([u8; 3], &'static str) {
+    IDENTIFY_PALETTE[(hub_idx * 8 + (channel as usize)) % IDENTIFY_PALETTE.len()]
+}
 
 /// Spawn the dedicated hardware I/O thread. Returns a channel sender for commands.
 ///
@@ -178,6 +187,9 @@ fn run_loop(
     let rgb_identify: Option<(Instant, std::collections::HashMap<String, [u8; 3]>)> =
         None;
 
+    // LED marker diagnostic state (G05); see `Worker::rgb_marker`.
+    let rgb_marker: Option<(Instant, Vec<RgbFrame>)> = None;
+
     // Separate NVML handle for extended GPU metrics (util, power, clock,
     // VRAM). The control loop already owns a GpuSensor for temperature
     // fan control — we keep an independent one here so those two concerns
@@ -208,10 +220,12 @@ fn run_loop(
         last_good_psu,
         psu_fail_count,
         rgb_identify,
+        rgb_marker,
         env: WorkerEnv {
             events: Box::new(TauriEventSink::new(app)),
             clock: Box::new(SystemClock),
             store: Box::new(DiskConfigStore),
+            diagnostics: Box::new(DiskDiagnosticsStore),
             telemetry: Box::new(RealTelemetry {
                 psu_handle,
                 gpu_metrics_sensor,
@@ -253,10 +267,72 @@ pub(crate) struct Worker {
     /// `clock.now() >= deadline`, at which point the next tick
     /// resumes the configured effect rendering.
     pub(crate) rgb_identify: Option<(Instant, std::collections::HashMap<String, [u8; 3]>)>,
+    /// LED marker diagnostic (G05). When `Some((deadline, frames))` the RGB
+    /// tick sends `frames` instead of renderer output until
+    /// `clock.now() >= deadline`. Never persisted; cancelled by Identify.
+    pub(crate) rgb_marker: Option<(Instant, Vec<RgbFrame>)>,
     pub(crate) env: WorkerEnv,
 }
 
 impl Worker {
+    /// Start the G05 LED marker diagnostic. Requires RGB enabled with hardware
+    /// output: otherwise the worker does not own the LEDs and could not
+    /// restore a prior state. Builds frames from the production slot manifest,
+    /// exports the manifest JSON via the injected diagnostics store and
+    /// returns the report. Never reads or writes the saved config.
+    fn start_marker_diagnostic(&mut self, duration_secs: u64) -> Result<LedMarkerReport, String> {
+        if !(self.rgb_enabled && self.config.rgb.hardware_output) {
+            return Err(
+                "Enable RGB with hardware output to run the LED marker diagnostic".to_string(),
+            );
+        }
+        let clamped = duration_secs.clamp(5, 300);
+        let manifest = self.control_loop.rgb_slot_manifest();
+        let (frames, hubs) = diagnostics::build_marker(&manifest, &self.config);
+        if frames.is_empty() {
+            return Err("No LED slots found on any hub".to_string());
+        }
+        let total_leds: usize = frames.iter().map(|f| f.leds.len()).sum();
+        let power_factor = port_power_factor(total_leds.min(u16::MAX as usize) as u16);
+        let (compact, iso) = diagnostics::utc_stamps(self.env.clock.wall_time());
+        let mut report = LedMarkerReport {
+            app_version: env!("CARGO_PKG_VERSION"),
+            generated_at_utc: iso,
+            duration_secs: clamped,
+            total_leds,
+            power_factor,
+            legend: diagnostics::legend(),
+            hubs,
+            file_path: None,
+            file_error: None,
+        };
+        match serde_json::to_string_pretty(&report) {
+            Ok(json) => {
+                let name = diagnostics::manifest_file_name(&compact);
+                match self.env.diagnostics.write_file(&name, &json) {
+                    Ok(path) => report.file_path = Some(path.display().to_string()),
+                    Err(e) => {
+                        warn!("Failed to export LED manifest: {}", e);
+                        report.file_error = Some(e.to_string());
+                    }
+                }
+            }
+            Err(e) => report.file_error = Some(e.to_string()),
+        }
+        self.rgb_identify = None; // marker cancels Identify
+        self.rgb_marker = Some((
+            self.env.clock.now() + Duration::from_secs(clamped),
+            frames,
+        ));
+        info!(
+            duration_secs = clamped,
+            slots = report.hubs.iter().map(|h| h.slots.len()).sum::<usize>(),
+            total_leds,
+            "RGB LED marker diagnostic active"
+        );
+        Ok(report)
+    }
+
     /// One outer iteration of the hardware loop: drain pending commands,
     /// run one control cycle, emit the snapshot, render RGB if due, then
     /// sleep out the remainder of the cycle.
@@ -382,6 +458,8 @@ impl Worker {
                     } => {
                         self.config.rgb = rgb_config;
                         self.rgb_enabled = self.config.rgb.enabled;
+                        // Any RGB config change ends the marker diagnostic.
+                        self.rgb_marker = None;
                         self.rgb_interval = Duration::from_millis(if self.config.rgb.fps > 0 {
                             1000 / self.config.rgb.fps as u64
                         } else {
@@ -400,6 +478,7 @@ impl Worker {
                     }
                     HwCommand::SetRgbEnabled { enabled, reply } => {
                         self.rgb_enabled = enabled;
+                        self.rgb_marker = None;
                         self.config.rgb.enabled = enabled;
                         if let Err(e) = self.env.store.save(&self.config) {
                             warn!("Failed to save RGB enabled state: {}", e);
@@ -430,9 +509,7 @@ impl Worker {
                                 // palette starting at different
                                 // colours — the same ch1 on two hubs
                                 // shouldn't both be red.
-                                let slot = (hub_idx * 8 + (dev.channel as usize))
-                                    % IDENTIFY_PALETTE.len();
-                                let (rgb, name) = IDENTIFY_PALETTE[slot];
+                                let (rgb, name) = identify_color(hub_idx, dev.channel);
                                 id_to_rgb.insert(dev.device_id.clone(), rgb);
                                 identity.push(ChannelIdentity {
                                     hub_serial: serial.clone(),
@@ -445,6 +522,7 @@ impl Worker {
                             }
                         }
                         let clamped = duration_secs.clamp(3, 120);
+                        self.rgb_marker = None; // Identify cancels the marker diagnostic
                         self.rgb_identify = Some((
                             self.env.clock.now() + Duration::from_secs(clamped),
                             id_to_rgb,
@@ -455,6 +533,13 @@ impl Worker {
                             "RGB channel-identify mode active"
                         );
                         let _ = reply.send(Ok(identity));
+                    }
+                    HwCommand::RgbMarkerDiagnostic {
+                        duration_secs,
+                        reply,
+                    } => {
+                        let result = self.start_marker_diagnostic(duration_secs);
+                        let _ = reply.send(result);
                     }
                     HwCommand::Shutdown => {
                         info!("Hardware thread received shutdown command");
@@ -639,6 +724,22 @@ impl Worker {
                 }
             }
 
+            // LED marker diagnostic (G05): replaces renderer output with the
+            // pre-built marker frames until the deadline, then clears so the
+            // next tick renders normally. Identify and marker are mutually
+            // exclusive (each command cancels the other).
+            if self
+                .rgb_marker
+                .as_ref()
+                .is_some_and(|(deadline, _)| self.env.clock.now() >= *deadline)
+            {
+                info!("RGB LED marker diagnostic expired — resuming normal rendering");
+                self.rgb_marker = None;
+            }
+            if let Some((_, marker_frames)) = &self.rgb_marker {
+                frames = marker_frames.clone();
+            }
+
             // Resolve (hub_serial, channel) via the current registry so the
             // DTO carries a self-consistent snapshot for the preview UI
             // during the V1→V2 transition.
@@ -651,52 +752,7 @@ impl Worker {
 
             // Send to hardware if enabled
             if self.config.rgb.hardware_output && !frames.is_empty() {
-                let hw_start = self.env.clock.now();
-
-                // Compute port power factor from total LEDs across all frames
-                let total_leds: u16 = frames.iter().map(|f| f.leds.len() as u16).sum();
-                let power_factor = port_power_factor(total_leds);
-
-                // Convert frames to hardware format with power protection applied
-                let hw_leds: Vec<Vec<[u8; 3]>> = frames
-                    .iter()
-                    .map(|f| {
-                        f.leds
-                            .iter()
-                            .map(|c| {
-                                if power_factor < 1.0 {
-                                    [
-                                        (c.r as f32 * power_factor).round() as u8,
-                                        (c.g as f32 * power_factor).round() as u8,
-                                        (c.b as f32 * power_factor).round() as u8,
-                                    ]
-                                } else {
-                                    [c.r, c.g, c.b]
-                                }
-                            })
-                            .collect()
-                    })
-                    .collect();
-
-                // Post-Step-5: send_rgb_frames takes (device_id, leds) only.
-                // The renderer already keys frames by device_id; the control
-                // loop resolves to (hub_serial, channel) via the registry
-                // immediately before the wire write.
-                let frame_refs: Vec<(String, &[[u8; 3]])> = frames
-                    .iter()
-                    .zip(hw_leds.iter())
-                    .map(|(f, leds)| (f.device_id.clone(), leds.as_slice()))
-                    .collect();
-
-                let sent = self.control_loop.send_rgb_frames(&frame_refs);
-                let hw_elapsed = self.env.clock.now().saturating_duration_since(hw_start);
-                if hw_elapsed > Duration::from_millis(25) {
-                    warn!(
-                        elapsed_ms = hw_elapsed.as_millis(),
-                        sent,
-                        "RGB hardware write slow"
-                    );
-                }
+                write_frames_to_hardware(&mut self.control_loop, &*self.env.clock, &frames);
             }
 
             self.last_rgb_tick = self.env.clock.now();
@@ -713,6 +769,63 @@ impl Worker {
             self.env.clock.sleep(sleep_target - elapsed);
         }
         StepOutcome::Continue
+    }
+}
+
+/// Convert renderer-shaped frames to hardware bytes with port power
+/// protection applied (factor from the total LED count of `frames`) and write
+/// them through `send_rgb_frames`. Shared by normal rendering and the LED
+/// marker diagnostic so both use byte-identical conversion.
+fn write_frames_to_hardware(
+    control_loop: &mut ControlLoop,
+    clock: &dyn Clock,
+    frames: &[RgbFrame],
+) {
+    let hw_start = clock.now();
+
+    // Compute port power factor from total LEDs across all frames
+    let total_leds: u16 = frames.iter().map(|f| f.leds.len() as u16).sum();
+    let power_factor = port_power_factor(total_leds);
+
+    // Convert frames to hardware format with power protection applied
+    let hw_leds: Vec<Vec<[u8; 3]>> = frames
+        .iter()
+        .map(|f| {
+            f.leds
+                .iter()
+                .map(|c| {
+                    if power_factor < 1.0 {
+                        [
+                            (c.r as f32 * power_factor).round() as u8,
+                            (c.g as f32 * power_factor).round() as u8,
+                            (c.b as f32 * power_factor).round() as u8,
+                        ]
+                    } else {
+                        [c.r, c.g, c.b]
+                    }
+                })
+                .collect()
+        })
+        .collect();
+
+    // Post-Step-5: send_rgb_frames takes (device_id, leds) only.
+    // The renderer already keys frames by device_id; the control
+    // loop resolves to (hub_serial, channel) via the registry
+    // immediately before the wire write.
+    let frame_refs: Vec<(String, &[[u8; 3]])> = frames
+        .iter()
+        .zip(hw_leds.iter())
+        .map(|(f, leds)| (f.device_id.clone(), leds.as_slice()))
+        .collect();
+
+    let sent = control_loop.send_rgb_frames(&frame_refs);
+    let hw_elapsed = clock.now().saturating_duration_since(hw_start);
+    if hw_elapsed > Duration::from_millis(25) {
+        warn!(
+            elapsed_ms = hw_elapsed.as_millis(),
+            sent,
+            "RGB hardware write slow"
+        );
     }
 }
 
@@ -828,6 +941,9 @@ fn run_degraded(rx: mpsc::Receiver<HwCommand>) {
             Ok(HwCommand::RgbIdentifyChannels { reply, .. }) => {
                 let _ = reply.send(Err("Hardware unavailable".into()));
             }
+            Ok(HwCommand::RgbMarkerDiagnostic { reply, .. }) => {
+                let _ = reply.send(Err("Hardware unavailable".into()));
+            }
         }
     }
 }
@@ -876,6 +992,9 @@ fn run_discovery_only(
                 let _ = reply.send(Err("Control loop not running".into()));
             }
             Ok(HwCommand::RgbIdentifyChannels { reply, .. }) => {
+                let _ = reply.send(Err("Control loop not running".into()));
+            }
+            Ok(HwCommand::RgbMarkerDiagnostic { reply, .. }) => {
                 let _ = reply.send(Err("Control loop not running".into()));
             }
         }

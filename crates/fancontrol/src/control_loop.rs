@@ -954,6 +954,81 @@ impl ControlLoop {
         }
     }
 
+    /// Effective LED count for one enumerated device, plus which precedence
+    /// branch supplied it. Single source of truth shared by `send_rgb_frames`
+    /// and `rgb_slot_manifest`. See `send_rgb_frames` for the precedence.
+    pub fn effective_led_count(
+        &self,
+        serial: &str,
+        dev: &corsair_hid::LinkDevice,
+        hub_info: &HubInfo,
+    ) -> (usize, LedCountSource) {
+        resolve_led_count(&self.config, serial, dev, hub_info)
+    }
+
+    /// Per-hub slot manifest describing exactly where each device's LEDs land
+    /// in the flat buffer written to the hub.
+    ///
+    /// Slots are listed in WIRE ORDER: ascending channel. This mirrors the
+    /// stable `sort_by_key(channel)` in `IcueLinkHub::set_rgb`, which is what
+    /// actually orders the bytes on the wire (`send_rgb_frames` itself builds
+    /// slots in enumeration order). The coupling is guarded by the
+    /// `manifest_matches_captured_wire_bytes` test. Zero-count devices have no
+    /// slot and are listed in `skipped_zero_count`. Hubs are sorted by serial.
+    pub fn rgb_slot_manifest(&self) -> Vec<HubSlotManifest> {
+        let mut serials: Vec<&String> = self.hubs.keys().collect();
+        serials.sort();
+        let mut out = Vec::with_capacity(serials.len());
+        for serial in serials {
+            let conn = &self.hubs[serial.as_str()];
+            let mut devs: Vec<&corsair_hid::LinkDevice> = conn.info.devices.iter().collect();
+            devs.sort_by_key(|d| d.channel); // stable, same as set_rgb
+            let mut slots = Vec::new();
+            let mut skipped = Vec::new();
+            let mut next_led = 0usize;
+            for dev in devs {
+                let (count, source) = self.effective_led_count(serial, dev, &conn.info);
+                if count == 0 {
+                    skipped.push(SkippedDeviceManifest {
+                        device_id: dev.device_id.clone(),
+                        channel: dev.channel,
+                        device_type: dev.device_type.name().to_string(),
+                        count_source: source,
+                    });
+                    continue;
+                }
+                slots.push(SlotManifest {
+                    device_id: dev.device_id.clone(),
+                    channel: dev.channel,
+                    device_type: dev.device_type.name().to_string(),
+                    led_count: count,
+                    count_source: source,
+                    start_led: next_led,
+                    end_led: next_led + count,
+                    start_byte: next_led * 3,
+                });
+                next_led += count;
+            }
+            out.push(HubSlotManifest {
+                hub_serial: serial.clone(),
+                healthy: conn.healthy,
+                firmware: conn.info.firmware.to_string(),
+                firmware_led_counts: conn
+                    .info
+                    .led_counts
+                    .iter()
+                    .map(|(c, n)| (*c, *n))
+                    .collect::<std::collections::BTreeMap<u8, u16>>()
+                    .into_iter()
+                    .collect(),
+                total_leds: next_led,
+                slots,
+                skipped_zero_count: skipped,
+            });
+        }
+        out
+    }
+
     /// Send RGB frames to hardware hubs.
     ///
     /// The iCUE LINK protocol requires a flat buffer covering ALL enumerated devices
@@ -1066,20 +1141,11 @@ impl ControlLoop {
                 //     new overrides into led_counts;
                 //   - test fixtures that don't seed `led_counts` but
                 //     want the override to take effect.
-                let actual_count = self
-                    .config
-                    .led_count_override_by_id(&dev.device_id)
-                    .or_else(|| self.config.led_count_override(serial.as_str(), dev.channel))
-                    .or_else(|| {
-                        hub_conn
-                            .info
-                            .led_counts
-                            .get(&dev.channel)
-                            .copied()
-                            .filter(|&c| c > 0)
-                    })
-                    .map(|c| c as usize)
-                    .unwrap_or(dev.device_type.led_count() as usize);
+                // Extracted verbatim into `resolve_led_count` (free fn so the
+                // `hub_conn` mutable borrow of `self.hubs` does not conflict
+                // with borrowing `self.config`).
+                let (actual_count, _source) =
+                    resolve_led_count(&self.config, serial.as_str(), dev, &hub_conn.info);
 
                 if actual_count == 0 {
                     continue; // truly no LEDs
@@ -1444,6 +1510,93 @@ fn build_registry(hubs: &HashMap<String, HubConnection>) -> DeviceRegistry {
             led_count: *leds,
         }
     }))
+}
+
+/// Which precedence branch supplied a device's effective LED count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum LedCountSource {
+    /// V2 per-device override (`devices[].led_count`).
+    V2Override,
+    /// V1 `(hub_serial, channel)` override.
+    V1Override,
+    /// Nonzero entry in the hub firmware 0x1d table.
+    FirmwareTable,
+    /// Device-type default (table missing or zero).
+    TypeDefault,
+}
+
+impl LedCountSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::V2Override => "v2_override",
+            Self::V1Override => "v1_override",
+            Self::FirmwareTable => "firmware_table",
+            Self::TypeDefault => "type_default",
+        }
+    }
+}
+
+/// One RGB slot on a hub, in wire order.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SlotManifest {
+    pub device_id: String,
+    pub channel: u8,
+    pub device_type: String,
+    pub led_count: usize,
+    pub count_source: LedCountSource,
+    /// First LED index of this slot in the hub's flat buffer.
+    pub start_led: usize,
+    /// One past the last LED index (exclusive).
+    pub end_led: usize,
+    /// Byte offset of the first LED (`start_led * 3`).
+    pub start_byte: usize,
+}
+
+/// A device that has zero effective LEDs and therefore no wire slot.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SkippedDeviceManifest {
+    pub device_id: String,
+    pub channel: u8,
+    pub device_type: String,
+    pub count_source: LedCountSource,
+}
+
+/// Expected RGB layout of one hub plus provenance.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HubSlotManifest {
+    pub hub_serial: String,
+    pub healthy: bool,
+    pub firmware: String,
+    /// Raw 0x1d LED-count table (channel, count), ascending channel.
+    pub firmware_led_counts: Vec<(u8, u16)>,
+    pub total_leds: usize,
+    pub slots: Vec<SlotManifest>,
+    pub skipped_zero_count: Vec<SkippedDeviceManifest>,
+}
+
+/// LED-count precedence (see `ControlLoop::send_rgb_frames`):
+/// V2 override, V1 override, nonzero 0x1d table entry, type default.
+fn resolve_led_count(
+    config: &AppConfig,
+    serial: &str,
+    dev: &corsair_hid::LinkDevice,
+    hub_info: &HubInfo,
+) -> (usize, LedCountSource) {
+    if let Some(c) = config.led_count_override_by_id(&dev.device_id) {
+        return (c as usize, LedCountSource::V2Override);
+    }
+    if let Some(c) = config.led_count_override(serial, dev.channel) {
+        return (c as usize, LedCountSource::V1Override);
+    }
+    if let Some(c) = hub_info
+        .led_counts
+        .get(&dev.channel)
+        .copied()
+        .filter(|&c| c > 0)
+    {
+        return (c as usize, LedCountSource::FirmwareTable);
+    }
+    (dev.device_type.led_count() as usize, LedCountSource::TypeDefault)
 }
 
 /// Round-trip a `LinkDeviceType` back to its protocol byte. Kept local to
@@ -3028,6 +3181,188 @@ mod tests {
         assert_eq!(flat.len(), 102);
         for led in flat.chunks(3) {
             assert_eq!(led, &[200, 100, 50]);
+        }
+    }
+
+    // --- G05: effective LED count + slot manifest ---
+
+    fn manifest_fixture() -> (Arc<RecordingHub>, Arc<RecordingHub>, ControlLoop) {
+        let ma = Arc::new(RecordingHub::new());
+        let mb = Arc::new(RecordingHub::new());
+        let mut cl = rgb_test_loop(
+            vec![
+                (
+                    "HUB_A",
+                    ma.clone(),
+                    // Deliberately unsorted enumeration with a gap (ch4), a
+                    // zero-LED device (ch3) and a device no zone references (ch2).
+                    vec![
+                        mk_typed_device(5, "A_AD", LinkDeviceType::LinkAdapter),
+                        mk_typed_device(1, "A_Q", LinkDeviceType::QxFan),
+                        mk_typed_device(3, "A_NOLED", LinkDeviceType::RxMaxFan),
+                        mk_typed_device(2, "A_LX", LinkDeviceType::LxFan),
+                    ],
+                ),
+                (
+                    "HUB_B",
+                    mb.clone(),
+                    vec![
+                        mk_typed_device(15, "B_AD", LinkDeviceType::LinkAdapter),
+                        mk_typed_device(14, "B_Q", LinkDeviceType::QxFan),
+                    ],
+                ),
+            ],
+            base_v1_config(),
+        );
+        cl.hubs.get_mut("HUB_A").unwrap().info.led_counts.insert(5, 60);
+        cl.hubs.get_mut("HUB_B").unwrap().info.led_counts.insert(15, 80);
+        (ma, mb, cl)
+    }
+
+    #[test]
+    fn effective_led_count_reports_each_precedence_source() {
+        let m = Arc::new(RecordingHub::new());
+        let config = AppConfig {
+            schema_version: corsair_common::config::SCHEMA_VERSION_V2,
+            general: GeneralConfig {
+                poll_interval_ms: 1000,
+                log_level: "info".to_string(),
+                lhm_exe_path: None,
+            },
+            fan_groups: Vec::new(),
+            rgb: Default::default(),
+            device_overrides: vec![
+                DeviceOverride { hub_serial: "HUB_A".to_string(), channel: 1, led_count: 12 },
+                DeviceOverride { hub_serial: "HUB_A".to_string(), channel: 2, led_count: 12 },
+            ],
+            devices: vec![corsair_common::config::v2::DeviceEntry {
+                device_id: "D_V2".to_string(),
+                name: None,
+                led_count: Some(10),
+            }],
+        };
+        let mut cl = rgb_test_loop(
+            vec![(
+                "HUB_A",
+                m,
+                vec![
+                    mk_typed_device(1, "D_V2", LinkDeviceType::QxFan),
+                    mk_typed_device(2, "D_V1", LinkDeviceType::QxFan),
+                    mk_typed_device(3, "D_FW", LinkDeviceType::QxFan),
+                    mk_typed_device(4, "D_DEF", LinkDeviceType::LxFan),
+                    mk_typed_device(5, "D_FW0", LinkDeviceType::QxFan),
+                ],
+            )],
+            config,
+        );
+        {
+            let c = &mut cl.hubs.get_mut("HUB_A").unwrap().info.led_counts;
+            for ch in [1u8, 2, 3] {
+                c.insert(ch, 20);
+            }
+            c.insert(5, 0);
+        }
+        let info = cl.hubs["HUB_A"].info.clone();
+        let got: Vec<(usize, LedCountSource)> = info
+            .devices
+            .iter()
+            .map(|d| cl.effective_led_count("HUB_A", d, &info))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (10, LedCountSource::V2Override),
+                (12, LedCountSource::V1Override),
+                (20, LedCountSource::FirmwareTable),
+                (18, LedCountSource::TypeDefault),
+                (34, LedCountSource::TypeDefault), // firmware zero falls through
+            ]
+        );
+    }
+
+    #[test]
+    fn manifest_wire_order_offsets_gaps_zero_count_and_adapter_80() {
+        let (_ma, _mb, mut cl) = manifest_fixture();
+        cl.hubs.get_mut("HUB_B").unwrap().healthy = false;
+        let m = cl.rgb_slot_manifest();
+        assert_eq!(m.len(), 2);
+
+        let a = &m[0];
+        assert_eq!(a.hub_serial, "HUB_A");
+        assert!(a.healthy);
+        assert_eq!(a.firmware, "0.0.0");
+        assert_eq!(a.firmware_led_counts, vec![(5, 60)]);
+        // Wire order is ascending channel: ch1 Q(34), ch2 LX(18), ch5 AD(60 via table).
+        let got: Vec<(u8, usize, usize, usize, usize)> = a
+            .slots
+            .iter()
+            .map(|s| (s.channel, s.led_count, s.start_led, s.end_led, s.start_byte))
+            .collect();
+        assert_eq!(
+            got,
+            vec![(1, 34, 0, 34, 0), (2, 18, 34, 52, 102), (5, 60, 52, 112, 156)]
+        );
+        assert_eq!(a.slots[0].device_id, "A_Q");
+        assert_eq!(a.slots[0].device_type, "QX Fan");
+        assert_eq!(a.slots[0].count_source, LedCountSource::TypeDefault);
+        assert_eq!(a.slots[2].count_source, LedCountSource::FirmwareTable);
+        assert_eq!(a.total_leds, 112);
+        assert_eq!(a.skipped_zero_count.len(), 1);
+        assert_eq!(a.skipped_zero_count[0].device_id, "A_NOLED");
+        assert_eq!(a.skipped_zero_count[0].channel, 3);
+
+        let b = &m[1];
+        assert_eq!(b.hub_serial, "HUB_B");
+        assert!(!b.healthy, "unhealthy hubs are still listed");
+        let got: Vec<(u8, usize, usize, usize, usize)> = b
+            .slots
+            .iter()
+            .map(|s| (s.channel, s.led_count, s.start_led, s.end_led, s.start_byte))
+            .collect();
+        // Channel-15 adapter with 80 LEDs follows ch14 (34): 34..114.
+        assert_eq!(got, vec![(14, 34, 0, 34, 0), (15, 80, 34, 114, 102)]);
+        assert_eq!(b.total_leds, 114);
+        assert!(b.skipped_zero_count.is_empty());
+    }
+
+    /// Guards the coupling between the manifest (ascending channel) and the
+    /// order `IcueLinkHub::set_rgb` really writes: sort the captured call by
+    /// channel (what set_rgb does), flatten, and compare each slot's bytes.
+    #[test]
+    fn manifest_matches_captured_wire_bytes() {
+        let (ma, mb, mut cl) = manifest_fixture();
+        let manifest = cl.rgb_slot_manifest();
+        let frames_owned: Vec<(String, Vec<[u8; 3]>)> = manifest
+            .iter()
+            .flat_map(|h| h.slots.iter())
+            .enumerate()
+            .map(|(i, s)| (s.device_id.clone(), marker_frame(0x40 + i as u8, s.led_count)))
+            .collect();
+        let frames: Vec<(String, &[[u8; 3]])> = frames_owned
+            .iter()
+            .map(|(id, f)| (id.clone(), f.as_slice()))
+            .collect();
+        cl.send_rgb_frames(&frames);
+
+        for (hub, mock) in manifest.iter().zip([&ma, &mb]) {
+            let mut call = mock.last_rgb_bytes().unwrap();
+            call.sort_by_key(|(ch, _)| *ch); // mirrors IcueLinkHub::set_rgb
+            let flat = flatten_bytes(&call);
+            assert_eq!(flat.len(), hub.total_leds * 3, "{}", hub.hub_serial);
+            for s in &hub.slots {
+                let (_, expected) = frames_owned
+                    .iter()
+                    .find(|(id, _)| *id == s.device_id)
+                    .unwrap();
+                let want: Vec<u8> = expected.iter().flatten().copied().collect();
+                assert_eq!(
+                    &flat[s.start_byte..s.start_byte + s.led_count * 3],
+                    want.as_slice(),
+                    "{} slot {}",
+                    hub.hub_serial,
+                    s.device_id
+                );
+            }
         }
     }
 }

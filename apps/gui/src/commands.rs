@@ -3,6 +3,7 @@ use tauri::State;
 use corsair_common::config::{AppConfig, FanPresetDef, RgbConfig};
 use corsair_fancontrol::control_loop;
 
+use crate::diagnostics::LedMarkerReport;
 use crate::dto::{DeviceTree, ManualDutyResult, SystemSnapshot};
 use crate::state::{AppState, ChannelIdentity, HwCommand};
 
@@ -253,6 +254,27 @@ pub async fn rgb_identify_channels(
     state
         .hw_sender
         .send(HwCommand::RgbIdentifyChannels {
+            duration_secs,
+            reply: tx,
+        })
+        .map_err(|_| "Hardware thread unavailable".to_string())?;
+    rx.await
+        .map_err(|_| "Hardware thread dropped".to_string())?
+}
+
+/// G05 LED marker diagnostic: show white/green/red first/second/last-LED
+/// markers on every slot of every hub for `duration_secs` (clamped 5..=300),
+/// through the production RGB path, and export the slot manifest as JSON.
+/// Requires RGB enabled with hardware output. Never saves config.
+#[tauri::command]
+pub async fn rgb_marker_diagnostic(
+    state: State<'_, AppState>,
+    duration_secs: u64,
+) -> Result<LedMarkerReport, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    state
+        .hw_sender
+        .send(HwCommand::RgbMarkerDiagnostic {
             duration_secs,
             reply: tx,
         })
