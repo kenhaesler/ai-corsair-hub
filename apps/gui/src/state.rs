@@ -111,4 +111,6 @@ pub struct ChannelIdentity {
 /// Shared state managed by Tauri, accessible from command handlers.
 pub struct AppState {
     pub hw_sender: mpsc::Sender<HwCommand>,
+    /// Set when the on-disk config could not be used at startup.
+    pub startup_issue: Option<crate::startup_config::StartupConfigIssue>,
 }

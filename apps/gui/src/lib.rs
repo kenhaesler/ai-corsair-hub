@@ -3,6 +3,7 @@ mod diagnostics;
 mod dto;
 mod hardware_thread;
 mod presets;
+mod startup_config;
 mod state;
 mod worker_env;
 #[cfg(test)]
@@ -17,7 +18,6 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use corsair_common::config::AppConfig;
-use corsair_fancontrol::control_loop;
 
 use state::AppState;
 
@@ -52,9 +52,18 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            let config = load_config_or_default();
-            let hw_sender = hardware_thread::spawn(config, app.handle().clone());
-            app.manage(AppState { hw_sender });
+            let (config, startup_issue) = load_config_or_default();
+            // Migration rewrites config.toml in place; never do that to a file
+            // that failed to load (it is preserved untouched for the user).
+            let hw_sender = hardware_thread::spawn(
+                config,
+                app.handle().clone(),
+                startup_issue.is_some(),
+            );
+            app.manage(AppState {
+                hw_sender,
+                startup_issue,
+            });
 
             // --- System tray ---
             let silent =
@@ -151,6 +160,7 @@ pub fn run() {
             commands::set_rgb_enabled,
             commands::rgb_identify_channels,
             commands::rgb_marker_diagnostic,
+            commands::get_startup_config_issue,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -277,28 +287,11 @@ fn prune_old_logs(dir: &std::path::Path, keep: usize) {
     }
 }
 
-fn load_config_or_default() -> AppConfig {
-    let path = config_path();
-
+fn load_config_or_default() -> (AppConfig, Option<startup_config::StartupConfigIssue>) {
     // Also try legacy location (cwd/config.toml) for migration
     let legacy_path = std::env::current_dir()
         .unwrap_or_default()
         .join("config.toml");
 
-    for p in [&path, &legacy_path] {
-        if p.exists() {
-            match control_loop::load_config(p) {
-                Ok(config) => {
-                    info!("Loaded config from {}", p.display());
-                    return config;
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to load config from {}: {}", p.display(), e);
-                }
-            }
-        }
-    }
-
-    info!("Using default config");
-    AppConfig::default()
+    startup_config::load_startup_config(&config_path(), &legacy_path)
 }

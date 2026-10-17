@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AppConfig, DeviceTree, FanPresetDef, RgbConfig, SystemSnapshot } from './types';
+import type { AppConfig, DeviceTree, FanPresetDef, RgbConfig, StartupConfigIssue, SystemSnapshot } from './types';
 
 /**
  * Result of `set_manual_duty_by_device_id` — mirrors the Rust
@@ -14,6 +14,9 @@ export interface ManualDutyResult {
 export const getSnapshot = () => invoke<SystemSnapshot>('get_snapshot');
 export const getDevices = () => invoke<DeviceTree>('get_devices');
 export const getConfig = () => invoke<AppConfig>('get_config');
+/** Non-null when config.toml failed to load at startup (file was preserved). */
+export const getStartupConfigIssue = () =>
+  invoke<StartupConfigIssue | null>('get_startup_config_issue');
 
 /**
  * Names of sensors currently initialized in the control loop. Returned

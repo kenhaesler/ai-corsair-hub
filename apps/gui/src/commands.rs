@@ -18,6 +18,15 @@ pub async fn get_snapshot(state: State<'_, AppState>) -> Result<SystemSnapshot, 
         .map_err(|_| "Hardware thread dropped".to_string())?
 }
 
+/// Why the on-disk config was not used at startup, or `null` when it was
+/// fine (or absent on first install).
+#[tauri::command]
+pub fn get_startup_config_issue(
+    state: State<'_, AppState>,
+) -> Option<crate::startup_config::StartupConfigIssue> {
+    state.startup_issue.clone()
+}
+
 #[tauri::command]
 pub async fn get_devices(state: State<'_, AppState>) -> Result<DeviceTree, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();

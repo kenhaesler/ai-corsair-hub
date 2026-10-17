@@ -298,3 +298,13 @@ export interface RgbFrameDto {
   device_id: string;
   leds: [number, number, number][];
 }
+
+/** Mirrors the Rust startup config issue returned by `get_startup_config_issue`. */
+export interface StartupConfigIssue {
+  config_path: string;
+  preserved_path: string | null;
+  preserve_error: string | null;
+  error: string;
+  /** Which configuration is running instead of the unreadable file. */
+  loaded: 'last_good' | 'defaults';
+}

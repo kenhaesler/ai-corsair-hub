@@ -1146,3 +1146,70 @@ fn marker_manifest_written_through_injected_store() {
     assert!(r2.file_error.unwrap().contains("mock diagnostics failure"));
     assert!(h2.worker.rgb_marker.is_some());
 }
+
+// ---------------------------------------------------------------------------
+// G06: invalid configs are rejected before touching disk or memory
+// ---------------------------------------------------------------------------
+
+/// UpdateConfig with a non-finite or oversized value: Err reply, nothing
+/// saved, worker and control-loop config unchanged.
+#[test]
+fn update_config_with_invalid_values_is_rejected_untouched() {
+    let mut h = fixed_harness();
+
+    // led_count 256 (> 255).
+    let mut bad = updated_config(80.0, 500);
+    bad.device_overrides.push(corsair_common::config::DeviceOverride {
+        hub_serial: "HUB0".to_string(),
+        channel: 15,
+        led_count: 256,
+    });
+    let (reply, _) = h.call(|reply| HwCommand::UpdateConfig { config: bad, reply });
+    let err = reply.unwrap_err();
+    assert!(err.contains("device_overrides[0].led_count"), "got: {err}");
+
+    // NaN hysteresis.
+    let mut bad = updated_config(80.0, 500);
+    let mut group = curve_group(5.0);
+    if let FanMode::Curve { hysteresis, .. } = &mut group.mode {
+        *hysteresis = f64::NAN;
+    }
+    bad.fan_groups = vec![group];
+    let (reply, _) = h.call(|reply| HwCommand::UpdateConfig { config: bad, reply });
+    let err = reply.unwrap_err();
+    assert!(err.contains("fan_groups[0].mode.hysteresis"), "got: {err}");
+
+    assert_eq!(h.store.attempts(), 0, "nothing reached the store");
+    assert!(h.store.saves().is_empty());
+    assert_eq!(h.worker.config.general.poll_interval_ms, 1000);
+    assert_eq!(h.worker.control_loop.config().general.poll_interval_ms, 1000);
+    assert!(h.worker.config.device_overrides.is_empty());
+    assert!(matches!(
+        h.worker.control_loop.config().fan_groups[0].mode,
+        FanMode::Fixed { duty_percent } if duty_percent == 50.0
+    ));
+}
+
+/// SetRgbConfig with an invalid fps / brightness: Err reply, no state change,
+/// nothing persisted, renderer timing untouched.
+#[test]
+fn set_rgb_config_with_invalid_values_is_rejected_untouched() {
+    let mut h = fixed_harness();
+
+    for (fps, brightness, field) in [(200u8, 55u8, "rgb.fps"), (60, 101, "rgb.brightness")] {
+        let mut bad = new_rgb_config();
+        bad.fps = fps;
+        bad.brightness = brightness;
+        let (reply, _) = h.call(|reply| HwCommand::SetRgbConfig { config: bad, reply });
+        let err = reply.unwrap_err();
+        assert!(err.starts_with("Invalid RGB config"), "got: {err}");
+        assert!(err.contains(field), "got: {err}");
+    }
+
+    assert_eq!(h.store.attempts(), 0);
+    assert!(h.store.saves().is_empty());
+    assert_eq!(h.worker.config.rgb.brightness, 80);
+    assert_eq!(h.worker.config.rgb.fps, 30);
+    assert!(!h.worker.rgb_enabled);
+    assert_eq!(h.worker.rgb_interval, MS(33)); // 1000 / 30
+}

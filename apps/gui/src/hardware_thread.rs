@@ -63,13 +63,17 @@ pub(crate) fn identify_color(hub_idx: usize, channel: u8) -> ([u8; 3], &'static 
 ///
 /// All !Send hardware handles (HidDevice, WMI COM objects, NVML) live on this thread.
 /// The Tauri async runtime communicates via mpsc channel + oneshot replies.
-pub fn spawn(config: AppConfig, app: tauri::AppHandle) -> mpsc::Sender<HwCommand> {
+pub fn spawn(
+    config: AppConfig,
+    app: tauri::AppHandle,
+    skip_migration: bool,
+) -> mpsc::Sender<HwCommand> {
     let (tx, rx) = mpsc::channel();
 
     std::thread::Builder::new()
         .name("hardware-io".into())
         .spawn(move || {
-            if let Err(e) = run_loop(config, rx, app) {
+            if let Err(e) = run_loop(config, rx, app, skip_migration) {
                 error!("Hardware thread exited with error: {}", e);
             }
         })
@@ -82,6 +86,7 @@ fn run_loop(
     mut config: AppConfig,
     rx: mpsc::Receiver<HwCommand>,
     app: tauri::AppHandle,
+    skip_migration: bool,
 ) -> Result<()> {
     info!("Hardware thread starting");
 
@@ -131,7 +136,14 @@ fn run_loop(
     // On success we reload the written file from disk and apply it via
     // update_config() so the control loop sees the V2 shape without a
     // disk round-trip through save_config_to_disk.
-    run_config_migration(&mut config, &mut control_loop, &app);
+    //
+    // Skipped when startup recovery was needed: the on-disk file is invalid
+    // and preserved as-is, and migration would rewrite it in place.
+    if skip_migration {
+        info!("Startup config issue recorded — config migration skipped to leave the on-disk file untouched");
+    } else {
+        run_config_migration(&mut config, &mut control_loop, &app);
+    }
 
     let poll_interval = Duration::from_millis(config.general.poll_interval_ms);
 
@@ -456,7 +468,15 @@ impl Worker {
                         config: rgb_config,
                         reply,
                     } => {
-                        self.config.rgb = rgb_config;
+                        // Validate a candidate first: a rejected config must
+                        // not touch memory, the renderer or disk.
+                        let mut candidate = self.config.clone();
+                        candidate.rgb = rgb_config;
+                        if let Err(e) = control_loop::validate_config(&candidate) {
+                            let _ = reply.send(Err(format!("Invalid RGB config: {}", e)));
+                            continue;
+                        }
+                        self.config.rgb = candidate.rgb;
                         self.rgb_enabled = self.config.rgb.enabled;
                         // Any RGB config change ends the marker diagnostic.
                         self.rgb_marker = None;
