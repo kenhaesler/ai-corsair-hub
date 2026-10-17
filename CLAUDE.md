@@ -72,7 +72,10 @@ The target system has:
 ## Current Phase
 
 **Phases 0–5 complete.** Fan control, sensor integration, GUI, and RGB are all working.
-Next: Phase 6 (Polish & Community) — installer, auto-update, documentation.
+Now: reliability hardening before Phase 6 — see `docs/fix-implementation-plan.md`
+(amended order at the end) and `docs/improvement-audit-2026-09-13.md`. RGB addressing
+is protected: changes to it need byte-level equivalence evidence.
+Then: Phase 6 (Polish & Community) — installer, auto-update, documentation.
 
 ## Tech Stack
 
