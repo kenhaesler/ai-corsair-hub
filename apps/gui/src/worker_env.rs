@@ -60,6 +60,10 @@ impl EventSink for TauriEventSink {
 pub trait Clock {
     fn now(&self) -> Instant;
     fn sleep(&self, d: Duration);
+    /// Wall-clock time, used only to stamp diagnostic exports.
+    fn wall_time(&self) -> std::time::SystemTime {
+        std::time::SystemTime::now()
+    }
 }
 
 pub struct SystemClock;
@@ -83,6 +87,35 @@ pub struct DiskConfigStore;
 impl ConfigStore for DiskConfigStore {
     fn save(&self, cfg: &AppConfig) -> anyhow::Result<()> {
         crate::hardware_thread::save_config_to_disk(cfg)
+    }
+}
+
+/// Destination for diagnostic exports (e.g. the LED slot manifest).
+pub trait DiagnosticsStore {
+    /// Write `contents` to `file_name` (a bare file name, no directories)
+    /// inside the diagnostics directory and return the full path written.
+    fn write_file(&self, file_name: &str, contents: &str) -> anyhow::Result<std::path::PathBuf>;
+}
+
+/// Production store: `%APPDATA%\corsair-hub\diagnostics\` (next to
+/// `config.toml`, see `config_path()`).
+pub struct DiskDiagnosticsStore;
+
+impl DiagnosticsStore for DiskDiagnosticsStore {
+    fn write_file(&self, file_name: &str, contents: &str) -> anyhow::Result<std::path::PathBuf> {
+        use anyhow::Context;
+        if file_name.contains(['/', '\\']) || file_name.contains("..") {
+            anyhow::bail!("invalid diagnostics file name: {file_name}");
+        }
+        let dir = crate::config_path()
+            .parent()
+            .map(|p| p.join("diagnostics"))
+            .unwrap_or_else(|| std::path::PathBuf::from("diagnostics"));
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("creating {}", dir.display()))?;
+        let path = dir.join(file_name);
+        std::fs::write(&path, contents).with_context(|| format!("writing {}", path.display()))?;
+        Ok(path)
     }
 }
 
@@ -110,6 +143,7 @@ pub struct WorkerEnv {
     pub events: Box<dyn EventSink>,
     pub clock: Box<dyn Clock>,
     pub store: Box<dyn ConfigStore>,
+    pub diagnostics: Box<dyn DiagnosticsStore>,
     pub telemetry: Box<dyn Telemetry>,
     pub hubs: Box<dyn HubBackend>,
 }

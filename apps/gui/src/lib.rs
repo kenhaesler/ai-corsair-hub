@@ -1,4 +1,5 @@
 mod commands;
+mod diagnostics;
 mod dto;
 mod hardware_thread;
 mod presets;
@@ -149,6 +150,7 @@ pub fn run() {
             commands::set_rgb_config,
             commands::set_rgb_enabled,
             commands::rgb_identify_channels,
+            commands::rgb_marker_diagnostic,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

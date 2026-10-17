@@ -35,7 +35,7 @@ use crate::dto::{CpuMetricsDto, DeviceTree, GpuMetricsDto};
 use crate::hardware_thread::{apply_rgb_config, StepOutcome, Worker};
 use crate::state::HwCommand;
 use crate::worker_env::{
-    Clock, ConfigStore, EventSink, HubBackend, Telemetry, WorkerEnv,
+    Clock, ConfigStore, DiagnosticsStore, EventSink, HubBackend, Telemetry, WorkerEnv,
 };
 
 // --- Fake clock ---------------------------------------------------------
@@ -78,6 +78,13 @@ impl Clock for FakeClock {
     fn sleep(&self, d: Duration) {
         self.0.sleeps.lock().unwrap().push(d);
         *self.0.offset.lock().unwrap() += d;
+    }
+    /// Virtual wall clock: 1_700_000_000 s since the Unix epoch
+    /// (2023-11-14 22:13:20 UTC) plus the virtual elapsed time.
+    fn wall_time(&self) -> std::time::SystemTime {
+        std::time::UNIX_EPOCH
+            + Duration::from_secs(1_700_000_000)
+            + *self.0.offset.lock().unwrap()
     }
 }
 
@@ -225,6 +232,38 @@ impl ConfigStore for FakeStore {
     }
 }
 
+// --- Fake diagnostics store ---------------------------------------------
+
+/// Records diagnostic exports instead of touching the filesystem.
+#[derive(Clone, Default)]
+pub struct FakeDiagnostics {
+    files: Arc<Mutex<Vec<(String, String)>>>,
+    fail: Arc<AtomicBool>,
+}
+
+impl FakeDiagnostics {
+    pub fn set_fail(&self, fail: bool) {
+        self.fail.store(fail, Ordering::SeqCst);
+    }
+    /// `(file_name, contents)` of every successful write, in order.
+    pub fn files(&self) -> Vec<(String, String)> {
+        self.files.lock().unwrap().clone()
+    }
+}
+
+impl DiagnosticsStore for FakeDiagnostics {
+    fn write_file(&self, file_name: &str, contents: &str) -> Result<std::path::PathBuf> {
+        if self.fail.load(Ordering::SeqCst) {
+            bail!("mock diagnostics failure");
+        }
+        self.files
+            .lock()
+            .unwrap()
+            .push((file_name.to_string(), contents.to_string()));
+        Ok(std::path::PathBuf::from("fake-diagnostics").join(file_name))
+    }
+}
+
 // --- Fake telemetry -----------------------------------------------------
 
 #[derive(Default)]
@@ -369,6 +408,7 @@ pub struct Harness {
     rx: mpsc::Receiver<HwCommand>,
     pub clock: FakeClock,
     pub store: FakeStore,
+    pub diagnostics: FakeDiagnostics,
     pub events: RecordingSink,
     pub telemetry: FakeTelemetry,
     pub backend: FakeBackend,
@@ -432,6 +472,7 @@ impl Harness {
         );
 
         let store = FakeStore::default();
+        let diagnostics = FakeDiagnostics::default();
         let events = RecordingSink::default();
         let telemetry = FakeTelemetry::default();
         let backend = FakeBackend::default();
@@ -448,10 +489,12 @@ impl Harness {
             last_good_psu: None,
             psu_fail_count: 0,
             rgb_identify: None,
+            rgb_marker: None,
             env: WorkerEnv {
                 events: Box::new(events.clone()),
                 clock: Box::new(clock.clone()),
                 store: Box::new(store.clone()),
+                diagnostics: Box::new(diagnostics.clone()),
                 telemetry: Box::new(telemetry.clone()),
                 hubs: Box::new(backend.clone()),
             },
@@ -464,6 +507,7 @@ impl Harness {
             rx,
             clock,
             store,
+            diagnostics,
             events,
             telemetry,
             backend,

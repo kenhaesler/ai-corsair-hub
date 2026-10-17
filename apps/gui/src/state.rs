@@ -2,6 +2,7 @@ use std::sync::mpsc;
 
 use corsair_common::config::{AppConfig, RgbConfig};
 
+use crate::diagnostics::LedMarkerReport;
 use crate::dto::{DeviceTree, ManualDutyResult, SystemSnapshot};
 
 /// Commands sent from Tauri async command handlers to the hardware thread.
@@ -81,6 +82,16 @@ pub enum HwCommand {
     RgbIdentifyChannels {
         duration_secs: u64,
         reply: tokio::sync::oneshot::Sender<Result<Vec<ChannelIdentity>, String>>,
+    },
+    /// G05 LED marker diagnostic: for `duration_secs` (clamped 5..=300) every
+    /// LED slot on every hub shows white (first LED), green (second, when the
+    /// slot has 3+ LEDs), red (last LED) and its Identify palette colour
+    /// elsewhere, through the production conversion and send path. Requires
+    /// RGB enabled with hardware output. Never touches the saved config.
+    /// The reply is the slot manifest report (also exported as JSON).
+    RgbMarkerDiagnostic {
+        duration_secs: u64,
+        reply: tokio::sync::oneshot::Sender<Result<LedMarkerReport, String>>,
     },
     Shutdown,
 }

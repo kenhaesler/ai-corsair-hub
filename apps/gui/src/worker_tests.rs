@@ -829,3 +829,320 @@ fn identify_mode_recolors_then_reverts_after_deadline() {
     assert_eq!(h.hub("HUB0").rgb_calls().last().unwrap(), &normal);
     assert!(h.worker.rgb_identify.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// G05 LED marker diagnostic
+// ---------------------------------------------------------------------------
+
+const ORANGE: [u8; 3] = [255, 128, 0];
+const YELLOW: [u8; 3] = [255, 255, 0];
+const PASTEL_RED: [u8; 3] = [255, 128, 128];
+const WHITE: [u8; 3] = [255, 255, 255];
+const GREEN: [u8; 3] = [0, 255, 0];
+const RED: [u8; 3] = [255, 0, 0];
+
+/// Marker slot: white, green, `body` x (n-3), red.
+fn marker_slot(n: usize, body: [u8; 3]) -> Vec<[u8; 3]> {
+    let mut v = vec![body; n];
+    v[0] = WHITE;
+    v[1] = GREEN;
+    v[n - 1] = RED;
+    v
+}
+
+fn rgb_cfg(enabled: bool, hardware_output: bool, zone_channels: &[u8]) -> RgbConfig {
+    RgbConfig {
+        enabled,
+        brightness: 100,
+        fps: 30,
+        hardware_output,
+        zones: vec![static_zone(zone_channels, Rgb::new(200, 100, 50))],
+        presets: Vec::new(),
+    }
+}
+
+/// HUB0: ch1 QX fan (34, in the zone), ch2 QX fan (34, NOT in any zone),
+/// ch3 RX MAX fan (type default 0 LEDs -> no slot), ch15 LINK adapter with
+/// 80 LEDs from the firmware table. HUB1: ch1 LX fan (18).
+/// Total 34 + 34 + 80 + 18 = 166 LEDs <= 238 -> no power scaling.
+fn marker_harness(enabled: bool, hardware_output: bool) -> Harness {
+    let hub0 = HubSpec {
+        serial: "HUB0",
+        devices: vec![
+            device(1, "H0_Q1", LinkDeviceType::QxFan),
+            device(2, "H0_Q2", LinkDeviceType::QxFan),
+            device(3, "H0_NL", LinkDeviceType::RxMaxFan),
+            device(15, "H0_AD", LinkDeviceType::LinkAdapter),
+        ],
+        led_counts: HashMap::from([(15u8, 80u16)]),
+        pump_channels: Vec::new(),
+    };
+    let hub1 = HubSpec {
+        serial: "HUB1",
+        devices: vec![device(1, "H1_LX", LinkDeviceType::LxFan)],
+        led_counts: HashMap::new(),
+        pump_channels: Vec::new(),
+    };
+    Harness::new(
+        v1_config(Vec::new(), rgb_cfg(enabled, hardware_output, &[1]), 1000),
+        vec![hub0, hub1],
+        &[("cpu", 40.0)],
+    )
+}
+
+/// Palette: slot = (hub_idx*8 + channel) % 16 with hubs in sorted-serial
+/// order -> HUB0 ch1 = 1 orange, ch2 = 2 yellow, ch15 = 15 pastel red;
+/// HUB1 ch1 = 8 + 1 = 9 white.
+fn expected_marker_hub0() -> Vec<(u8, Vec<[u8; 3]>)> {
+    vec![
+        (1, marker_slot(34, ORANGE)),
+        (2, marker_slot(34, YELLOW)),
+        (15, marker_slot(80, PASTEL_RED)),
+    ]
+}
+
+fn expected_marker_hub1() -> Vec<(u8, Vec<[u8; 3]>)> {
+    vec![(1, marker_slot(18, WHITE))]
+}
+
+fn start_marker(
+    h: &mut Harness,
+    secs: u64,
+) -> Result<crate::diagnostics::LedMarkerReport, String> {
+    h.clock.advance(MS(100));
+    h.call(|reply| HwCommand::RgbMarkerDiagnostic {
+        duration_secs: secs,
+        reply,
+    })
+    .0
+}
+
+#[test]
+fn marker_refused_when_rgb_disabled() {
+    let mut h = marker_harness(false, true);
+    let err = start_marker(&mut h, 10).unwrap_err();
+    assert_eq!(
+        err,
+        "Enable RGB with hardware output to run the LED marker diagnostic"
+    );
+    assert!(h.worker.rgb_marker.is_none());
+    assert!(h.diagnostics.files().is_empty());
+    assert!(h.hub("HUB0").rgb_calls().is_empty());
+}
+
+#[test]
+fn marker_refused_when_hardware_output_off() {
+    let mut h = marker_harness(true, false);
+    let err = start_marker(&mut h, 10).unwrap_err();
+    assert_eq!(
+        err,
+        "Enable RGB with hardware output to run the LED marker diagnostic"
+    );
+    assert!(h.worker.rgb_marker.is_none());
+    assert!(h.diagnostics.files().is_empty());
+    assert!(h.hub("HUB0").rgb_calls().is_empty());
+    assert!(h.hub("HUB1").rgb_calls().is_empty());
+}
+
+/// Marker bytes reach both hubs in the same step (including the device no
+/// zone references), the report carries hand-computed offsets, and neither
+/// config nor store is touched.
+///
+/// HUB0 offsets (wire order = ascending channel): ch1 LEDs 0..34 (byte 0),
+/// ch2 34..68 (byte 102), ch15 68..148 (byte 204); ch3 has 0 LEDs -> skipped.
+/// HUB1: ch1 0..18.
+#[test]
+fn marker_sends_bytes_and_reports_manifest_without_saving_config() {
+    let mut h = marker_harness(true, true);
+    let cfg_before = serde_json::to_string(&h.worker.config).unwrap();
+    let report = start_marker(&mut h, 30).unwrap();
+
+    assert_eq!(h.hub("HUB0").rgb_calls().last().unwrap(), &expected_marker_hub0());
+    assert_eq!(h.hub("HUB1").rgb_calls().last().unwrap(), &expected_marker_hub1());
+    assert_eq!(h.store.attempts(), 0, "diagnostic must never save config");
+    assert_eq!(serde_json::to_string(&h.worker.config).unwrap(), cfg_before);
+
+    // Preview event carries the marker frames: 4 slots (3 on HUB0 + 1 on HUB1).
+    let last = h.events.payloads("rgb-frame").pop().unwrap();
+    let frames: serde_json::Value = serde_json::from_str(&last).unwrap();
+    assert_eq!(frames.as_array().unwrap().len(), 4);
+
+    assert_eq!(report.duration_secs, 30);
+    assert_eq!(report.total_leds, 166);
+    assert_eq!(report.power_factor, 1.0);
+    assert_eq!(report.hubs.len(), 2);
+    let hub0 = &report.hubs[0];
+    assert_eq!(hub0.hub_serial, "HUB0");
+    assert_eq!(hub0.firmware_led_counts.get("15"), Some(&80));
+    let rows: Vec<(&str, u8, usize, usize, usize, &str)> = hub0
+        .slots
+        .iter()
+        .map(|s| {
+            (
+                s.device_id.as_str(),
+                s.channel,
+                s.start_led,
+                s.end_led,
+                s.start_byte,
+                s.count_source,
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("H0_Q1", 1, 0, 34, 0, "type_default"),
+            ("H0_Q2", 2, 34, 68, 102, "type_default"),
+            ("H0_AD", 15, 68, 148, 204, "firmware_table"),
+        ]
+    );
+    assert_eq!(hub0.total_leds, 148);
+    assert_eq!(hub0.skipped_zero_count.len(), 1);
+    assert_eq!(hub0.skipped_zero_count[0].device_id, "H0_NL");
+    assert_eq!(hub0.slots[1].body_color_name, "yellow");
+    let hub1 = &report.hubs[1];
+    assert_eq!(hub1.slots[0].body_color_name, "white");
+    assert_eq!((hub1.slots[0].start_led, hub1.slots[0].end_led), (0, 18));
+}
+
+/// 150 + 150 = 300 LEDs -> factor 0.66 (f32 0.6600000262). 255*0.66 = 168.3
+/// -> 168; 128*0.66 = 84.48 -> 84; 0 -> 0. Marker colours scale like normal
+/// rendering: white [168,168,168], green [0,168,0], red [168,0,0], orange
+/// body [168,84,0], yellow body [168,168,0].
+#[test]
+fn marker_applies_port_power_factor_like_normal_rendering() {
+    let spec = HubSpec {
+        serial: "HUB0",
+        devices: vec![
+            device(1, "DEV1", LinkDeviceType::LinkAdapter),
+            device(2, "DEV2", LinkDeviceType::LinkAdapter),
+        ],
+        led_counts: HashMap::from([(1u8, 150u16), (2u8, 150u16)]),
+        pump_channels: Vec::new(),
+    };
+    let mut h = Harness::new(
+        v1_config(Vec::new(), rgb_cfg(true, true, &[1, 2]), 1000),
+        vec![spec],
+        &[("cpu", 40.0)],
+    );
+    let report = start_marker(&mut h, 10).unwrap();
+    assert_eq!(report.total_leds, 300);
+    assert_eq!(report.power_factor, 0.66);
+
+    let scaled = |n: usize, body: [u8; 3]| {
+        let mut v = vec![body; n];
+        v[0] = [168, 168, 168];
+        v[1] = [0, 168, 0];
+        v[n - 1] = [168, 0, 0];
+        v
+    };
+    assert_eq!(
+        h.hub("HUB0").rgb_calls().last().unwrap(),
+        &vec![
+            (1u8, scaled(150, [168, 84, 0])),
+            (2u8, scaled(150, [168, 168, 0])),
+        ]
+    );
+}
+
+/// Command at t = 100 ms with 5 s -> deadline 5100 ms (same timing as the
+/// Identify test). Duration clamps to 5..=300. After expiry the next tick
+/// renders the configured effect again.
+#[test]
+fn marker_expires_at_deadline_and_normal_frames_resume() {
+    let mut h = marker_harness(true, true);
+    let report = start_marker(&mut h, 1).unwrap(); // clamped up to 5
+    assert_eq!(report.duration_secs, 5);
+    assert_eq!(h.hub("HUB0").rgb_calls().last().unwrap(), &expected_marker_hub0());
+
+    // 5099 ms < 5100 ms: still markers.
+    assert_eq!(h.clock.elapsed(), MS(133));
+    h.clock.advance(MS(5099) - h.clock.elapsed());
+    h.steps(1);
+    assert_eq!(h.hub("HUB0").rgb_calls().last().unwrap(), &expected_marker_hub0());
+    assert!(h.worker.rgb_marker.is_some());
+
+    // The step slept 33 ms -> t = 5132 ms >= deadline: configured colours
+    // (zone covers HUB0 ch1 only; unframed devices are black).
+    h.steps(1);
+    assert_eq!(
+        h.hub("HUB0").rgb_calls().last().unwrap(),
+        &vec![
+            (1u8, vec![[200u8, 100, 50]; 34]),
+            (2u8, vec![[0u8, 0, 0]; 34]),
+            (15u8, vec![[0u8, 0, 0]; 80]),
+        ]
+    );
+    assert!(h.worker.rgb_marker.is_none());
+    assert_eq!(h.store.attempts(), 0);
+
+    // Upper clamp.
+    let mut h2 = marker_harness(true, true);
+    assert_eq!(start_marker(&mut h2, 9999).unwrap().duration_secs, 300);
+}
+
+#[test]
+fn identify_and_marker_cancel_each_other() {
+    let mut h = marker_harness(true, true);
+    start_marker(&mut h, 60).unwrap();
+    assert!(h.worker.rgb_marker.is_some());
+
+    // Identify cancels the marker; its colours (not markers) are sent.
+    let (rows, _) = h.call(|reply| HwCommand::RgbIdentifyChannels {
+        duration_secs: 60,
+        reply,
+    });
+    assert!(rows.is_ok());
+    assert!(h.worker.rgb_marker.is_none());
+    assert!(h.worker.rgb_identify.is_some());
+    let last = h.hub("HUB0").rgb_calls().last().unwrap().clone();
+    // Identify indexes hubs in HashMap order, so HUB0 is hub_idx 0 (orange,
+    // slot 1) or 1 (white, slot 9). Either way the slot is one flat colour.
+    assert_eq!(last[0].0, 1);
+    assert!(
+        last[0].1 == vec![ORANGE; 34] || last[0].1 == vec![WHITE; 34],
+        "identify recolour, no markers"
+    );
+
+    // Marker cancels Identify and takes over the next frame.
+    start_marker(&mut h, 60).unwrap();
+    assert!(h.worker.rgb_identify.is_none());
+    assert!(h.worker.rgb_marker.is_some());
+    assert_eq!(h.hub("HUB0").rgb_calls().last().unwrap(), &expected_marker_hub0());
+}
+
+/// The manifest goes through the injected store with the pattern
+/// `led-manifest-<YYYYMMDD-HHMMSS>.json`. Fake wall clock = 1_700_000_000 s
+/// (2023-11-14 22:13:20 UTC) + 100 ms.
+#[test]
+fn marker_manifest_written_through_injected_store() {
+    let mut h = marker_harness(true, true);
+    let report = start_marker(&mut h, 30).unwrap();
+
+    let files = h.diagnostics.files();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].0, "led-manifest-20231114-221320.json");
+    let path = report.file_path.clone().unwrap();
+    assert!(path.ends_with("led-manifest-20231114-221320.json"), "{path}");
+    assert!(report.file_error.is_none());
+
+    let v: serde_json::Value = serde_json::from_str(&files[0].1).unwrap();
+    assert_eq!(v["app_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(v["generated_at_utc"], "2023-11-14T22:13:20Z");
+    assert_eq!(v["legend"].as_array().unwrap().len(), 4);
+    assert_eq!(v["legend"][0]["label"], "white");
+    assert_eq!(v["hubs"][0]["hub_serial"], "HUB0");
+    assert_eq!(v["hubs"][0]["firmware"], "0.0.0");
+    assert_eq!(v["hubs"][0]["firmware_led_counts"]["15"], 80);
+    assert_eq!(v["hubs"][0]["slots"][2]["start_byte"], 204);
+    assert_eq!(v["hubs"][0]["skipped_zero_count"][0]["device_id"], "H0_NL");
+    assert!(v["file_path"].is_null());
+
+    // A failing store does not block the diagnostic; the error is surfaced.
+    let mut h2 = marker_harness(true, true);
+    h2.diagnostics.set_fail(true);
+    let r2 = start_marker(&mut h2, 30).unwrap();
+    assert!(r2.file_path.is_none());
+    assert!(r2.file_error.unwrap().contains("mock diagnostics failure"));
+    assert!(h2.worker.rgb_marker.is_some());
+}
