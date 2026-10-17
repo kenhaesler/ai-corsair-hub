@@ -15,9 +15,27 @@ use serde::Deserialize;
 use tracing::{debug, info, warn};
 
 const LHM_URL: &str = "http://127.0.0.1:8085/data.json";
-const HTTP_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// GET `url` and return the body, with `timeout` covering connect, headers and
+/// body (ureq's global timeout), so a stalled webserver cannot block the caller.
+pub(crate) fn bounded_get_string(url: &str, timeout: Duration) -> anyhow::Result<String> {
+    use anyhow::Context;
+
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .build();
+    let agent = ureq::Agent::new_with_config(config);
+    agent
+        .get(url)
+        .call()
+        .context("LHM HTTP request failed")?
+        .body_mut()
+        .read_to_string()
+        .context("Failed to read LHM response")
+}
 
 /// Ensure LibreHardwareMonitor is running with its webserver enabled.
 ///
