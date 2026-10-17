@@ -13,3 +13,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
+
+[features]
+# Exposes ControlLoop::from_parts for hardware-free integration harnesses.
+# Enabled only from dev-dependencies (never in release builds).
+test-support = []

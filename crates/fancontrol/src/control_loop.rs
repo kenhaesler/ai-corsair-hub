@@ -387,6 +387,19 @@ impl ControlLoop {
             );
         }
 
+        Self::assemble(config, sensors, hubs, shutdown)
+    }
+
+    /// Second half of `build()`: given already-discovered hubs and sensors,
+    /// build the identity registry, apply V2 per-device LED-count overrides,
+    /// construct the fan groups and per-sensor state. Shared by `build()` and
+    /// the `test-support` constructor so both construct groups identically.
+    fn assemble(
+        config: AppConfig,
+        sensors: HashMap<String, Box<dyn TemperatureSource>>,
+        mut hubs: HashMap<String, HubConnection>,
+        shutdown: Arc<AtomicBool>,
+    ) -> Result<Self> {
         // Build the identity registry from every enumerated device across
         // every hub. This is the runtime bridge between device_id (what
         // persists) and (hub_serial, channel) (what the wire speaks).
@@ -811,6 +824,18 @@ impl ControlLoop {
 
     /// Swap in a freshly initialized hub after successful recovery.
     pub fn replace_hub(&mut self, serial: &str, new_hub: IcueLinkHub, new_info: HubInfo) {
+        self.replace_hub_transport(serial, Arc::new(new_hub), new_info);
+    }
+
+    /// Transport-trait variant of [`Self::replace_hub`]; `replace_hub` delegates
+    /// here. Lets callers (and the GUI integration harness) swap in any
+    /// `IcueLinkTransport`.
+    pub fn replace_hub_transport(
+        &mut self,
+        serial: &str,
+        new_hub: Arc<dyn IcueLinkTransport>,
+        new_info: HubInfo,
+    ) {
         if let Some(conn) = self.hubs.get_mut(serial) {
             let pump_channels: Vec<u8> = new_info
                 .devices
@@ -819,7 +844,7 @@ impl ControlLoop {
                 .map(|d| d.channel)
                 .collect();
 
-            conn.hub = Arc::new(new_hub);
+            conn.hub = new_hub;
             conn.info = new_info;
             conn.healthy = true;
             conn.consecutive_failures = 0;
@@ -1634,6 +1659,63 @@ fn validate_temp_source(group_name: &str, source: &TempSourceConfig) -> Result<(
 // `impl ControlLoop` `#[cfg(test)]` methods that need `pub(crate)` visibility
 // for integration-style tests. Kept gated on `cfg(test)` so they have zero
 // impact on release builds.
+
+/// One hub's worth of pre-built parts for [`ControlLoop::from_parts`].
+#[cfg(any(test, feature = "test-support"))]
+pub struct HubParts {
+    pub transport: Arc<dyn IcueLinkTransport>,
+    pub pump_channels: Vec<u8>,
+    pub devices: Vec<corsair_hid::LinkDevice>,
+    /// Per-channel LED counts, as the hub's 0x1d table would report them.
+    pub led_counts: HashMap<u8, u16>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ControlLoop {
+    /// Build a ControlLoop from mock hubs and sensors without USB discovery.
+    ///
+    /// Groups, registry, V2 LED overrides and sensor state are constructed by
+    /// the same code `build()` uses (`assemble`), so config-driven behaviour
+    /// (fan groups, device_ids, led_count overrides) matches production.
+    /// V1 `device_overrides` are applied by `build()` during hub discovery;
+    /// callers of this constructor supply the final `led_counts` directly.
+    ///
+    /// Only available with the `test-support` feature (or in this crate's tests).
+    pub fn from_parts(
+        config: AppConfig,
+        hubs: HashMap<String, HubParts>,
+        sensors: HashMap<String, Box<dyn TemperatureSource>>,
+    ) -> Result<Self> {
+        let hub_conns: HashMap<String, HubConnection> = hubs
+            .into_iter()
+            .map(|(serial, parts)| {
+                (
+                    serial.clone(),
+                    HubConnection {
+                        hub: parts.transport,
+                        serial,
+                        healthy: true,
+                        consecutive_failures: 0,
+                        last_recovery_attempt: Instant::now(),
+                        recovery_attempts: 0,
+                        pump_channels: parts.pump_channels,
+                        info: HubInfo {
+                            firmware: corsair_hid::FirmwareVersion {
+                                major: 0,
+                                minor: 0,
+                                patch: 0,
+                            },
+                            devices: parts.devices,
+                            led_counts: parts.led_counts,
+                        },
+                        color_logged: false,
+                    },
+                )
+            })
+            .collect();
+        Self::assemble(config, sensors, hub_conns, Arc::new(AtomicBool::new(false)))
+    }
+}
 
 #[cfg(test)]
 impl ControlLoop {
