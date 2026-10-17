@@ -24,3 +24,7 @@ tracing-subscriber = { workspace = true }
 tracing-appender = "0.2"
 anyhow = { workspace = true }
 toml = { workspace = true }
+
+[dev-dependencies]
+# Hardware-free worker harness builds ControlLoop from mock hubs (dev/test only).
+corsair-fancontrol = { workspace = true, features = ["test-support"] }
