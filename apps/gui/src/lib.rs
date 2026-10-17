@@ -3,6 +3,7 @@ mod dto;
 mod hardware_thread;
 mod presets;
 mod state;
+mod worker_env;
 
 use std::sync::OnceLock;
 

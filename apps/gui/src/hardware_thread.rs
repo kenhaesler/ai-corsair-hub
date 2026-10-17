@@ -19,6 +19,13 @@ use corsair_rgb::renderer::{DeviceConfig, RgbRenderer, ZoneConfig};
 
 use crate::dto::{CpuMetricsDto, DeviceTree, GpuMetricsDto, RgbFrameDto, SystemSnapshot};
 use crate::state::{ChannelIdentity, HwCommand};
+use crate::worker_env::{
+    emit, ConfigStore, DiskConfigStore, HubBackend, SystemClock, TauriEventSink, Telemetry,
+    WorkerEnv,
+};
+
+/// Drop the cached PSU reading after this many consecutive failed reads.
+const PSU_STALE_LIMIT: u32 = 10;
 
 /// Distinct high-contrast colours used by the Channel Identify
 /// diagnostic. Indexed modulo by an arbitrary `(hub_index, channel)`
@@ -78,7 +85,7 @@ fn run_loop(
     }
 
     // Initialize device scanner (stays alive for device queries and recovery)
-    let mut scanner = match DeviceScanner::new() {
+    let scanner = match DeviceScanner::new() {
         Ok(s) => s,
         Err(e) => {
             let msg = format!("Failed to initialize HID API: {}", e);
@@ -117,19 +124,19 @@ fn run_loop(
     // disk round-trip through save_config_to_disk.
     run_config_migration(&mut config, &mut control_loop, &app);
 
-    let mut poll_interval = Duration::from_millis(config.general.poll_interval_ms);
+    let poll_interval = Duration::from_millis(config.general.poll_interval_ms);
 
     // RGB renderer — time-sliced alongside fan control
     let mut rgb_renderer = RgbRenderer::new();
-    let mut rgb_enabled = config.rgb.enabled;
-    let mut rgb_interval = Duration::from_millis(if config.rgb.fps > 0 {
+    let rgb_enabled = config.rgb.enabled;
+    let rgb_interval = Duration::from_millis(if config.rgb.fps > 0 {
         1000 / config.rgb.fps as u64
     } else {
         33
     });
-    let mut last_rgb_tick = Instant::now();
-    let mut last_temp: Option<f64> = None;
-    let mut last_temp_time: Option<Instant> = None;
+    let last_rgb_tick = Instant::now();
+    let last_temp: Option<f64> = None;
+    let last_temp_time: Option<Instant> = None;
     apply_rgb_config(
         &mut rgb_renderer,
         &config,
@@ -160,16 +167,15 @@ fn run_loop(
     };
 
     // Cache last good PSU reading so transient failures don't flicker the UI
-    let mut last_good_psu: Option<corsair_hid::PsuStatus> = None;
-    let mut psu_fail_count: u32 = 0;
-    const PSU_STALE_LIMIT: u32 = 10; // drop after 10 consecutive failures
+    let last_good_psu: Option<corsair_hid::PsuStatus> = None;
+    let psu_fail_count: u32 = 0;
 
     // Channel-identify diagnostic state. When `Some((deadline, map))`,
     // the RGB tick overrides normal rendering with per-device distinct
     // colours from `map` (keyed by device_id). Automatically clears when
     // `Instant::now() >= deadline`, at which point the next tick
     // resumes the configured effect rendering.
-    let mut rgb_identify: Option<(Instant, std::collections::HashMap<String, [u8; 3]>)> =
+    let rgb_identify: Option<(Instant, std::collections::HashMap<String, [u8; 3]>)> =
         None;
 
     // Separate NVML handle for extended GPU metrics (util, power, clock,
@@ -189,8 +195,73 @@ fn run_loop(
             }
         };
 
-    loop {
-        let cycle_start = Instant::now();
+    let mut worker = Worker {
+        config,
+        control_loop,
+        poll_interval,
+        rgb_renderer,
+        rgb_enabled,
+        rgb_interval,
+        last_rgb_tick,
+        last_temp,
+        last_temp_time,
+        last_good_psu,
+        psu_fail_count,
+        rgb_identify,
+        env: WorkerEnv {
+            events: Box::new(TauriEventSink::new(app)),
+            clock: Box::new(SystemClock),
+            store: Box::new(DiskConfigStore),
+            telemetry: Box::new(RealTelemetry {
+                psu_handle,
+                gpu_metrics_sensor,
+            }),
+            hubs: Box::new(RealHubBackend { scanner }),
+        },
+    };
+
+    while worker.step(&rx) == StepOutcome::Continue {}
+    Ok(())
+}
+
+/// Result of one [`Worker::step`] iteration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StepOutcome {
+    Continue,
+    Exit,
+}
+
+/// State carried by the hardware loop after startup. `run_loop` builds one
+/// and calls [`Worker::step`] until it returns [`StepOutcome::Exit`]; the
+/// integration harness builds one over fake dependencies.
+pub(crate) struct Worker {
+    pub(crate) config: AppConfig,
+    pub(crate) control_loop: ControlLoop,
+    pub(crate) poll_interval: Duration,
+    pub(crate) rgb_renderer: RgbRenderer,
+    pub(crate) rgb_enabled: bool,
+    pub(crate) rgb_interval: Duration,
+    pub(crate) last_rgb_tick: Instant,
+    pub(crate) last_temp: Option<f64>,
+    pub(crate) last_temp_time: Option<Instant>,
+    /// Cache last good PSU reading so transient failures don't flicker the UI
+    pub(crate) last_good_psu: Option<corsair_hid::PsuStatus>,
+    pub(crate) psu_fail_count: u32,
+    /// Channel-identify diagnostic state. When `Some((deadline, map))`,
+    /// the RGB tick overrides normal rendering with per-device distinct
+    /// colours from `map` (keyed by device_id). Automatically clears when
+    /// `clock.now() >= deadline`, at which point the next tick
+    /// resumes the configured effect rendering.
+    pub(crate) rgb_identify: Option<(Instant, std::collections::HashMap<String, [u8; 3]>)>,
+    pub(crate) env: WorkerEnv,
+}
+
+impl Worker {
+    /// One outer iteration of the hardware loop: drain pending commands,
+    /// run one control cycle, emit the snapshot, render RGB if due, then
+    /// sleep out the remainder of the cycle.
+    pub(crate) fn step(&mut self, rx: &mpsc::Receiver<HwCommand>) -> StepOutcome {
+        let cycle_start = self.env.clock.now();
 
         // Process all pending commands (non-blocking)
         loop {
@@ -198,19 +269,23 @@ fn run_loop(
                 Ok(cmd) => match cmd {
                     HwCommand::GetSnapshot { reply } => {
                         // Will be sent via event below, but also reply directly
-                        let result = build_snapshot(&mut control_loop, psu_handle.as_ref(), &last_good_psu);
+                        let result = build_snapshot(
+                            &mut self.control_loop,
+                            &*self.env.telemetry,
+                            &self.last_good_psu,
+                        );
                         let _ = reply.send(result);
                         continue; // Don't tick, just respond
                     }
                     HwCommand::GetDevices { reply } => {
-                        let tree = build_device_tree_from_loop(&control_loop, &scanner);
+                        let tree = self.env.hubs.device_tree(&self.control_loop);
                         let _ = reply.send(Ok(tree));
                     }
                     HwCommand::GetConfig { reply } => {
-                        let _ = reply.send(Ok(control_loop.config().clone()));
+                        let _ = reply.send(Ok(self.control_loop.config().clone()));
                     }
                     HwCommand::ListSensors { reply } => {
-                        let _ = reply.send(Ok(control_loop.available_sensors()));
+                        let _ = reply.send(Ok(self.control_loop.available_sensors()));
                     }
                     HwCommand::UpdateConfig {
                         config: mut new_config,
@@ -227,16 +302,16 @@ fn run_loop(
                         // Modified / Off on next read.
                         reconcile_preset_applied(&mut new_config);
                         // Persist to disk
-                        if let Err(e) = save_config_to_disk(&new_config) {
+                        if let Err(e) = self.env.store.save(&new_config) {
                             let _ = reply.send(Err(format!("Failed to save config: {}", e)));
                             continue;
                         }
                         // Apply live
-                        match control_loop.update_config(new_config.clone()) {
+                        match self.control_loop.update_config(new_config.clone()) {
                             Ok(()) => {
-                                config = new_config;
-                                poll_interval =
-                                    Duration::from_millis(config.general.poll_interval_ms);
+                                self.config = new_config;
+                                self.poll_interval =
+                                    Duration::from_millis(self.config.general.poll_interval_ms);
                                 let _ = reply.send(Ok(()));
                             }
                             Err(e) => {
@@ -253,14 +328,15 @@ fn run_loop(
                         let result = apply_preset(
                             &preset,
                             group_name.as_deref(),
-                            &mut config,
-                            &mut control_loop,
+                            &mut self.config,
+                            &mut self.control_loop,
+                            &*self.env.store,
                         );
                         let ok = result.is_ok();
                         let _ = reply.send(result);
                         if ok {
-                            poll_interval =
-                                Duration::from_millis(config.general.poll_interval_ms);
+                            self.poll_interval =
+                                Duration::from_millis(self.config.general.poll_interval_ms);
                         }
                     }
                     HwCommand::SetManualDuty {
@@ -269,7 +345,7 @@ fn run_loop(
                         duty,
                         reply,
                     } => {
-                        let result = control_loop
+                        let result = self.control_loop
                             .set_manual_duty(&hub_serial, &channels, duty)
                             .map_err(|e| format!("Failed to set duty: {}", e));
                         let _ = reply.send(result);
@@ -280,7 +356,7 @@ fn run_loop(
                         reply,
                     } => {
                         let result = apply_manual_duty_by_device_id(
-                            &control_loop,
+                            &self.control_loop,
                             &device_ids,
                             duty,
                         );
@@ -292,10 +368,11 @@ fn run_loop(
                         reply,
                     } => {
                         let result = apply_rename_device(
-                            &mut config,
-                            &mut control_loop,
+                            &mut self.config,
+                            &mut self.control_loop,
                             &device_id,
                             &name,
+                            &*self.env.store,
                         );
                         let _ = reply.send(result);
                     }
@@ -303,28 +380,28 @@ fn run_loop(
                         config: rgb_config,
                         reply,
                     } => {
-                        config.rgb = rgb_config;
-                        rgb_enabled = config.rgb.enabled;
-                        rgb_interval = Duration::from_millis(if config.rgb.fps > 0 {
-                            1000 / config.rgb.fps as u64
+                        self.config.rgb = rgb_config;
+                        self.rgb_enabled = self.config.rgb.enabled;
+                        self.rgb_interval = Duration::from_millis(if self.config.rgb.fps > 0 {
+                            1000 / self.config.rgb.fps as u64
                         } else {
                             33
                         });
                         apply_rgb_config(
-                            &mut rgb_renderer,
-                            &config,
-                            &control_loop.device_type_map(),
-                            control_loop.registry(),
+                            &mut self.rgb_renderer,
+                            &self.config,
+                            &self.control_loop.device_type_map(),
+                            self.control_loop.registry(),
                         );
-                        if let Err(e) = save_config_to_disk(&config) {
+                        if let Err(e) = self.env.store.save(&self.config) {
                             warn!("Failed to save RGB config: {}", e);
                         }
                         let _ = reply.send(Ok(()));
                     }
                     HwCommand::SetRgbEnabled { enabled, reply } => {
-                        rgb_enabled = enabled;
-                        config.rgb.enabled = enabled;
-                        if let Err(e) = save_config_to_disk(&config) {
+                        self.rgb_enabled = enabled;
+                        self.config.rgb.enabled = enabled;
+                        if let Err(e) = self.env.store.save(&self.config) {
                             warn!("Failed to save RGB enabled state: {}", e);
                         }
                         let _ = reply.send(Ok(()));
@@ -340,7 +417,7 @@ fn run_loop(
                         // device even if the registry re-resolves
                         // mid-test. Also return the mapping so the UI
                         // can render a legend.
-                        let hub_snaps = control_loop.hub_snapshots();
+                        let hub_snaps = self.control_loop.hub_snapshots();
                         let mut identity: Vec<ChannelIdentity> = Vec::new();
                         let mut id_to_rgb: std::collections::HashMap<String, [u8; 3]> =
                             std::collections::HashMap::new();
@@ -368,8 +445,8 @@ fn run_loop(
                             }
                         }
                         let clamped = duration_secs.clamp(3, 120);
-                        rgb_identify = Some((
-                            Instant::now() + Duration::from_secs(clamped),
+                        self.rgb_identify = Some((
+                            self.env.clock.now() + Duration::from_secs(clamped),
                             id_to_rgb,
                         ));
                         info!(
@@ -381,72 +458,62 @@ fn run_loop(
                     }
                     HwCommand::Shutdown => {
                         info!("Hardware thread received shutdown command");
-                        control_loop.shutdown_hardware();
-                        return Ok(());
+                        self.control_loop.shutdown_hardware();
+                        return StepOutcome::Exit;
                     }
                 },
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     info!("Hardware command channel closed — shutting down");
-                    control_loop.shutdown_hardware();
-                    return Ok(());
+                    self.control_loop.shutdown_hardware();
+                    return StepOutcome::Exit;
                 }
             }
         }
 
         // Run one control cycle
-        let cycle_result = control_loop.tick();
+        let cycle_result = self.control_loop.tick();
 
         // Emit hub-lost for any hub that just became unhealthy (first failure)
         for report in &cycle_result.hub_health {
             if report.consecutive_failures == 1 {
                 warn!(serial = report.serial.as_str(), "Hub lost — will attempt recovery");
-                let _ = app.emit("hub-lost", &report.serial);
+                emit(&*self.env.events, "hub-lost", &report.serial);
             }
         }
 
         // Attempt recovery for hubs with sustained failures
-        let needing_recovery = control_loop.hubs_needing_recovery();
+        let needing_recovery = self.control_loop.hubs_needing_recovery();
         for serial in &needing_recovery {
             info!(serial = serial.as_str(), "Attempting hub recovery");
-            let recovered = scanner
-                .refresh()
-                .and_then(|()| {
-                    scanner.open_device(
-                        CorsairDevice::IcueLinkHub.pid(),
-                        serial,
-                        IcueLinkHub::data_interface(),
-                    )
-                })
-                .and_then(|dev| {
-                    let hub = IcueLinkHub::new(dev, serial.clone());
-                    let info = hub.initialize()?;
-                    Ok((hub, info))
-                });
+            let recovered = self.env.hubs.reopen(serial);
 
             match recovered {
                 Ok((hub, info)) => {
                     info!(serial = serial.as_str(), "Hub recovery succeeded");
-                    control_loop.replace_hub(serial, hub, info);
-                    let _ = app.emit("hub-recovered", serial);
+                    self.control_loop.replace_hub_transport(serial, hub, info);
+                    emit(&*self.env.events, "hub-recovered", &serial);
                 }
                 Err(e) => {
                     warn!(serial = serial.as_str(), error = %e, "Hub recovery failed");
-                    control_loop.mark_recovery_attempted(serial);
+                    self.control_loop.mark_recovery_attempted(serial);
                 }
             }
         }
 
         // Read PSU status: LHM first (no USB contention), then direct HID fallback
-        let psu_status = corsair_sensors::lhm::read_psu_from_lhm()
+        let psu_status = self
+            .env
+            .telemetry
+            .read_psu_lhm()
             .and_then(validate_psu_status)
             .or_else(|| {
-                psu_handle.as_ref().and_then(|psu| {
-                    match psu.read_all() {
+                self.env.telemetry.read_psu_hid().and_then(|read| {
+                    match read {
                         Ok(raw) => validate_psu_status(raw),
                         Err(e) => {
-                            if psu_fail_count <= 3 || psu_fail_count % 10 == 0 {
-                                warn!("PSU HID read error (fail #{}): {}", psu_fail_count + 1, e);
+                            if self.psu_fail_count <= 3 || self.psu_fail_count % 10 == 0 {
+                                warn!("PSU HID read error (fail #{}): {}", self.psu_fail_count + 1, e);
                             }
                             None
                         }
@@ -457,17 +524,17 @@ fn run_loop(
         // Update cache or fall back to last good reading
         let psu_status = match psu_status {
             Some(valid) => {
-                if psu_fail_count > 0 {
-                    info!("PSU read recovered after {} failures", psu_fail_count);
+                if self.psu_fail_count > 0 {
+                    info!("PSU read recovered after {} failures", self.psu_fail_count);
                 }
-                psu_fail_count = 0;
-                last_good_psu = Some(valid.clone());
+                self.psu_fail_count = 0;
+                self.last_good_psu = Some(valid.clone());
                 Some(valid)
             }
             None => {
-                psu_fail_count += 1;
-                if psu_fail_count <= PSU_STALE_LIMIT {
-                    last_good_psu.clone()
+                self.psu_fail_count += 1;
+                if self.psu_fail_count <= PSU_STALE_LIMIT {
+                    self.last_good_psu.clone()
                 } else {
                     None
                 }
@@ -477,28 +544,13 @@ fn run_loop(
         // Build and emit snapshot. Pass a fresh device_id map so the DTO
         // carries stable identity alongside (hub, channel) during the V1→V2
         // transition.
-        let device_id_map = control_loop.device_id_map();
-        let gpu_metrics = gpu_metrics_sensor
-            .as_ref()
-            .and_then(|s| s.read_metrics().ok())
-            .map(|m| GpuMetricsDto {
-                utilization_pct: m.utilization_pct,
-                power_watts: m.power_watts,
-                clock_mhz: m.clock_mhz,
-                memory_used_mb: m.memory_used_mb,
-                temp_celsius: m.temp_celsius,
-            });
+        let device_id_map = self.control_loop.device_id_map();
+        let gpu_metrics = self.env.telemetry.read_gpu_metrics();
         // CPU metrics come from LHM — same HTTP tree the PSU path
         // already touches. Only populated when LHM is running; on
         // fallback backends (root\WMI, CIMV2) this stays `None` and
         // the dashboard hides the CPU extras strip.
-        let cpu_metrics = corsair_sensors::lhm::read_cpu_metrics_from_lhm().map(|m| {
-            CpuMetricsDto {
-                load_pct: m.load_pct,
-                power_watts: m.power_watts,
-                clock_mhz: m.clock_mhz,
-            }
-        });
+        let cpu_metrics = self.env.telemetry.read_cpu_metrics();
         let snapshot = SystemSnapshot::from_cycle(
             &cycle_result,
             &cycle_result.fan_speeds,
@@ -507,10 +559,10 @@ fn run_loop(
             gpu_metrics,
             cpu_metrics,
         );
-        let _ = app.emit("sensor-update", &snapshot);
+        emit(&*self.env.events, "sensor-update", &snapshot);
 
         // RGB render tick (time-sliced at configured FPS)
-        if rgb_enabled && last_rgb_tick.elapsed() >= rgb_interval {
+        if self.rgb_enabled && self.env.clock.now().saturating_duration_since(self.last_rgb_tick) >= self.rgb_interval {
             // Build EffectContext from latest sensor data
             let primary_temp = snapshot
                 .temperatures
@@ -519,16 +571,16 @@ fn run_loop(
 
             // Compute temp delta (°C/sec)
             let temp_delta = primary_temp.and_then(|current| {
-                let now = Instant::now();
-                let delta = last_temp.map(|prev| {
-                    let dt = last_temp_time
+                let now = self.env.clock.now();
+                let delta = self.last_temp.map(|prev| {
+                    let dt = self.last_temp_time
                         .map(|t| now.duration_since(t).as_secs_f64())
                         .unwrap_or(1.0)
                         .max(0.01);
                     (current - prev) / dt
                 });
-                last_temp = Some(current);
-                last_temp_time = Some(now);
+                self.last_temp = Some(current);
+                self.last_temp_time = Some(now);
                 delta
             });
 
@@ -556,7 +608,7 @@ fn run_loop(
                     .collect(),
             };
 
-            let mut frames = rgb_renderer.tick(&effect_ctx);
+            let mut frames = self.rgb_renderer.tick(&effect_ctx);
 
             // Channel-identify override: if active and not expired,
             // replace every LED colour in every frame with the
@@ -565,15 +617,15 @@ fn run_loop(
             // shapes (device_id, led count) so the hub buffer layout
             // is identical to production rendering — the only
             // variable is colour-per-device.
-            let expired = rgb_identify
+            let expired = self.rgb_identify
                 .as_ref()
-                .map(|(deadline, _)| Instant::now() >= *deadline)
+                .map(|(deadline, _)| self.env.clock.now() >= *deadline)
                 .unwrap_or(false);
             if expired {
                 info!("RGB channel-identify mode expired — resuming normal rendering");
-                rgb_identify = None;
+                self.rgb_identify = None;
             }
-            if let Some((_, id_to_rgb)) = &rgb_identify {
+            if let Some((_, id_to_rgb)) = &self.rgb_identify {
                 for frame in frames.iter_mut() {
                     let rgb = id_to_rgb
                         .get(&frame.device_id)
@@ -590,16 +642,16 @@ fn run_loop(
             // Resolve (hub_serial, channel) via the current registry so the
             // DTO carries a self-consistent snapshot for the preview UI
             // during the V1→V2 transition.
-            let registry_snapshot = control_loop.registry();
+            let registry_snapshot = self.control_loop.registry();
             let frame_dtos: Vec<RgbFrameDto> = frames
                 .iter()
                 .map(|f| RgbFrameDto::from_frame(f, registry_snapshot))
                 .collect();
-            let _ = app.emit("rgb-frame", &frame_dtos);
+            emit(&*self.env.events, "rgb-frame", &frame_dtos);
 
             // Send to hardware if enabled
-            if config.rgb.hardware_output && !frames.is_empty() {
-                let hw_start = Instant::now();
+            if self.config.rgb.hardware_output && !frames.is_empty() {
+                let hw_start = self.env.clock.now();
 
                 // Compute port power factor from total LEDs across all frames
                 let total_leds: u16 = frames.iter().map(|f| f.leds.len() as u16).sum();
@@ -636,8 +688,8 @@ fn run_loop(
                     .map(|(f, leds)| (f.device_id.clone(), leds.as_slice()))
                     .collect();
 
-                let sent = control_loop.send_rgb_frames(&frame_refs);
-                let hw_elapsed = hw_start.elapsed();
+                let sent = self.control_loop.send_rgb_frames(&frame_refs);
+                let hw_elapsed = self.env.clock.now().saturating_duration_since(hw_start);
                 if hw_elapsed > Duration::from_millis(25) {
                     warn!(
                         elapsed_ms = hw_elapsed.as_millis(),
@@ -647,19 +699,91 @@ fn run_loop(
                 }
             }
 
-            last_rgb_tick = Instant::now();
+            self.last_rgb_tick = self.env.clock.now();
         }
 
         // Sleep for remaining poll interval (account for RGB timing)
-        let elapsed = cycle_start.elapsed();
-        let sleep_target = if rgb_enabled {
-            poll_interval.min(rgb_interval)
+        let elapsed = self.env.clock.now().saturating_duration_since(cycle_start);
+        let sleep_target = if self.rgb_enabled {
+            self.poll_interval.min(self.rgb_interval)
         } else {
-            poll_interval
+            self.poll_interval
         };
         if elapsed < sleep_target {
-            std::thread::sleep(sleep_target - elapsed);
+            self.env.clock.sleep(sleep_target - elapsed);
         }
+        StepOutcome::Continue
+    }
+}
+
+/// Production telemetry: LHM HTTP reads, the optional direct PSU HID handle
+/// and the dashboard's NVML metrics handle.
+struct RealTelemetry {
+    psu_handle: Option<CorsairPsu>,
+    gpu_metrics_sensor: Option<corsair_sensors::GpuSensor>,
+}
+
+impl Telemetry for RealTelemetry {
+    fn read_psu_lhm(&self) -> Option<corsair_hid::PsuStatus> {
+        corsair_sensors::lhm::read_psu_from_lhm()
+    }
+
+    fn read_psu_hid(&self) -> Option<Result<corsair_hid::PsuStatus>> {
+        self.psu_handle.as_ref().map(|psu| psu.read_all())
+    }
+
+    fn read_gpu_metrics(&self) -> Option<GpuMetricsDto> {
+        self.gpu_metrics_sensor
+            .as_ref()
+            .and_then(|s| s.read_metrics().ok())
+            .map(|m| GpuMetricsDto {
+                utilization_pct: m.utilization_pct,
+                power_watts: m.power_watts,
+                clock_mhz: m.clock_mhz,
+                memory_used_mb: m.memory_used_mb,
+                temp_celsius: m.temp_celsius,
+            })
+    }
+
+    fn read_cpu_metrics(&self) -> Option<CpuMetricsDto> {
+        corsair_sensors::lhm::read_cpu_metrics_from_lhm().map(|m| CpuMetricsDto {
+            load_pct: m.load_pct,
+            power_watts: m.power_watts,
+            clock_mhz: m.clock_mhz,
+        })
+    }
+}
+
+/// Production hub backend: the scanner kept alive from startup.
+struct RealHubBackend {
+    scanner: DeviceScanner,
+}
+
+impl HubBackend for RealHubBackend {
+    fn reopen(
+        &mut self,
+        serial: &str,
+    ) -> Result<(std::sync::Arc<dyn corsair_hid::IcueLinkTransport>, corsair_hid::HubInfo)> {
+        let serial = serial.to_string();
+        let scanner = &mut self.scanner;
+        scanner
+            .refresh()
+            .and_then(|()| {
+                scanner.open_device(
+                    CorsairDevice::IcueLinkHub.pid(),
+                    &serial,
+                    IcueLinkHub::data_interface(),
+                )
+            })
+            .and_then(|dev| {
+                let hub = IcueLinkHub::new(dev, serial.clone());
+                let info = hub.initialize()?;
+                Ok((std::sync::Arc::new(hub) as std::sync::Arc<dyn corsair_hid::IcueLinkTransport>, info))
+            })
+    }
+
+    fn device_tree(&self, control_loop: &ControlLoop) -> DeviceTree {
+        build_device_tree_from_loop(control_loop, &self.scanner)
     }
 }
 
@@ -760,14 +884,17 @@ fn run_discovery_only(
 
 fn build_snapshot(
     control_loop: &mut ControlLoop,
-    psu_handle: Option<&CorsairPsu>,
+    telemetry: &dyn Telemetry,
     last_good_psu: &Option<corsair_hid::PsuStatus>,
 ) -> Result<SystemSnapshot, String> {
     let cycle_result = control_loop.tick();
-    let psu_status = corsair_sensors::lhm::read_psu_from_lhm()
+    let psu_status = telemetry
+        .read_psu_lhm()
         .and_then(validate_psu_status)
         .or_else(|| {
-            psu_handle.and_then(|psu| psu.read_all().ok().and_then(validate_psu_status))
+            telemetry
+                .read_psu_hid()
+                .and_then(|read| read.ok().and_then(validate_psu_status))
         })
         .or_else(|| last_good_psu.clone());
     let device_id_map = control_loop.device_id_map();
@@ -896,6 +1023,7 @@ fn apply_preset(
     group_name: Option<&str>,
     config: &mut AppConfig,
     control_loop: &mut ControlLoop,
+    store: &dyn ConfigStore,
 ) -> Result<(), String> {
     use corsair_common::config::{FanMode, TempSourceConfig};
 
@@ -978,7 +1106,7 @@ fn apply_preset(
     }
 
     // Persist to disk so it survives restart
-    if let Err(e) = save_config_to_disk(config) {
+    if let Err(e) = store.save(config) {
         warn!("Failed to save preset config: {}", e);
     }
 
@@ -1201,9 +1329,10 @@ fn apply_rename_device(
     control_loop: &mut ControlLoop,
     device_id: &str,
     name: &str,
+    store: &dyn ConfigStore,
 ) -> Result<(), String> {
     rename_device_in_config(config, device_id, name);
-    if let Err(e) = save_config_to_disk(config) {
+    if let Err(e) = store.save(config) {
         return Err(format!("Failed to persist renamed device: {}", e));
     }
     // Apply live so a subsequent get_config returns the new name without
@@ -1388,7 +1517,7 @@ pub(crate) fn reconcile_preset_applied(config: &mut AppConfig) {
     }
 }
 
-fn save_config_to_disk(config: &AppConfig) -> Result<()> {
+pub(crate) fn save_config_to_disk(config: &AppConfig) -> Result<()> {
     let toml_str = toml::to_string_pretty(config)
         .map_err(|e| anyhow::anyhow!("Failed to serialize config: {}", e))?;
     let config_path = crate::config_path();
