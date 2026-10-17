@@ -1,5 +1,11 @@
 <script lang="ts">
-  import { getDevices, rgbIdentifyChannels, type ChannelIdentity } from '../../lib/api';
+  import {
+    getDevices,
+    rgbIdentifyChannels,
+    rgbMarkerDiagnostic,
+    type ChannelIdentity,
+    type LedMarkerReport,
+  } from '../../lib/api';
   import type { DeviceTree } from '../../lib/types';
   import HubDetail from './HubDetail.svelte';
   import { loadConfig, configStore } from '../../lib/stores/config.svelte';
@@ -34,11 +40,51 @@
     return () => clearInterval(handle);
   });
 
+  // LED marker diagnostic (G05). Same countdown UX as Identify; the report
+  // carries the expected slot layout so the operator can verify each LED
+  // range against what is physically lit.
+  const MARKER_SECS = 60;
+  let markerReport = $state<LedMarkerReport | null>(null);
+  let markerRunning = $state(false);
+  let markerDeadline = $state<number | null>(null);
+  let markerRemaining = $state(0);
+  const diagnosticBusy = $derived(identifyRunning || markerRunning);
+
+  $effect(() => {
+    if (!markerRunning || markerDeadline == null) return;
+    const tick = () => {
+      const left = Math.max(0, Math.ceil((markerDeadline! - Date.now()) / 1000));
+      markerRemaining = left;
+      if (left <= 0) {
+        markerRunning = false;
+        markerDeadline = null;
+      }
+    };
+    tick();
+    const handle = setInterval(tick, 500);
+    return () => clearInterval(handle);
+  });
+
+  async function runMarkers() {
+    if (diagnosticBusy) return;
+    try {
+      const report = await rgbMarkerDiagnostic(MARKER_SECS);
+      markerReport = report;
+      markerRunning = true;
+      markerDeadline = Date.now() + report.duration_secs * 1000;
+      markerRemaining = report.duration_secs;
+    } catch (e) {
+      error = `LED markers failed: ${String(e)}`;
+    }
+  }
+
   async function runIdentify() {
-    if (identifyRunning) return;
+    if (diagnosticBusy) return;
     try {
       const mapping = await rgbIdentifyChannels(IDENTIFY_SECS);
       identifyMap = mapping;
+      markerRunning = false; // Identify cancels the marker diagnostic
+      markerDeadline = null;
       identifyRunning = true;
       identifyDeadline = Date.now() + IDENTIFY_SECS * 1000;
       identifyRemaining = IDENTIFY_SECS;
@@ -91,8 +137,11 @@
   <div class="header-row">
     <h3 class="section-title">USB Devices</h3>
     <div class="header-actions">
-      <button class="identify-btn" onclick={runIdentify} disabled={identifyRunning}>
+      <button class="identify-btn" onclick={runIdentify} disabled={diagnosticBusy}>
         {identifyRunning ? `Identifying… ${identifyRemaining}s` : 'Identify Channels'}
+      </button>
+      <button class="identify-btn" onclick={runMarkers} disabled={diagnosticBusy}>
+        {markerRunning ? `LED markers… ${markerRemaining}s` : 'LED markers'}
       </button>
       <button onclick={refresh} disabled={loading}>
         {loading ? 'Scanning...' : 'Refresh'}
@@ -129,6 +178,77 @@
           </div>
         </div>
       {/each}
+    </div>
+  {/if}
+
+  {#if markerReport && markerRunning}
+    <div class="identify-legend">
+      <p class="legend-intro">
+        Every LED slot shows a marker for {markerReport.duration_secs} seconds:
+        {#each markerReport.legend.slice(0, 3) as entry, i}
+          <span
+            class="legend-swatch inline-swatch"
+            style="background: rgb({entry.rgb[0]},{entry.rgb[1]},{entry.rgb[2]})"
+          ></span>
+          {entry.label} = {entry.meaning}{i < 2 ? ';' : '.'}
+        {/each}
+        All other LEDs use the device's palette colour. Colours are scaled by port
+        power protection (factor {markerReport.power_factor}, {markerReport.total_leds} LEDs
+        total), exactly like normal rendering.
+      </p>
+      {#each markerReport.hubs as hub}
+        <div class="legend-hub">
+          <span class="legend-hub-title">
+            Hub {shortSerial(hub.hub_serial)} · fw {hub.firmware} · {hub.total_leds} LEDs
+            {#if !hub.healthy}(unhealthy — not written){/if}
+          </span>
+          <table class="marker-table">
+            <thead>
+              <tr>
+                <th>Ch</th>
+                <th>Device</th>
+                <th>Type</th>
+                <th>LEDs</th>
+                <th>Count source</th>
+                <th>LED range</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each hub.slots as slot}
+                <tr>
+                  <td class="mono">{slot.channel}</td>
+                  <td>
+                    <span
+                      class="legend-swatch inline-swatch"
+                      style="background: rgb({slot.body_rgb[0]},{slot.body_rgb[1]},{slot.body_rgb[2]})"
+                    ></span>
+                    {slot.name ?? slot.device_id.slice(-6)}
+                  </td>
+                  <td>{slot.device_type}</td>
+                  <td class="mono">{slot.led_count}</td>
+                  <td>{slot.count_source}</td>
+                  <td class="mono">{slot.start_led}–{slot.end_led - 1}</td>
+                </tr>
+              {/each}
+              {#each hub.skipped_zero_count as skipped}
+                <tr class="skipped">
+                  <td class="mono">{skipped.channel}</td>
+                  <td>{skipped.name ?? skipped.device_id.slice(-6)}</td>
+                  <td>{skipped.device_type}</td>
+                  <td class="mono">0</td>
+                  <td>{skipped.count_source}</td>
+                  <td>no slot (skipped)</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/each}
+      {#if markerReport.file_path}
+        <p class="legend-intro marker-file">Manifest saved to <span class="mono">{markerReport.file_path}</span></p>
+      {:else if markerReport.file_error}
+        <p class="legend-intro marker-file">Manifest export failed: {markerReport.file_error}</p>
+      {/if}
     </div>
   {/if}
 
@@ -266,6 +386,40 @@
   .legend-type {
     color: var(--text-muted);
     font-size: 11px;
+  }
+  .inline-swatch {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    vertical-align: middle;
+  }
+  .marker-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    color: var(--text-primary);
+  }
+  .marker-table th {
+    text-align: left;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: 2px 8px 4px 0;
+  }
+  .marker-table td {
+    padding: 2px 8px 2px 0;
+  }
+  .marker-table .mono {
+    font-family: var(--font-mono);
+  }
+  .marker-table .skipped {
+    color: var(--text-muted);
+  }
+  .marker-file {
+    margin: 10px 0 0;
+    word-break: break-all;
   }
   .legend-color-name {
     color: var(--text-secondary);

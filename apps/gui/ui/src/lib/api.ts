@@ -89,3 +89,70 @@ export interface ChannelIdentity {
  */
 export const rgbIdentifyChannels = (durationSecs: number) =>
   invoke<ChannelIdentity[]>('rgb_identify_channels', { durationSecs });
+
+/** One LED slot on a hub, in wire order. Mirrors Rust `MarkerSlotDto`. */
+export interface MarkerSlot {
+  device_id: string;
+  name: string | null;
+  channel: number;
+  device_type: string;
+  led_count: number;
+  /** v2_override | v1_override | firmware_table | type_default */
+  count_source: string;
+  start_led: number;
+  /** Exclusive. */
+  end_led: number;
+  start_byte: number;
+  body_color_name: string;
+  body_rgb: [number, number, number];
+}
+
+/** Device with zero effective LEDs (no wire slot). */
+export interface MarkerSkipped {
+  device_id: string;
+  name: string | null;
+  channel: number;
+  device_type: string;
+  count_source: string;
+}
+
+export interface MarkerHub {
+  hub_serial: string;
+  healthy: boolean;
+  firmware: string;
+  /** Raw 0x1d LED-count table, keyed by channel. */
+  firmware_led_counts: Record<string, number>;
+  total_leds: number;
+  slots: MarkerSlot[];
+  skipped_zero_count: MarkerSkipped[];
+}
+
+export interface MarkerLegendEntry {
+  label: string;
+  rgb: [number, number, number];
+  meaning: string;
+}
+
+/** Reply of `rgbMarkerDiagnostic`. Mirrors Rust `LedMarkerReport`. */
+export interface LedMarkerReport {
+  app_version: string;
+  generated_at_utc: string;
+  duration_secs: number;
+  total_leds: number;
+  /** Port power-protection scaling applied to marker colours (0-1). */
+  power_factor: number;
+  legend: MarkerLegendEntry[];
+  hubs: MarkerHub[];
+  file_path: string | null;
+  file_error: string | null;
+}
+
+/**
+ * LED marker diagnostic: for `durationSecs` (clamped 5-300 by the backend)
+ * every LED slot on every hub shows white (first LED), green (second LED),
+ * red (last LED) and its palette colour elsewhere, through the production
+ * RGB path. Also exports the slot manifest as JSON. Requires `rgb.enabled`
+ * and `rgb.hardware_output`; never saves config.
+ */
+export const rgbMarkerDiagnostic = (durationSecs: number) =>
+  invoke<LedMarkerReport>('rgb_marker_diagnostic', { durationSecs });
