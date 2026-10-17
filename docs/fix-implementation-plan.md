@@ -35,6 +35,8 @@ One qualification to audit issue 9: the wire sender already checks config overri
 
 Dependencies: none. Establish before any production fix.
 
+Operator procedure and checklist for the physical baseline (LED marker diagnostic, `scripts/record-baseline.ps1`): [hardware-baseline.md](hardware-baseline.md) - the physical check is pending until performed.
+
 - Record the full baseline commit, executable checksum, firmware versions, device IDs, hub/channel map, detected/effective LED counts and their source, and a backup of the working configuration. Keep machine-specific evidence local unless deliberately sanitized for the repository. Keep a usable baseline executable and matching config for rollback.
 - Add fixture data from the working setup where available. Mark synthetic fixtures as synthetic; the documented channel-15 case is not a substitute for checking the current machine's actual topology.
 - Extend the existing RecordingHub test double to capture owned **RGB values**, not only `(channel, length)` summaries. Fixtures should assert expected per-device slots and per-hub concatenated bytes, with independent expected values rather than calling the same production builder to compute expectations.
