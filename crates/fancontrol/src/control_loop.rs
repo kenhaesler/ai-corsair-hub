@@ -1662,6 +1662,10 @@ pub fn load_config(path: &Path) -> Result<AppConfig> {
 
 /// Validate config constraints.
 pub fn validate_config(config: &AppConfig) -> Result<()> {
+    // Numeric sanity (finite, ranges) and shape bounds shared with every
+    // load/persist path.
+    corsair_common::config_validation::validate(config)?;
+
     // Poll interval bounds
     if config.general.poll_interval_ms < 100 || config.general.poll_interval_ms > 10000 {
         bail!(
