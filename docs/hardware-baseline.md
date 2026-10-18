@@ -56,7 +56,7 @@ device serials, a config copy and photos).
      lit. The UI shows "LED i / n" (computed locally, no polling); compare it
      with the LED you see lit.
 
-   Procedure for hub 22DE channel 15 (80 positions): run **Ruler**; the 8th
+   Procedure for hub 22DE channel 15 (80 positions): run **Ruler**; the 7th
    yellow mark is LED 70 and the red LED must be LED 79, with nothing lit past
    it and nothing shifted onto the next slot. Then run **Walk** on that device
    and confirm the stepping LED matches "LED i / n" at the start, middle and
