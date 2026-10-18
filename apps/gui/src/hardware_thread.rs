@@ -18,7 +18,7 @@ use corsair_rgb::layout::LedLayout;
 use corsair_rgb::frame::RgbFrame;
 use corsair_rgb::renderer::{DeviceConfig, RgbRenderer, ZoneConfig};
 
-use crate::diagnostics::{self, LedMarkerReport};
+use crate::diagnostics::{self, LedMarkerReport, MarkerMode};
 use crate::dto::{CpuMetricsDto, DeviceTree, GpuMetricsDto, RgbFrameDto, SystemSnapshot};
 use crate::state::{ChannelIdentity, HwCommand};
 use crate::worker_env::{
@@ -200,7 +200,7 @@ fn run_loop(
         None;
 
     // LED marker diagnostic state (G05); see `Worker::rgb_marker`.
-    let rgb_marker: Option<(Instant, Vec<RgbFrame>)> = None;
+    let rgb_marker: Option<ActiveMarker> = None;
 
     // Separate NVML handle for extended GPU metrics (util, power, clock,
     // VRAM). The control loop already owns a GpuSensor for temperature
@@ -279,11 +279,39 @@ pub(crate) struct Worker {
     /// `clock.now() >= deadline`, at which point the next tick
     /// resumes the configured effect rendering.
     pub(crate) rgb_identify: Option<(Instant, std::collections::HashMap<String, [u8; 3]>)>,
-    /// LED marker diagnostic (G05). When `Some((deadline, frames))` the RGB
-    /// tick sends `frames` instead of renderer output until
-    /// `clock.now() >= deadline`. Never persisted; cancelled by Identify.
-    pub(crate) rgb_marker: Option<(Instant, Vec<RgbFrame>)>,
+    /// LED marker diagnostic (G05). When `Some` the RGB tick sends its frames
+    /// instead of renderer output until `clock.now() >= deadline`. Never
+    /// persisted; cancelled by Identify.
+    pub(crate) rgb_marker: Option<ActiveMarker>,
     pub(crate) env: WorkerEnv,
+}
+
+/// Running marker diagnostic. `frames` is prebuilt; in walk mode the target
+/// slot's frame is recomputed every tick from the time since `started`.
+pub(crate) struct ActiveMarker {
+    deadline: Instant,
+    frames: Vec<RgbFrame>,
+    walk: Option<ActiveWalk>,
+}
+
+struct ActiveWalk {
+    started: Instant,
+    step_ms: u64,
+    device_id: String,
+}
+
+impl ActiveMarker {
+    fn frames_at(&self, now: Instant) -> Vec<RgbFrame> {
+        let mut frames = self.frames.clone();
+        if let Some(w) = &self.walk {
+            let elapsed_ms = now.saturating_duration_since(w.started).as_millis() as u64;
+            if let Some(f) = frames.iter_mut().find(|f| f.device_id == w.device_id) {
+                let n = f.leds.len();
+                f.leds = diagnostics::walk_leds(n, diagnostics::walk_index(elapsed_ms, w.step_ms, n));
+            }
+        }
+        frames
+    }
 }
 
 impl Worker {
@@ -292,7 +320,11 @@ impl Worker {
     /// restore a prior state. Builds frames from the production slot manifest,
     /// exports the manifest JSON via the injected diagnostics store and
     /// returns the report. Never reads or writes the saved config.
-    fn start_marker_diagnostic(&mut self, duration_secs: u64) -> Result<LedMarkerReport, String> {
+    fn start_marker_diagnostic(
+        &mut self,
+        duration_secs: u64,
+        mode: MarkerMode,
+    ) -> Result<LedMarkerReport, String> {
         if !(self.rgb_enabled && self.config.rgb.hardware_output) {
             return Err(
                 "Enable RGB with hardware output to run the LED marker diagnostic".to_string(),
@@ -300,10 +332,38 @@ impl Worker {
         }
         let clamped = duration_secs.clamp(5, 300);
         let manifest = self.control_loop.rgb_slot_manifest();
-        let (frames, hubs) = diagnostics::build_marker(&manifest, &self.config);
+        // Validate the walk target before any state change or file write.
+        let walk_target = match &mode {
+            MarkerMode::Walk { device_id, step_ms } => {
+                let led_count = manifest
+                    .iter()
+                    .flat_map(|h| h.slots.iter())
+                    .find(|s| s.device_id == *device_id)
+                    .map(|s| s.led_count)
+                    .ok_or_else(|| format!("Unknown LED slot for walk mode: {device_id}"))?;
+                Some((device_id.clone(), diagnostics::walk_step_ms(*step_ms), led_count))
+            }
+            _ => None,
+        };
+        let (frames, hubs) = diagnostics::build_marker(&manifest, &self.config, &mode);
         if frames.is_empty() {
             return Err("No LED slots found on any hub".to_string());
         }
+        let started = self.env.clock.now();
+        let walk_report = walk_target.as_ref().map(|(device_id, step_ms, led_count)| {
+            diagnostics::WalkReport {
+                device_id: device_id.clone(),
+                started_at: self
+                    .env
+                    .clock
+                    .wall_time()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+                step_ms: *step_ms,
+                led_count: *led_count,
+            }
+        });
         let total_leds: usize = frames.iter().map(|f| f.leds.len()).sum();
         let power_factor = port_power_factor(total_leds.min(u16::MAX as usize) as u16);
         let (compact, iso) = diagnostics::utc_stamps(self.env.clock.wall_time());
@@ -313,7 +373,9 @@ impl Worker {
             duration_secs: clamped,
             total_leds,
             power_factor,
-            legend: diagnostics::legend(),
+            mode: mode.name(),
+            walk: walk_report,
+            legend: diagnostics::legend(&mode),
             hubs,
             file_path: None,
             file_error: None,
@@ -332,11 +394,17 @@ impl Worker {
             Err(e) => report.file_error = Some(e.to_string()),
         }
         self.rgb_identify = None; // marker cancels Identify
-        self.rgb_marker = Some((
-            self.env.clock.now() + Duration::from_secs(clamped),
+        self.rgb_marker = Some(ActiveMarker {
+            deadline: started + Duration::from_secs(clamped),
             frames,
-        ));
+            walk: walk_target.map(|(device_id, step_ms, _)| ActiveWalk {
+                started,
+                step_ms,
+                device_id,
+            }),
+        });
         info!(
+            mode = mode.name(),
             duration_secs = clamped,
             slots = report.hubs.iter().map(|h| h.slots.len()).sum::<usize>(),
             total_leds,
@@ -556,9 +624,10 @@ impl Worker {
                     }
                     HwCommand::RgbMarkerDiagnostic {
                         duration_secs,
+                        mode,
                         reply,
                     } => {
-                        let result = self.start_marker_diagnostic(duration_secs);
+                        let result = self.start_marker_diagnostic(duration_secs, mode);
                         let _ = reply.send(result);
                     }
                     HwCommand::Shutdown => {
@@ -751,13 +820,13 @@ impl Worker {
             if self
                 .rgb_marker
                 .as_ref()
-                .is_some_and(|(deadline, _)| self.env.clock.now() >= *deadline)
+                .is_some_and(|m| self.env.clock.now() >= m.deadline)
             {
                 info!("RGB LED marker diagnostic expired — resuming normal rendering");
                 self.rgb_marker = None;
             }
-            if let Some((_, marker_frames)) = &self.rgb_marker {
-                frames = marker_frames.clone();
+            if let Some(marker) = &self.rgb_marker {
+                frames = marker.frames_at(self.env.clock.now());
             }
 
             // Resolve (hub_serial, channel) via the current registry so the

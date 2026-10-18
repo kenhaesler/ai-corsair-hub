@@ -89,8 +89,11 @@ pub enum HwCommand {
     /// elsewhere, through the production conversion and send path. Requires
     /// RGB enabled with hardware output. Never touches the saved config.
     /// The reply is the slot manifest report (also exported as JSON).
+    /// `mode` selects the pattern (markers, black-background markers, ruler
+    /// or a walking LED on one slot); see `diagnostics::MarkerMode`.
     RgbMarkerDiagnostic {
         duration_secs: u64,
+        mode: crate::diagnostics::MarkerMode,
         reply: tokio::sync::oneshot::Sender<Result<LedMarkerReport, String>>,
     },
     Shutdown,

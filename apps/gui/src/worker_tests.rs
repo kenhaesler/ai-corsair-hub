@@ -909,9 +909,18 @@ fn start_marker(
     h: &mut Harness,
     secs: u64,
 ) -> Result<crate::diagnostics::LedMarkerReport, String> {
+    start_marker_mode(h, secs, crate::diagnostics::MarkerMode::Markers)
+}
+
+fn start_marker_mode(
+    h: &mut Harness,
+    secs: u64,
+    mode: crate::diagnostics::MarkerMode,
+) -> Result<crate::diagnostics::LedMarkerReport, String> {
     h.clock.advance(MS(100));
     h.call(|reply| HwCommand::RgbMarkerDiagnostic {
         duration_secs: secs,
+        mode,
         reply,
     })
     .0
@@ -1145,6 +1154,146 @@ fn marker_manifest_written_through_injected_store() {
     assert!(r2.file_path.is_none());
     assert!(r2.file_error.unwrap().contains("mock diagnostics failure"));
     assert!(h2.worker.rgb_marker.is_some());
+}
+
+fn walk_mode(id: &str, step_ms: Option<u64>) -> crate::diagnostics::MarkerMode {
+    crate::diagnostics::MarkerMode::Walk {
+        device_id: id.to_string(),
+        step_ms,
+    }
+}
+
+/// Last HUB0 frame set: (index of the single white LED in ch1, ch1 LEDs).
+fn walk_state(h: &Harness) -> (usize, Vec<[u8; 3]>) {
+    let calls = h.hub("HUB0").rgb_calls();
+    let ch1 = calls.last().unwrap().iter().find(|(c, _)| *c == 1).unwrap().1.clone();
+    let whites: Vec<usize> = (0..ch1.len()).filter(|&i| ch1[i] == WHITE).collect();
+    assert_eq!(whites.len(), 1, "exactly one white LED");
+    (whites[0], ch1)
+}
+
+/// Walk: the target slot's white LED advances with the fake clock (step 400
+/// ms, started at t = 100 ms), wraps over the slot length, every other slot
+/// stays black but is still emitted, and expiry resumes normal frames.
+#[test]
+fn marker_walk_advances_with_clock_wraps_and_expires() {
+    let mut h = marker_harness(true, true);
+    let report = start_marker_mode(&mut h, 1, walk_mode("H0_Q1", None)).unwrap(); // clamped to 5
+    assert_eq!(report.duration_secs, 5);
+    let (idx, leds) = walk_state(&h);
+    assert_eq!(idx, 0);
+    assert_eq!(leds[33], RED);
+    assert!(leds[1..33].iter().all(|l| *l == [0, 0, 0]));
+    // Non-target slots: full-length black frames, all still emitted.
+    let calls = h.hub("HUB0").rgb_calls().last().unwrap().clone();
+    assert_eq!(
+        calls[1..],
+        [(2u8, vec![[0u8, 0, 0]; 34]), (15u8, vec![[0u8, 0, 0]; 80])]
+    );
+    assert_eq!(
+        h.hub("HUB1").rgb_calls().last().unwrap(),
+        &vec![(1u8, vec![[0u8, 0, 0]; 18])]
+    );
+
+    // t = 1100 ms -> 1000 ms elapsed -> floor(1000/400) = LED 2.
+    h.clock.advance(MS(1100) - h.clock.elapsed());
+    h.steps(1);
+    let (idx, leds) = walk_state(&h);
+    assert_eq!(idx, 2);
+    assert_eq!(leds[33], RED);
+
+    // Just before the deadline (5100 ms): 4999 ms elapsed -> LED 12.
+    h.clock.advance(MS(5099) - h.clock.elapsed());
+    h.steps(1);
+    assert_eq!(walk_state(&h).0, 12);
+    assert!(h.worker.rgb_marker.is_some());
+
+    // Deadline passed: configured colours again.
+    h.steps(1);
+    assert_eq!(
+        h.hub("HUB0").rgb_calls().last().unwrap(),
+        &vec![
+            (1u8, vec![[200u8, 100, 50]; 34]),
+            (2u8, vec![[0u8, 0, 0]; 34]),
+            (15u8, vec![[0u8, 0, 0]; 80]),
+        ]
+    );
+    assert!(h.worker.rgb_marker.is_none());
+    assert_eq!(h.store.attempts(), 0);
+
+    // Wrap: 34 * 400 + 50 ms elapsed -> LED 0 again after one full lap + 0.
+    let mut h = marker_harness(true, true);
+    start_marker_mode(&mut h, 60, walk_mode("H0_Q1", Some(400))).unwrap();
+    h.clock.advance(MS(100 + 35 * 400 + 50) - h.clock.elapsed());
+    h.steps(1);
+    assert_eq!(walk_state(&h).0, 1); // 35 % 34
+}
+
+/// Unknown walk target: Err before any state change, file write or Identify
+/// cancellation.
+#[test]
+fn marker_walk_unknown_device_is_rejected_untouched() {
+    let mut h = marker_harness(true, true);
+    let (rows, _) = h.call(|reply| HwCommand::RgbIdentifyChannels {
+        duration_secs: 60,
+        reply,
+    });
+    assert!(rows.is_ok());
+    let calls_before = h.hub("HUB0").rgb_calls().len();
+
+    // H0_NL exists but has no LEDs (no slot), so it is unknown too.
+    for id in ["NOPE", "H0_NL"] {
+        let err = start_marker_mode(&mut h, 30, walk_mode(id, None)).unwrap_err();
+        assert!(err.contains(id), "{err}");
+    }
+    assert!(h.worker.rgb_marker.is_none());
+    assert!(h.worker.rgb_identify.is_some());
+    assert!(h.diagnostics.files().is_empty());
+    assert!(h.hub("HUB0").rgb_calls().len() >= calls_before);
+}
+
+/// Ruler and black-background markers reach the hardware at slot length;
+/// the report names the mode and (walk only) carries the walk parameters.
+#[test]
+fn marker_modes_ruler_black_and_report_fields() {
+    use crate::diagnostics::MarkerMode;
+    let mut h = marker_harness(true, true);
+    let report = start_marker_mode(&mut h, 30, MarkerMode::Ruler).unwrap();
+    assert_eq!(report.mode, "ruler");
+    assert!(report.walk.is_none());
+    let ch1 = h.hub("HUB0").rgb_calls().last().unwrap()[0].1.clone();
+    assert_eq!(ch1.len(), 34);
+    assert_eq!((ch1[0], ch1[10], ch1[5], ch1[33]), (WHITE, YELLOW, [0, 0, 255], RED));
+    assert_eq!(ch1[1], [0, 0, 0]);
+
+    let report = start_marker_mode(&mut h, 30, MarkerMode::MarkersBlack).unwrap();
+    assert_eq!(report.mode, "markers_black");
+    assert_eq!(report.legend.len(), 3);
+    let ch1 = h.hub("HUB0").rgb_calls().last().unwrap()[0].1.clone();
+    assert_eq!((ch1[0], ch1[1], ch1[2], ch1[33]), (WHITE, GREEN, [0, 0, 0], RED));
+    assert_eq!(
+        h.hub("HUB1").rgb_calls().last().unwrap()[0].1.iter().filter(|l| **l != [0, 0, 0]).count(),
+        3
+    );
+
+    let report = start_marker(&mut h, 30).unwrap();
+    assert_eq!(report.mode, "markers");
+
+    // Walk: report + manifest JSON carry mode and walk parameters.
+    let mut h = marker_harness(true, true);
+    let report = start_marker_mode(&mut h, 30, walk_mode("H0_AD", Some(50))).unwrap();
+    assert_eq!(report.mode, "walk");
+    let w = report.walk.as_ref().unwrap();
+    assert_eq!(w.device_id, "H0_AD");
+    assert_eq!(w.step_ms, 100); // clamped up
+    assert_eq!(w.led_count, 80);
+    assert_eq!(w.started_at, 1_700_000_000_100);
+    let files = h.diagnostics.files();
+    let v: serde_json::Value = serde_json::from_str(&files[0].1).unwrap();
+    assert_eq!(v["mode"], "walk");
+    assert_eq!(v["walk"]["device_id"], "H0_AD");
+    assert_eq!(v["walk"]["led_count"], 80);
+    assert_eq!(v["legend"].as_array().unwrap().len(), 2);
 }
 
 // ---------------------------------------------------------------------------

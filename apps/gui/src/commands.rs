@@ -3,7 +3,7 @@ use tauri::State;
 use corsair_common::config::{AppConfig, FanPresetDef, RgbConfig};
 use corsair_fancontrol::control_loop;
 
-use crate::diagnostics::LedMarkerReport;
+use crate::diagnostics::{LedMarkerReport, MarkerMode};
 use crate::dto::{DeviceTree, ManualDutyResult, SystemSnapshot};
 use crate::state::{AppState, ChannelIdentity, HwCommand};
 
@@ -279,12 +279,14 @@ pub async fn rgb_identify_channels(
 pub async fn rgb_marker_diagnostic(
     state: State<'_, AppState>,
     duration_secs: u64,
+    mode: Option<MarkerMode>,
 ) -> Result<LedMarkerReport, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     state
         .hw_sender
         .send(HwCommand::RgbMarkerDiagnostic {
             duration_secs,
+            mode: mode.unwrap_or_default(),
             reply: tx,
         })
         .map_err(|_| "Hardware thread unavailable".to_string())?;
