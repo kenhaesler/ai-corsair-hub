@@ -5,6 +5,7 @@
     rgbMarkerDiagnostic,
     type ChannelIdentity,
     type LedMarkerReport,
+    type MarkerMode,
   } from '../../lib/api';
   import type { DeviceTree } from '../../lib/types';
   import HubDetail from './HubDetail.svelte';
@@ -48,6 +49,19 @@
   let markerRunning = $state(false);
   let markerDeadline = $state<number | null>(null);
   let markerRemaining = $state(0);
+  // Mode selector. Walk needs a target device and a step time.
+  let markerModeKind = $state<'markers' | 'markers_black' | 'ruler' | 'walk'>('markers');
+  let walkDeviceId = $state('');
+  let walkStepMs = $state(400);
+  let walkLed = $state(0);
+  const walkDevices = $derived(
+    (devices?.hubs ?? []).flatMap((h) =>
+      h.devices.map((d) => ({
+        id: d.device_id,
+        label: `Hub ${shortSerial(h.serial)} Ch ${d.channel} · ${d.device_type}`,
+      })),
+    ),
+  );
   const diagnosticBusy = $derived(identifyRunning || markerRunning);
 
   $effect(() => {
@@ -65,10 +79,34 @@
     return () => clearInterval(handle);
   });
 
+  // Walk mode: current LED is derived client-side from the report timing
+  // (no backend polling), on a faster tick than the countdown.
+  $effect(() => {
+    const walk = markerRunning ? markerReport?.walk : null;
+    if (!walk) return;
+    const tick = () => {
+      walkLed = Math.floor(Math.max(0, Date.now() - walk.started_at) / walk.step_ms) % walk.led_count;
+    };
+    tick();
+    const handle = setInterval(tick, 100);
+    return () => clearInterval(handle);
+  });
+
   async function runMarkers() {
     if (diagnosticBusy) return;
+    let mode: MarkerMode | undefined;
+    if (markerModeKind === 'walk') {
+      if (!walkDeviceId) {
+        error = 'LED markers failed: pick a device for Walk mode';
+        return;
+      }
+      const step = Math.min(2000, Math.max(100, Math.round(Number(walkStepMs)) || 400));
+      mode = { kind: 'walk', device_id: walkDeviceId, step_ms: step };
+    } else if (markerModeKind !== 'markers') {
+      mode = { kind: markerModeKind };
+    }
     try {
-      const report = await rgbMarkerDiagnostic(MARKER_SECS);
+      const report = await rgbMarkerDiagnostic(MARKER_SECS, mode);
       markerReport = report;
       markerRunning = true;
       markerDeadline = Date.now() + report.duration_secs * 1000;
@@ -140,6 +178,31 @@
       <button class="identify-btn" onclick={runIdentify} disabled={diagnosticBusy}>
         {identifyRunning ? `Identifying… ${identifyRemaining}s` : 'Identify Channels'}
       </button>
+      <select bind:value={markerModeKind} disabled={diagnosticBusy} aria-label="LED marker mode">
+        <option value="markers">Markers</option>
+        <option value="markers_black">Markers (black body)</option>
+        <option value="ruler">Ruler</option>
+        <option value="walk">Walk</option>
+      </select>
+      {#if markerModeKind === 'walk'}
+        <select bind:value={walkDeviceId} disabled={diagnosticBusy} aria-label="Walk device">
+          <option value="">Device…</option>
+          {#each walkDevices as d}
+            <option value={d.id}>{d.label}</option>
+          {/each}
+        </select>
+        <input
+          type="number"
+          min="100"
+          max="2000"
+          step="50"
+          bind:value={walkStepMs}
+          disabled={diagnosticBusy}
+          aria-label="Walk step (ms)"
+          title="Step time in ms (100-2000)"
+          style="width: 72px"
+        />
+      {/if}
       <button class="identify-btn" onclick={runMarkers} disabled={diagnosticBusy}>
         {markerRunning ? `LED markers… ${markerRemaining}s` : 'LED markers'}
       </button>
@@ -184,18 +247,24 @@
   {#if markerReport && markerRunning}
     <div class="identify-legend">
       <p class="legend-intro">
-        Every LED slot shows a marker for {markerReport.duration_secs} seconds:
-        {#each markerReport.legend.slice(0, 3) as entry, i}
+        {markerReport.mode === 'walk' ? 'Walk' : 'Every LED slot shows a marker'} for {markerReport.duration_secs} seconds:
+        {#each markerReport.legend as entry, i}
           <span
             class="legend-swatch inline-swatch"
             style="background: rgb({entry.rgb[0]},{entry.rgb[1]},{entry.rgb[2]})"
           ></span>
-          {entry.label} = {entry.meaning}{i < 2 ? ';' : '.'}
+          {entry.label} = {entry.meaning}{i < markerReport.legend.length - 1 ? ';' : '.'}
         {/each}
-        All other LEDs use the device's palette colour. Colours are scaled by port
+        {#if markerReport.mode === 'markers'}
+          All other LEDs use the device's palette colour.
+        {/if}
+        Colours are scaled by port
         power protection (factor {markerReport.power_factor}, {markerReport.total_leds} LEDs
         total), exactly like normal rendering.
       </p>
+      {#if markerReport.walk}
+        <p class="walk-pos">LED {walkLed} / {markerReport.walk.led_count}</p>
+      {/if}
       {#each markerReport.hubs as hub}
         <div class="legend-hub">
           <span class="legend-hub-title">
@@ -416,6 +485,13 @@
   }
   .marker-table .skipped {
     color: var(--text-muted);
+  }
+  .walk-pos {
+    margin: 0 0 12px;
+    font-size: 20px;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    color: var(--text-primary);
   }
   .marker-file {
     margin: 10px 0 0;

@@ -41,6 +41,28 @@ device serials, a config copy and photos).
    - devices listed as "no slot (skipped)" really have no LEDs.
 
    Photograph each hub's devices while the markers are visible.
+
+   **Extra modes** (mode selector next to the button; same 60 s countdown, all
+   restore prior state when done). Use them when the default markers leave a
+   boundary in doubt:
+   - **Markers (black body)**: same white/green/red markers, but every other
+     LED is off, so a stray lit LED beyond a slot end is easy to spot.
+   - **Ruler**: count decade marks along the device. **White** = LED 0,
+     **blue** = every 5th LED, **yellow** = every 10th LED, **red** = last LED
+     of the slot. Counting the marks to the red LED shows where the slot really
+     ends; compare with the LED range in the UI table.
+   - **Walk** (pick a device and a step time, 100-2000 ms, default 400): a
+     single **white** LED steps along the slot and the **red** last LED stays
+     lit. The UI shows "LED i / n" (computed locally, no polling); compare it
+     with the LED you see lit.
+
+   Procedure for hub 22DE channel 15 (80 positions): run **Ruler**; the 8th
+   yellow mark is LED 70 and the red LED must be LED 79, with nothing lit past
+   it and nothing shifted onto the next slot. Then run **Walk** on that device
+   and confirm the stepping LED matches "LED i / n" at the start, middle and
+   end. For one QX fan (34 LEDs): **Ruler** shows yellow at LED 10, 20, 30, blue
+   at 5, 15, 25, and red at LED 33; **Walk** should step round the fan once per
+   34 steps with the red LED fixed at the end.
 4. **Record the baseline.** From the repository root in Windows PowerShell:
    `.\scripts\record-baseline.ps1` (add `-ExePath <exe>` if the executable is
    not auto-detected). It writes `%LOCALAPPDATA%\corsair-hub\baselines\<timestamp>\`
