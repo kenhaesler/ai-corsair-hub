@@ -118,6 +118,31 @@ impl LinkDeviceType {
         }
     }
 
+    /// Inverse of `from_byte`. `None` for `LsStrip` (no known wire byte).
+    pub fn to_byte(&self) -> Option<u8> {
+        Some(match self {
+            Self::QxFan => 0x01,
+            Self::LxFan => 0x02,
+            Self::RxMaxRgbFan => 0x03,
+            Self::RxMaxFan => 0x04,
+            Self::LinkAdapter => 0x05,
+            Self::LiquidCooler => 0x07,
+            Self::WaterBlock => 0x09,
+            Self::GpuBlock => 0x0A,
+            Self::Psu => 0x0B,
+            Self::PumpXd5 => 0x0C,
+            Self::Xg7Block => 0x0D,
+            Self::RxRgbFan => 0x0F,
+            Self::VrmCooler => 0x10,
+            Self::TitanCooler => 0x11,
+            Self::RxFan => 0x13,
+            Self::PumpXd6 => 0x19,
+            Self::CommanderDuo => 0x1B,
+            Self::LsStrip => return None,
+            Self::Unknown(b) => *b,
+        })
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Self::QxFan => "QX Fan",
@@ -188,12 +213,139 @@ impl LinkDeviceType {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LinkDevice {
     pub channel: u8,
     pub device_type: LinkDeviceType,
+    /// Raw model byte from the enumeration entry (diagnostics only).
     pub model: u8,
     pub device_id: String,
+}
+
+impl LinkDevice {
+    /// Raw type byte from the enumeration entry, for diagnostics. Exact for
+    /// every type `from_byte` can produce; `None` for `LsStrip`, which has no
+    /// known wire byte and is never produced by the parser.
+    pub fn raw_type_byte(&self) -> Option<u8> {
+        self.device_type.to_byte()
+    }
+}
+
+/// Result of comparing two sub-device enumerations, keyed by `device_id`.
+/// All lists are sorted by `device_id` for deterministic output.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubdeviceDiff {
+    pub added: Vec<LinkDevice>,
+    pub removed: Vec<LinkDevice>,
+    pub moved: Vec<SubdeviceMove>,
+    pub retyped: Vec<SubdeviceRetype>,
+    /// Entries that cannot be keyed reliably; never guessed at (fix plan G02).
+    pub anomalies: Vec<SubdeviceAnomaly>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubdeviceMove {
+    pub device_id: String,
+    pub from_channel: u8,
+    pub to_channel: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubdeviceRetype {
+    pub device_id: String,
+    pub from: LinkDeviceType,
+    pub to: LinkDeviceType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffSide {
+    Old,
+    New,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnomalyKind {
+    EmptyDeviceId,
+    DuplicateDeviceId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubdeviceAnomaly {
+    pub side: DiffSide,
+    pub kind: AnomalyKind,
+    pub channel: u8,
+    pub device_id: String,
+}
+
+/// Split one side into keyable devices (unique, non-empty id) and anomalies.
+fn partition_subdevices<'a>(
+    side: DiffSide,
+    devs: &'a [LinkDevice],
+    anomalies: &mut Vec<SubdeviceAnomaly>,
+) -> std::collections::BTreeMap<&'a str, &'a LinkDevice> {
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for d in devs {
+        *counts.entry(d.device_id.as_str()).or_insert(0) += 1;
+    }
+    let mut keyed = std::collections::BTreeMap::new();
+    for d in devs {
+        let kind = if d.device_id.is_empty() {
+            Some(AnomalyKind::EmptyDeviceId)
+        } else if counts[d.device_id.as_str()] > 1 {
+            Some(AnomalyKind::DuplicateDeviceId)
+        } else {
+            None
+        };
+        match kind {
+            Some(kind) => anomalies.push(SubdeviceAnomaly {
+                side,
+                kind,
+                channel: d.channel,
+                device_id: d.device_id.clone(),
+            }),
+            None => {
+                keyed.insert(d.device_id.as_str(), d);
+            }
+        }
+    }
+    keyed
+}
+
+/// Diff two sub-device enumerations by `device_id`, ignoring order.
+/// Entries with an empty or duplicated `device_id` are excluded from the
+/// added/removed/moved/retyped lists and reported in `anomalies` instead.
+pub fn diff_subdevices(old: &[LinkDevice], new: &[LinkDevice]) -> SubdeviceDiff {
+    let mut diff = SubdeviceDiff::default();
+    let old_map = partition_subdevices(DiffSide::Old, old, &mut diff.anomalies);
+    let new_map = partition_subdevices(DiffSide::New, new, &mut diff.anomalies);
+
+    for (id, o) in &old_map {
+        match new_map.get(id) {
+            None => diff.removed.push((*o).clone()),
+            Some(n) => {
+                if o.channel != n.channel {
+                    diff.moved.push(SubdeviceMove {
+                        device_id: id.to_string(),
+                        from_channel: o.channel,
+                        to_channel: n.channel,
+                    });
+                }
+                if o.device_type != n.device_type {
+                    diff.retyped.push(SubdeviceRetype {
+                        device_id: id.to_string(),
+                        from: o.device_type.clone(),
+                        to: n.device_type.clone(),
+                    });
+                }
+            }
+        }
+    }
+    for (id, n) in &new_map {
+        if !old_map.contains_key(id) {
+            diff.added.push((*n).clone());
+        }
+    }
+    diff
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -608,40 +760,22 @@ impl IcueLinkHub {
             return Ok(std::collections::HashMap::new());
         }
 
-        let channel_count = resp[6] as usize;
-        let mut counts = std::collections::HashMap::new();
-
-        // Sanity check: no hub has more than ~20 physical channels
-        if channel_count > 20 {
+        let counts = parse_led_counts(&resp);
+        if resp[6] as usize > MAX_LED_TABLE_CHANNELS {
             warn!(
                 serial = self.serial.as_ref(),
-                channel_count,
+                channel_count = resp[6],
                 "0x1d channel count unreasonable — falling back to device type defaults"
             );
-            return Ok(counts);
         }
 
-        // Per-channel data starts at byte 8, each channel is 2 bytes:
-        // [device_type_code, led_count]
-        for ch in 1..=channel_count {
-            let idx = 6 + ch * 2; // index of device_type byte for this channel
-            if idx + 1 >= resp.len() {
-                break;
-            }
-            let dev_type = resp[idx];
-            let led_count = resp[idx + 1] as u16;
-            // Sanity: max 255 LEDs per channel (single-byte encoding limit).
-            // LINK Adapters with multiple strips can report 80+ LEDs.
-            if led_count > 0 && led_count <= 255 {
-                debug!(
-                    serial = self.serial.as_ref(),
-                    channel = ch,
-                    dev_type = format!("0x{:02X}", dev_type),
-                    led_count,
-                    "  LED table entry"
-                );
-                counts.insert(ch as u8, led_count);
-            }
+        for (ch, led_count) in sorted_counts(&counts) {
+            debug!(
+                serial = self.serial.as_ref(),
+                channel = ch,
+                led_count,
+                "  LED table entry"
+            );
         }
 
         info!(
@@ -853,6 +987,46 @@ fn parse_firmware_version(resp: &[u8]) -> Result<FirmwareVersion> {
         minor: resp[5],
         patch: u16::from_le_bytes([resp[6], resp[7]]),
     })
+}
+
+/// Largest channel count accepted from the 0x1d LED table. iCUE's hub manifest
+/// allows 12 sub-devices per side x 2 ports (docs/research/icue-device-detection/
+/// C-lifecycle-link.md 2.3/3); anything larger is treated as garbage.
+const MAX_LED_TABLE_CHANNELS: usize = 24;
+
+/// Parse the 0x1d LED-count table (status already checked, `resp.len() >= 8`).
+/// Layout: byte 6 = channel count, then per channel `[device_type_code, led_count]`
+/// starting at byte 8. An over-cap channel count or short buffer yields no/partial
+/// entries (caller falls back to device-type defaults).
+fn parse_led_counts(resp: &[u8]) -> std::collections::HashMap<u8, u16> {
+    let mut counts = std::collections::HashMap::new();
+    let Some(&raw_count) = resp.get(6) else {
+        return counts;
+    };
+    let channel_count = raw_count as usize;
+    if channel_count > MAX_LED_TABLE_CHANNELS {
+        return counts;
+    }
+
+    for ch in 1..=channel_count {
+        let idx = 6 + ch * 2; // index of device_type byte for this channel
+        if idx + 1 >= resp.len() {
+            break;
+        }
+        // Max 255 LEDs per channel (single-byte encoding limit).
+        // LINK Adapters with multiple strips can report 80+ LEDs.
+        let led_count = resp[idx + 1] as u16;
+        if led_count > 0 {
+            counts.insert(ch as u8, led_count);
+        }
+    }
+    counts
+}
+
+fn sorted_counts(counts: &std::collections::HashMap<u8, u16>) -> Vec<(u8, u16)> {
+    let mut v: Vec<_> = counts.iter().map(|(&c, &n)| (c, n)).collect();
+    v.sort_unstable();
+    v
 }
 
 fn parse_device_entries(resp: &[u8]) -> Result<Vec<LinkDevice>> {
@@ -1708,13 +1882,173 @@ mod tests {
 
     #[test]
     fn golden_read_led_counts_absurd_channel_count_is_empty() {
-        let table = led_table_resp(21, &[(15, 0x05, 80)]);
+        let table = led_table_resp(25, &[(15, 0x05, 80)]);
         let (hub, _s) = scripted_hub(vec![
             Reply::Resp(ok_resp()),
             Reply::Resp(table),
             Reply::Resp(ok_resp()),
         ]);
         assert!(hub.read_led_counts().unwrap().is_empty());
+    }
+
+    /// Verbatim copy of the pre-T4 table interpretation (cap 20), as an oracle.
+    fn legacy_parse_led_counts(resp: &[u8]) -> std::collections::HashMap<u8, u16> {
+        let mut counts = std::collections::HashMap::new();
+        let channel_count = resp[6] as usize;
+        if channel_count > 20 {
+            return counts;
+        }
+        for ch in 1..=channel_count {
+            let idx = 6 + ch * 2;
+            if idx + 1 >= resp.len() {
+                break;
+            }
+            let led_count = resp[idx + 1] as u16;
+            if led_count > 0 && led_count <= 255 {
+                counts.insert(ch as u8, led_count);
+            }
+        }
+        counts
+    }
+
+    #[test]
+    fn parse_led_counts_matches_legacy_for_up_to_20_channels() {
+        let fixtures = [
+            led_table_resp(15, &[(1, 0x01, 0), (2, 0x01, 0), (15, 0x05, 80)]),
+            led_table_resp(15, &[(1, 0x01, 30), (15, 0x05, 80)]),
+            led_table_resp(15, &[(1, 0x01, 0), (15, 0x05, 0)]),
+            led_table_resp(20, &(1..=20).map(|c| (c, 0x01, 34)).collect::<Vec<_>>()),
+            led_table_resp(0, &[]),
+            led_table_resp(20, &[(20, 0x05, 255)]),
+            // Truncated buffer: both must stop at the same entry.
+            led_table_resp(20, &(1..=20).map(|c| (c, 0x01, 34)).collect::<Vec<_>>())[..30].to_vec(),
+        ];
+        for f in &fixtures {
+            assert_eq!(parse_led_counts(f), legacy_parse_led_counts(f));
+        }
+    }
+
+    #[test]
+    fn parse_led_counts_accepts_21_to_24_channels() {
+        for n in 21..=24usize {
+            let table = led_table_resp(n, &[(n, 0x01, 34)]);
+            let counts = parse_led_counts(&table);
+            assert_eq!(counts.get(&(n as u8)), Some(&34), "n={n}");
+        }
+    }
+
+    #[test]
+    fn parse_led_counts_rejects_25_channels() {
+        let table = led_table_resp(25, &[(1, 0x01, 34), (15, 0x05, 80)]);
+        assert!(parse_led_counts(&table).is_empty());
+    }
+
+    #[test]
+    fn parse_led_counts_short_buffer_does_not_panic() {
+        assert!(parse_led_counts(&[]).is_empty());
+        let mut short = led_table_resp(24, &[(24, 0x01, 34)]);
+        short.truncate(20);
+        let counts = parse_led_counts(&short);
+        assert!(!counts.contains_key(&24));
+    }
+
+    #[test]
+    fn golden_read_led_counts_24_channels_accepted() {
+        let table = led_table_resp(24, &[(24, 0x01, 34)]);
+        let (hub, _s) = scripted_hub(vec![
+            Reply::Resp(ok_resp()),
+            Reply::Resp(table),
+            Reply::Resp(ok_resp()),
+        ]);
+        assert_eq!(hub.read_led_counts().unwrap().get(&24), Some(&34));
+    }
+
+    #[test]
+    fn golden_read_led_counts_21_channels_now_accepted() {
+        let table = led_table_resp(21, &[(15, 0x05, 80)]);
+        let (hub, _s) = scripted_hub(vec![
+            Reply::Resp(ok_resp()),
+            Reply::Resp(table),
+            Reply::Resp(ok_resp()),
+        ]);
+        assert_eq!(hub.read_led_counts().unwrap().get(&15), Some(&80));
+    }
+
+    #[test]
+    fn raw_type_byte_round_trips_from_byte() {
+        for b in 0u8..=255 {
+            let dev = LinkDevice {
+                channel: 1,
+                device_type: LinkDeviceType::from_byte(b),
+                model: 0,
+                device_id: "X".into(),
+            };
+            assert_eq!(dev.raw_type_byte(), Some(b));
+        }
+        assert_eq!(LinkDeviceType::LsStrip.to_byte(), None);
+    }
+
+    fn dev(channel: u8, ty: LinkDeviceType, id: &str) -> LinkDevice {
+        LinkDevice { channel, device_type: ty, model: 0, device_id: id.into() }
+    }
+
+    #[test]
+    fn diff_subdevices_identical_ignoring_order_is_empty() {
+        let a = vec![dev(1, LinkDeviceType::QxFan, "A"), dev(2, LinkDeviceType::QxFan, "B")];
+        let b = vec![dev(2, LinkDeviceType::QxFan, "B"), dev(1, LinkDeviceType::QxFan, "A")];
+        assert_eq!(diff_subdevices(&a, &b), SubdeviceDiff::default());
+    }
+
+    #[test]
+    fn diff_subdevices_added_removed_moved_retyped() {
+        let old = vec![
+            dev(1, LinkDeviceType::QxFan, "GONE"),
+            dev(2, LinkDeviceType::QxFan, "MOVE"),
+            dev(3, LinkDeviceType::QxFan, "RETYPE"),
+            dev(4, LinkDeviceType::QxFan, "BOTH"),
+        ];
+        let new = vec![
+            dev(5, LinkDeviceType::QxFan, "MOVE"),
+            dev(3, LinkDeviceType::LsStrip, "RETYPE"),
+            dev(6, LinkDeviceType::LxFan, "BOTH"),
+            dev(7, LinkDeviceType::QxFan, "NEW"),
+        ];
+        let d = diff_subdevices(&old, &new);
+        assert_eq!(d.removed.len(), 1);
+        assert_eq!(d.removed[0].device_id, "GONE");
+        assert_eq!(d.added.len(), 1);
+        assert_eq!(d.added[0].device_id, "NEW");
+        let moved: Vec<_> = d.moved.iter().map(|m| (m.device_id.as_str(), m.from_channel, m.to_channel)).collect();
+        assert_eq!(moved, vec![("BOTH", 4, 6), ("MOVE", 2, 5)]);
+        let retyped: Vec<_> = d.retyped.iter().map(|r| r.device_id.as_str()).collect();
+        assert_eq!(retyped, vec!["BOTH", "RETYPE"]);
+        assert!(d.anomalies.is_empty());
+    }
+
+    #[test]
+    fn diff_subdevices_reports_empty_and_duplicate_ids_as_anomalies() {
+        let old = vec![
+            dev(1, LinkDeviceType::QxFan, ""),
+            dev(2, LinkDeviceType::QxFan, "DUP"),
+            dev(3, LinkDeviceType::QxFan, "DUP"),
+            dev(4, LinkDeviceType::QxFan, "OK"),
+        ];
+        let new = vec![dev(4, LinkDeviceType::QxFan, "OK"), dev(9, LinkDeviceType::QxFan, "DUP")];
+        let d = diff_subdevices(&old, &new);
+        // Old-side unkeyable entries are never guessed into removed/moved; the
+        // unique new-side "DUP" has no keyed old match so it is reported as added.
+        assert_eq!(d.added.len(), 1);
+        assert_eq!(d.added[0].device_id, "DUP");
+        assert!(d.removed.is_empty() && d.moved.is_empty() && d.retyped.is_empty());
+        let kinds: Vec<_> = d.anomalies.iter().map(|a| (a.side, a.kind, a.channel)).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (DiffSide::Old, AnomalyKind::EmptyDeviceId, 1),
+                (DiffSide::Old, AnomalyKind::DuplicateDeviceId, 2),
+                (DiffSide::Old, AnomalyKind::DuplicateDeviceId, 3),
+            ]
+        );
     }
 
     /// Device-enumeration response with `channels` entries; `devs` = (channel, type byte, id).
