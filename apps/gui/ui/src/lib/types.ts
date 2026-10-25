@@ -87,6 +87,46 @@ export interface RailSnapshot {
 export interface DeviceTree {
   hubs: HubSnapshot[];
   psu: PsuDeviceInfo | null;
+  /** Every Corsair USB device. Absent on older backends. */
+  detected?: DetectedDevice[];
+  /** Bluetooth / problem devnodes filtered out. Absent on older backends. */
+  excluded_count?: number;
+}
+
+/** Mirrors Rust `DetectedDeviceDto`. */
+export interface DetectedDevice {
+  key: string;
+  vid: number;
+  pid: number;
+  name: string;
+  family: string;
+  support: 'supported' | 'detect_only' | 'unknown';
+  serial: string | null;
+  interface_count: number;
+  bootloader: boolean;
+  status: 'ok' | 'not_ready' | 'quarantined' | 'backoff';
+}
+
+/** Mirrors Rust `TopologyEventDto` (`device-topology` event). */
+export interface TopologyEvent {
+  kind: 'added' | 'removed' | 'changed' | 'suspending' | 'resumed';
+  device: DetectedDevice | null;
+  timestamp_ms: number;
+}
+
+export interface SubdeviceMove {
+  device_id: string;
+  from_channel: number;
+  to_channel: number;
+}
+
+/** Mirrors Rust `LinkSubdevicesChangedDto` (`link-subdevices-changed` event). */
+export interface LinkSubdevicesChanged {
+  hub_serial: string;
+  added: string[];
+  removed: string[];
+  moved: SubdeviceMove[];
+  timestamp_ms: number;
 }
 
 export interface HubSnapshot {

@@ -1,5 +1,15 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AppConfig, DeviceTree, FanPresetDef, RgbConfig, StartupConfigIssue, SystemSnapshot } from './types';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import type {
+  AppConfig,
+  DeviceTree,
+  FanPresetDef,
+  LinkSubdevicesChanged,
+  RgbConfig,
+  StartupConfigIssue,
+  SystemSnapshot,
+  TopologyEvent,
+} from './types';
 
 /**
  * Result of `set_manual_duty_by_device_id` — mirrors the Rust
@@ -13,6 +23,13 @@ export interface ManualDutyResult {
 
 export const getSnapshot = () => invoke<SystemSnapshot>('get_snapshot');
 export const getDevices = () => invoke<DeviceTree>('get_devices');
+/** Diagnostic events only: they must never drive fan/RGB addressing. */
+export const onDeviceTopology = (cb: (e: TopologyEvent) => void): Promise<UnlistenFn> =>
+  listen<TopologyEvent>('device-topology', (event) => cb(event.payload));
+export const onLinkSubdevicesChanged = (
+  cb: (e: LinkSubdevicesChanged) => void,
+): Promise<UnlistenFn> =>
+  listen<LinkSubdevicesChanged>('link-subdevices-changed', (event) => cb(event.payload));
 export const getConfig = () => invoke<AppConfig>('get_config');
 /** Non-null when config.toml failed to load at startup (file was preserved). */
 export const getStartupConfigIssue = () =>
