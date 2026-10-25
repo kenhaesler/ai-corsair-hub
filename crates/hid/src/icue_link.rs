@@ -388,6 +388,12 @@ pub trait IcueLinkTransport: Send + Sync + 'static {
     fn get_speeds(&self) -> Result<Vec<FanSpeed>>;
     fn set_rgb(&self, channel_leds: &[(u8, &[[u8; 3]])]) -> Result<()>;
     fn enter_hardware_mode(&self) -> Result<()>;
+    /// Read the hub's sub-device list (read-only: the same close/open/read/close
+    /// transaction as `get_speeds`). Diagnostic use only; transports that cannot
+    /// enumerate keep this default.
+    fn enumerate_devices(&self) -> Result<Vec<LinkDevice>> {
+        bail!("sub-device enumeration not supported by this transport")
+    }
 }
 
 impl IcueLinkTransport for IcueLinkHub {
@@ -402,6 +408,9 @@ impl IcueLinkTransport for IcueLinkHub {
     }
     fn enter_hardware_mode(&self) -> Result<()> {
         IcueLinkHub::enter_hardware_mode(self)
+    }
+    fn enumerate_devices(&self) -> Result<Vec<LinkDevice>> {
+        IcueLinkHub::enumerate_devices(self)
     }
 }
 

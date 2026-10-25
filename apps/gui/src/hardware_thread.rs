@@ -1,9 +1,11 @@
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tauri::Emitter;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use corsair_common::config::AppConfig;
 use corsair_common::config_migration::{
@@ -12,14 +14,23 @@ use corsair_common::config_migration::{
 use corsair_common::identity::DeviceRegistry;
 use corsair_common::CorsairDevice;
 use corsair_fancontrol::control_loop::{self, ControlLoop};
-use corsair_hid::{port_power_factor, CorsairPsu, DeviceScanner, IcueLinkHub, LinkDeviceType};
+use corsair_hid::icue_link::diff_subdevices;
+use corsair_hid::monitor::{DeviceMonitor, MonitorSignal, RescanReason};
+use corsair_hid::topology::{self, DetectedDevice, DeviceKey, FloodGuard, Snapshot};
+use corsair_hid::{
+    port_power_factor, CorsairPsu, DeviceScanner, IcueLinkHub, LinkDevice, LinkDeviceType,
+};
 use corsair_rgb::effect::EffectContext;
 use corsair_rgb::layout::LedLayout;
 use corsair_rgb::frame::RgbFrame;
 use corsair_rgb::renderer::{DeviceConfig, RgbRenderer, ZoneConfig};
 
 use crate::diagnostics::{self, LedMarkerReport};
-use crate::dto::{CpuMetricsDto, DeviceTree, GpuMetricsDto, RgbFrameDto, SystemSnapshot};
+use crate::dto::{
+    detected_devices, devices_not_ready, topology_events, CpuMetricsDto, DetectedDeviceDto,
+    DetectionOutput, DeviceStatus, DeviceTree, GpuMetricsDto, LinkSubdevicesChangedDto,
+    RgbFrameDto, SystemSnapshot, TopologyEventDto,
+};
 use crate::state::{ChannelIdentity, HwCommand};
 use crate::worker_env::{
     emit, Clock, ConfigStore, DiskConfigStore, DiskDiagnosticsStore, HubBackend, SystemClock,
@@ -99,7 +110,7 @@ fn run_loop(
     }
 
     // Initialize device scanner (stays alive for device queries and recovery)
-    let scanner = match DeviceScanner::new() {
+    let mut scanner = match DeviceScanner::new() {
         Ok(s) => s,
         Err(e) => {
             let msg = format!("Failed to initialize HID API: {}", e);
@@ -111,6 +122,10 @@ fn run_loop(
         }
     };
 
+    // Topology diagnostics monitor (hotplug + settle). Created once; shares the scanner
+    // above, so there is a single HID API context for enumeration.
+    let mut detection = DetectionState::new(&scanner, Instant::now());
+
     // Build control loop
     let mut control_loop = match ControlLoop::build(config.clone(), Default::default(), &scanner) {
         Ok(cl) => cl,
@@ -119,7 +134,7 @@ fn run_loop(
             warn!("{}", msg);
             let _ = app.emit("hw-error", &msg);
             // Run in discovery-only mode
-            run_discovery_only(rx, &scanner, &app);
+            run_discovery_only(rx, &mut scanner, &mut detection, &app);
             return Ok(());
         }
     };
@@ -242,7 +257,7 @@ fn run_loop(
                 psu_handle,
                 gpu_metrics_sensor,
             }),
-            hubs: Box::new(RealHubBackend { scanner }),
+            hubs: Box::new(RealHubBackend { scanner, detection }),
         },
     };
 
@@ -778,6 +793,15 @@ impl Worker {
             self.last_rgb_tick = self.env.clock.now();
         }
 
+        // Topology diagnostics: logged and published only, never fed back into
+        // recovery or addressing. Runs between ticks on this thread.
+        let detection = self.env.hubs.poll_detection(
+            self.env.clock.now(),
+            wall_ms(self.env.clock.wall_time()),
+            &self.control_loop,
+        );
+        emit_detection(&*self.env.events, &detection);
+
         // Sleep for remaining poll interval (account for RGB timing)
         let elapsed = self.env.clock.now().saturating_duration_since(cycle_start);
         let sleep_target = if self.rgb_enabled {
@@ -890,6 +914,7 @@ impl Telemetry for RealTelemetry {
 /// Production hub backend: the scanner kept alive from startup.
 struct RealHubBackend {
     scanner: DeviceScanner,
+    detection: DetectionState,
 }
 
 impl HubBackend for RealHubBackend {
@@ -916,7 +941,256 @@ impl HubBackend for RealHubBackend {
     }
 
     fn device_tree(&self, control_loop: &ControlLoop) -> DeviceTree {
-        build_device_tree_from_loop(control_loop, &self.scanner)
+        let (detected, excluded) = self.detection.tree_fields();
+        build_device_tree_from_loop(control_loop, &self.scanner).with_detection(detected, excluded)
+    }
+
+    fn poll_detection(
+        &mut self,
+        now: Instant,
+        wall_ms: u64,
+        control_loop: &ControlLoop,
+    ) -> DetectionOutput {
+        self.detection
+            .poll(&mut self.scanner, now, wall_ms, Some(control_loop))
+    }
+}
+
+/// How often the periodic LINK sub-device check starts a round.
+const LINK_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+/// A single sub-device read slower than this is logged at warn.
+const LINK_CHECK_SLOW: Duration = Duration::from_millis(100);
+/// Arrivals of one device within `FLOOD_WINDOW` beyond `FLOOD_MAX` quarantine it.
+const FLOOD_MAX: usize = 5;
+const FLOOD_WINDOW: Duration = Duration::from_secs(60);
+
+#[cfg(windows)]
+fn interface_ready(path: &str) -> bool {
+    corsair_hid::devnode::readiness(path).is_ready()
+}
+
+#[cfg(not(windows))]
+fn interface_ready(_path: &str) -> bool {
+    true
+}
+
+/// Milliseconds since the Unix epoch, for event timestamps.
+fn wall_ms(t: std::time::SystemTime) -> u64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Publish a detection poll's results as Tauri events.
+fn emit_detection(sink: &dyn crate::worker_env::EventSink, out: &DetectionOutput) {
+    for ev in &out.topology {
+        emit(sink, "device-topology", ev);
+    }
+    for ev in &out.link {
+        emit(sink, "link-subdevices-changed", ev);
+    }
+}
+
+/// Topology diagnostics owned by the hardware thread: the hotplug monitor, the latest
+/// enumeration snapshot, flood guard and the periodic LINK sub-device check.
+///
+/// Diagnostics only. Nothing here writes to a device, touches hub health or recovery
+/// scheduling, or changes the registry; the existing recovery paths stay authoritative.
+struct DetectionState {
+    monitor: DeviceMonitor,
+    snapshot: Snapshot,
+    /// `RefCell` because `HubBackend::device_tree` takes `&self` and the guard prunes on query.
+    flood: RefCell<FloodGuard>,
+    not_ready: HashSet<DeviceKey>,
+    next_link_round: Instant,
+    /// Hubs still to be checked in the current round; one is taken per poll.
+    link_pending: VecDeque<String>,
+    /// Per hub: (registry enumeration at report time, last reported enumeration). Used as the
+    /// diff baseline so an unchanged difference is reported once, not every round.
+    link_seen: HashMap<String, (Vec<LinkDevice>, Vec<LinkDevice>)>,
+}
+
+impl DetectionState {
+    /// Take the initial snapshot (no events) and start the monitor.
+    fn new(scanner: &DeviceScanner, now: Instant) -> Self {
+        let snapshot = scanner.snapshot();
+        let not_ready = devices_not_ready(&snapshot, interface_ready);
+        info!(
+            devices = snapshot.devices.len(),
+            excluded = snapshot.excluded.len(),
+            "Initial Corsair device snapshot"
+        );
+        Self {
+            monitor: DeviceMonitor::new(now),
+            snapshot,
+            flood: RefCell::new(FloodGuard::new(FLOOD_MAX, FLOOD_WINDOW)),
+            not_ready,
+            next_link_round: now + LINK_CHECK_INTERVAL,
+            link_pending: VecDeque::new(),
+            link_seen: HashMap::new(),
+        }
+    }
+
+    fn status_of(&self, dev: &DetectedDevice, now: Instant) -> DeviceStatus {
+        let quarantined = self.flood.borrow_mut().is_quarantined(&dev.key, now);
+        DeviceStatus::resolve(quarantined, false, !self.not_ready.contains(&dev.key))
+    }
+
+    /// `(detected, excluded_count)` for the `DeviceTree`.
+    fn tree_fields(&self) -> (Vec<DetectedDeviceDto>, u32) {
+        let now = Instant::now();
+        (
+            detected_devices(&self.snapshot, |d| self.status_of(d, now)),
+            self.snapshot.excluded.len() as u32,
+        )
+    }
+
+    /// Non-blocking: drain the monitor, rescan if it says so, and advance the LINK check.
+    fn poll(
+        &mut self,
+        scanner: &mut DeviceScanner,
+        now: Instant,
+        wall_ms: u64,
+        control_loop: Option<&ControlLoop>,
+    ) -> DetectionOutput {
+        let mut out = DetectionOutput::default();
+        for signal in self.monitor.poll(now) {
+            match signal {
+                MonitorSignal::Suspending => {
+                    info!("System suspending");
+                    out.topology.push(TopologyEventDto::power("suspending", wall_ms));
+                }
+                MonitorSignal::Resumed => {
+                    info!("System resumed");
+                    out.topology.push(TopologyEventDto::power("resumed", wall_ms));
+                }
+                MonitorSignal::RescanNow { reason } => {
+                    self.rescan(scanner, reason, now, wall_ms, &mut out);
+                }
+            }
+        }
+        if let Some(control_loop) = control_loop {
+            self.check_link_subdevices(control_loop, now, wall_ms, &mut out);
+        }
+        out
+    }
+
+    fn rescan(
+        &mut self,
+        scanner: &mut DeviceScanner,
+        reason: RescanReason,
+        now: Instant,
+        wall_ms: u64,
+        out: &mut DetectionOutput,
+    ) {
+        if let Err(e) = scanner.refresh() {
+            warn!(error = %e, ?reason, "Topology rescan: HID refresh failed");
+            return;
+        }
+        let new = scanner.snapshot();
+        let d = topology::diff(&self.snapshot, &new);
+        {
+            let mut flood = self.flood.borrow_mut();
+            for dev in &d.added {
+                if !flood.record_arrival(&dev.key, now) {
+                    warn!(pid = dev.key.pid, "Device re-arriving too often; marked quarantined");
+                }
+            }
+        }
+        self.not_ready = devices_not_ready(&new, interface_ready);
+        if d.is_empty() {
+            debug!(?reason, "Topology rescan: no change");
+        } else {
+            info!(
+                ?reason,
+                added = d.added.len(),
+                removed = d.removed.len(),
+                changed = d.changed.len(),
+                "Corsair device topology changed"
+            );
+        }
+        out.topology
+            .extend(topology_events(&d, |dev| self.status_of(dev, now), wall_ms));
+        self.snapshot = new;
+    }
+
+    /// Every [`LINK_CHECK_INTERVAL`] a round begins over the hubs that are healthy and not in
+    /// recovery; one hub is read per poll. The read is the hub's existing enumeration
+    /// transaction (same as the speed read). A failure only logs: it never reaches hub
+    /// health, recovery scheduling or the registry.
+    fn check_link_subdevices(
+        &mut self,
+        control_loop: &ControlLoop,
+        now: Instant,
+        wall_ms: u64,
+        out: &mut DetectionOutput,
+    ) {
+        if self.link_pending.is_empty() {
+            if now < self.next_link_round {
+                return;
+            }
+            self.next_link_round = now + LINK_CHECK_INTERVAL;
+            self.link_pending = control_loop
+                .subdevice_check_targets()
+                .into_iter()
+                .map(|(serial, ..)| serial)
+                .collect();
+        }
+        let Some(serial) = self.link_pending.pop_front() else {
+            return;
+        };
+        // Re-resolve: the hub may have become unhealthy or entered recovery since the round began.
+        let Some((_, transport, registry_devices)) = control_loop
+            .subdevice_check_targets()
+            .into_iter()
+            .find(|(s, ..)| *s == serial)
+        else {
+            debug!(serial = serial.as_str(), "LINK sub-device check skipped: hub not idle");
+            return;
+        };
+
+        let started = Instant::now();
+        let result = transport.enumerate_devices();
+        let took = started.elapsed();
+        if took > LINK_CHECK_SLOW {
+            warn!(serial = serial.as_str(), ms = took.as_millis() as u64, "LINK sub-device check was slow");
+        } else {
+            debug!(serial = serial.as_str(), ms = took.as_millis() as u64, "LINK sub-device check");
+        }
+
+        let new = match result {
+            Ok(devices) => devices,
+            Err(e) => {
+                debug!(serial = serial.as_str(), error = %e, "LINK sub-device check failed; retrying next round");
+                return;
+            }
+        };
+
+        let baseline = match self.link_seen.get(&serial) {
+            Some((registry_at_report, reported)) if *registry_at_report == registry_devices => {
+                reported.clone()
+            }
+            _ => registry_devices.clone(),
+        };
+        let diff = diff_subdevices(&baseline, &new);
+        if let Some(dto) = LinkSubdevicesChangedDto::from_diff(&serial, &diff, wall_ms) {
+            info!(
+                serial = serial.as_str(),
+                added = dto.added.len(),
+                removed = dto.removed.len(),
+                moved = dto.moved.len(),
+                "iCUE LINK sub-devices changed"
+            );
+            out.link.push(dto);
+        } else if !diff.retyped.is_empty() || !diff.anomalies.is_empty() {
+            info!(
+                serial = serial.as_str(),
+                retyped = diff.retyped.len(),
+                anomalies = diff.anomalies.len(),
+                "iCUE LINK sub-device enumeration differs (retyped or unkeyable entries)"
+            );
+        }
+        self.link_seen.insert(serial, (registry_devices, new));
     }
 }
 
@@ -971,14 +1245,18 @@ fn run_degraded(rx: mpsc::Receiver<HwCommand>) {
 /// Discovery-only mode: can enumerate devices but no control loop.
 fn run_discovery_only(
     rx: mpsc::Receiver<HwCommand>,
-    scanner: &DeviceScanner,
-    _app: &tauri::AppHandle,
+    scanner: &mut DeviceScanner,
+    detection: &mut DetectionState,
+    app: &tauri::AppHandle,
 ) {
+    let sink = TauriEventSink::new(app.clone());
     loop {
-        match rx.recv() {
+        match rx.recv_timeout(DISCOVERY_POLL) {
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
             Ok(HwCommand::Shutdown) | Err(_) => return,
             Ok(HwCommand::GetDevices { reply }) => {
-                let tree = build_device_tree(scanner);
+                let (detected, excluded) = detection.tree_fields();
+                let tree = build_device_tree(scanner).with_detection(detected, excluded);
                 let _ = reply.send(Ok(tree));
             }
             Ok(HwCommand::GetSnapshot { reply }) => {
@@ -1018,8 +1296,14 @@ fn run_discovery_only(
                 let _ = reply.send(Err("Control loop not running".into()));
             }
         }
+
+        let out = detection.poll(scanner, Instant::now(), wall_ms(std::time::SystemTime::now()), None);
+        emit_detection(&sink, &out);
     }
 }
+
+/// Discovery-only mode wakes this often to poll the topology monitor.
+const DISCOVERY_POLL: Duration = Duration::from_millis(250);
 
 fn build_snapshot(
     control_loop: &mut ControlLoop,
