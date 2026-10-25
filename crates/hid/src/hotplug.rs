@@ -368,15 +368,15 @@ mod win {
     impl Drop for HotplugWatcher {
         fn drop(&mut self) {
             shutdown_window(&self.shared, self.hwnd);
-            if let Some(t) = self.window_thread.take() {
-                if t.join().is_err() {
-                    error!("hotplug window thread panicked");
-                }
+            if let Some(t) = self.window_thread.take()
+                && t.join().is_err()
+            {
+                error!("hotplug window thread panicked");
             }
-            if let Some(t) = self.worker_thread.take() {
-                if t.join().is_err() {
-                    error!("hotplug arrival worker panicked");
-                }
+            if let Some(t) = self.worker_thread.take()
+                && t.join().is_err()
+            {
+                error!("hotplug arrival worker panicked");
             }
             // The window thread releases watches on WM_DESTROY; sweep any registered after.
             let leftovers: Vec<_> = lock(&self.watches.entries)
