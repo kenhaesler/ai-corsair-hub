@@ -153,11 +153,30 @@ export interface MarkerLegendEntry {
   meaning: string;
 }
 
+/** Diagnostic variant. Omitted = `markers`. Mirrors Rust `MarkerMode`. */
+export type MarkerMode =
+  | { kind: 'markers' }
+  | { kind: 'markers_black' }
+  | { kind: 'ruler' }
+  | { kind: 'walk'; device_id: string; step_ms?: number };
+
+/** Walk-mode timing, so the UI can derive the current LED client-side. */
+export interface WalkReport {
+  device_id: string;
+  /** Epoch ms when the walk started. */
+  started_at: number;
+  step_ms: number;
+  led_count: number;
+}
+
 /** Reply of `rgbMarkerDiagnostic`. Mirrors Rust `LedMarkerReport`. */
 export interface LedMarkerReport {
   app_version: string;
   generated_at_utc: string;
   duration_secs: number;
+  mode: 'markers' | 'markers_black' | 'ruler' | 'walk';
+  /** Present only for `walk` mode. */
+  walk: WalkReport | null;
   total_leds: number;
   /** Port power-protection scaling applied to marker colours (0-1). */
   power_factor: number;
@@ -171,8 +190,9 @@ export interface LedMarkerReport {
  * LED marker diagnostic: for `durationSecs` (clamped 5-300 by the backend)
  * every LED slot on every hub shows white (first LED), green (second LED),
  * red (last LED) and its palette colour elsewhere, through the production
- * RGB path. Also exports the slot manifest as JSON. Requires `rgb.enabled`
- * and `rgb.hardware_output`; never saves config.
+ * RGB path. Also exports the slot manifest as JSON. `mode` selects a variant
+ * (black body, decade ruler, single-LED walk); omit for the default markers.
+ * Requires `rgb.enabled` and `rgb.hardware_output`; never saves config.
  */
-export const rgbMarkerDiagnostic = (durationSecs: number) =>
-  invoke<LedMarkerReport>('rgb_marker_diagnostic', { durationSecs });
+export const rgbMarkerDiagnostic = (durationSecs: number, mode?: MarkerMode) =>
+  invoke<LedMarkerReport>('rgb_marker_diagnostic', { durationSecs, mode });
