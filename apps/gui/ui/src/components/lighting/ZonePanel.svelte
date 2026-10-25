@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { RgbZoneConfig, RgbDeviceRef, HubSnapshot, HubDeviceEntry } from '../../lib/types';
-  import { displayNameFromTree, shortHubSerial } from '../../lib/identity';
+  import { displayNameFromTree, shortHubSerial, deviceTypeLabel } from '../../lib/identity';
   import { configStore } from '../../lib/stores/config.svelte';
 
   interface Props {
@@ -59,7 +59,7 @@
           hub_serial: hub.serial,
           channel: dev.channel,
           device_type: dev.device_type,
-          label: `${dev.device_type} — ${name}`,
+          label: `${deviceTypeLabel(dev)} — ${name}`,
         };
       }),
     }));

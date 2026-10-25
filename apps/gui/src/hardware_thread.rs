@@ -1,9 +1,11 @@
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tauri::Emitter;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use corsair_common::config::AppConfig;
 use corsair_common::config_migration::{
@@ -12,14 +14,25 @@ use corsair_common::config_migration::{
 use corsair_common::identity::DeviceRegistry;
 use corsair_common::CorsairDevice;
 use corsair_fancontrol::control_loop::{self, ControlLoop};
-use corsair_hid::{port_power_factor, CorsairPsu, DeviceScanner, IcueLinkHub, LinkDeviceType};
+use corsair_hid::icue_link::diff_subdevices;
+use corsair_hid::monitor::{DeviceMonitor, MonitorSignal, RescanReason};
+use corsair_hid::topology::{
+    self, DetectedDevice, DeviceKey, FloodGuard, Snapshot, TopologyDiff,
+};
+use corsair_hid::{
+    port_power_factor, CorsairPsu, DeviceScanner, IcueLinkHub, LinkDevice, LinkDeviceType,
+};
 use corsair_rgb::effect::EffectContext;
 use corsair_rgb::layout::LedLayout;
 use corsair_rgb::frame::RgbFrame;
 use corsair_rgb::renderer::{DeviceConfig, RgbRenderer, ZoneConfig};
 
-use crate::diagnostics::{self, LedMarkerReport};
-use crate::dto::{CpuMetricsDto, DeviceTree, GpuMetricsDto, RgbFrameDto, SystemSnapshot};
+use crate::diagnostics::{self, LedMarkerReport, MarkerMode};
+use crate::dto::{
+    detected_devices, devices_not_ready, recheck_not_ready, topology_events, CpuMetricsDto, DetectedDeviceDto,
+    DetectionOutput, DeviceStatus, DeviceTree, GpuMetricsDto, LinkSubdevicesChangedDto,
+    RgbFrameDto, SystemSnapshot, TopologyEventDto,
+};
 use crate::state::{ChannelIdentity, HwCommand};
 use crate::worker_env::{
     emit, Clock, ConfigStore, DiskConfigStore, DiskDiagnosticsStore, HubBackend, SystemClock,
@@ -99,7 +112,7 @@ fn run_loop(
     }
 
     // Initialize device scanner (stays alive for device queries and recovery)
-    let scanner = match DeviceScanner::new() {
+    let mut scanner = match DeviceScanner::new() {
         Ok(s) => s,
         Err(e) => {
             let msg = format!("Failed to initialize HID API: {}", e);
@@ -111,6 +124,10 @@ fn run_loop(
         }
     };
 
+    // Topology diagnostics monitor (hotplug + settle). Created once; shares the scanner
+    // above, so there is a single HID API context for enumeration.
+    let mut detection = DetectionState::new(&scanner, Instant::now());
+
     // Build control loop
     let mut control_loop = match ControlLoop::build(config.clone(), Default::default(), &scanner) {
         Ok(cl) => cl,
@@ -119,7 +136,7 @@ fn run_loop(
             warn!("{}", msg);
             let _ = app.emit("hw-error", &msg);
             // Run in discovery-only mode
-            run_discovery_only(rx, &scanner, &app);
+            run_discovery_only(rx, &mut scanner, &mut detection, &app);
             return Ok(());
         }
     };
@@ -200,7 +217,7 @@ fn run_loop(
         None;
 
     // LED marker diagnostic state (G05); see `Worker::rgb_marker`.
-    let rgb_marker: Option<(Instant, Vec<RgbFrame>)> = None;
+    let rgb_marker: Option<ActiveMarker> = None;
 
     // Separate NVML handle for extended GPU metrics (util, power, clock,
     // VRAM). The control loop already owns a GpuSensor for temperature
@@ -242,7 +259,7 @@ fn run_loop(
                 psu_handle,
                 gpu_metrics_sensor,
             }),
-            hubs: Box::new(RealHubBackend { scanner }),
+            hubs: Box::new(RealHubBackend { scanner, detection }),
         },
     };
 
@@ -279,11 +296,39 @@ pub(crate) struct Worker {
     /// `clock.now() >= deadline`, at which point the next tick
     /// resumes the configured effect rendering.
     pub(crate) rgb_identify: Option<(Instant, std::collections::HashMap<String, [u8; 3]>)>,
-    /// LED marker diagnostic (G05). When `Some((deadline, frames))` the RGB
-    /// tick sends `frames` instead of renderer output until
-    /// `clock.now() >= deadline`. Never persisted; cancelled by Identify.
-    pub(crate) rgb_marker: Option<(Instant, Vec<RgbFrame>)>,
+    /// LED marker diagnostic (G05). When `Some` the RGB tick sends its frames
+    /// instead of renderer output until `clock.now() >= deadline`. Never
+    /// persisted; cancelled by Identify.
+    pub(crate) rgb_marker: Option<ActiveMarker>,
     pub(crate) env: WorkerEnv,
+}
+
+/// Running marker diagnostic. `frames` is prebuilt; in walk mode the target
+/// slot's frame is recomputed every tick from the time since `started`.
+pub(crate) struct ActiveMarker {
+    deadline: Instant,
+    frames: Vec<RgbFrame>,
+    walk: Option<ActiveWalk>,
+}
+
+struct ActiveWalk {
+    started: Instant,
+    step_ms: u64,
+    device_id: String,
+}
+
+impl ActiveMarker {
+    fn frames_at(&self, now: Instant) -> Vec<RgbFrame> {
+        let mut frames = self.frames.clone();
+        if let Some(w) = &self.walk {
+            let elapsed_ms = now.saturating_duration_since(w.started).as_millis() as u64;
+            if let Some(f) = frames.iter_mut().find(|f| f.device_id == w.device_id) {
+                let n = f.leds.len();
+                f.leds = diagnostics::walk_leds(n, diagnostics::walk_index(elapsed_ms, w.step_ms, n));
+            }
+        }
+        frames
+    }
 }
 
 impl Worker {
@@ -292,7 +337,11 @@ impl Worker {
     /// restore a prior state. Builds frames from the production slot manifest,
     /// exports the manifest JSON via the injected diagnostics store and
     /// returns the report. Never reads or writes the saved config.
-    fn start_marker_diagnostic(&mut self, duration_secs: u64) -> Result<LedMarkerReport, String> {
+    fn start_marker_diagnostic(
+        &mut self,
+        duration_secs: u64,
+        mode: MarkerMode,
+    ) -> Result<LedMarkerReport, String> {
         if !(self.rgb_enabled && self.config.rgb.hardware_output) {
             return Err(
                 "Enable RGB with hardware output to run the LED marker diagnostic".to_string(),
@@ -300,10 +349,38 @@ impl Worker {
         }
         let clamped = duration_secs.clamp(5, 300);
         let manifest = self.control_loop.rgb_slot_manifest();
-        let (frames, hubs) = diagnostics::build_marker(&manifest, &self.config);
+        // Validate the walk target before any state change or file write.
+        let walk_target = match &mode {
+            MarkerMode::Walk { device_id, step_ms } => {
+                let led_count = manifest
+                    .iter()
+                    .flat_map(|h| h.slots.iter())
+                    .find(|s| s.device_id == *device_id)
+                    .map(|s| s.led_count)
+                    .ok_or_else(|| format!("Unknown LED slot for walk mode: {device_id}"))?;
+                Some((device_id.clone(), diagnostics::walk_step_ms(*step_ms), led_count))
+            }
+            _ => None,
+        };
+        let (frames, hubs) = diagnostics::build_marker(&manifest, &self.config, &mode);
         if frames.is_empty() {
             return Err("No LED slots found on any hub".to_string());
         }
+        let started = self.env.clock.now();
+        let walk_report = walk_target.as_ref().map(|(device_id, step_ms, led_count)| {
+            diagnostics::WalkReport {
+                device_id: device_id.clone(),
+                started_at: self
+                    .env
+                    .clock
+                    .wall_time()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+                step_ms: *step_ms,
+                led_count: *led_count,
+            }
+        });
         let total_leds: usize = frames.iter().map(|f| f.leds.len()).sum();
         let power_factor = port_power_factor(total_leds.min(u16::MAX as usize) as u16);
         let (compact, iso) = diagnostics::utc_stamps(self.env.clock.wall_time());
@@ -313,7 +390,9 @@ impl Worker {
             duration_secs: clamped,
             total_leds,
             power_factor,
-            legend: diagnostics::legend(),
+            mode: mode.name(),
+            walk: walk_report,
+            legend: diagnostics::legend(&mode),
             hubs,
             file_path: None,
             file_error: None,
@@ -332,11 +411,17 @@ impl Worker {
             Err(e) => report.file_error = Some(e.to_string()),
         }
         self.rgb_identify = None; // marker cancels Identify
-        self.rgb_marker = Some((
-            self.env.clock.now() + Duration::from_secs(clamped),
+        self.rgb_marker = Some(ActiveMarker {
+            deadline: started + Duration::from_secs(clamped),
             frames,
-        ));
+            walk: walk_target.map(|(device_id, step_ms, _)| ActiveWalk {
+                started,
+                step_ms,
+                device_id,
+            }),
+        });
         info!(
+            mode = mode.name(),
             duration_secs = clamped,
             slots = report.hubs.iter().map(|h| h.slots.len()).sum::<usize>(),
             total_leds,
@@ -556,9 +641,10 @@ impl Worker {
                     }
                     HwCommand::RgbMarkerDiagnostic {
                         duration_secs,
+                        mode,
                         reply,
                     } => {
-                        let result = self.start_marker_diagnostic(duration_secs);
+                        let result = self.start_marker_diagnostic(duration_secs, mode);
                         let _ = reply.send(result);
                     }
                     HwCommand::Shutdown => {
@@ -751,13 +837,13 @@ impl Worker {
             if self
                 .rgb_marker
                 .as_ref()
-                .is_some_and(|(deadline, _)| self.env.clock.now() >= *deadline)
+                .is_some_and(|m| self.env.clock.now() >= m.deadline)
             {
                 info!("RGB LED marker diagnostic expired — resuming normal rendering");
                 self.rgb_marker = None;
             }
-            if let Some((_, marker_frames)) = &self.rgb_marker {
-                frames = marker_frames.clone();
+            if let Some(marker) = &self.rgb_marker {
+                frames = marker.frames_at(self.env.clock.now());
             }
 
             // Resolve (hub_serial, channel) via the current registry so the
@@ -777,6 +863,15 @@ impl Worker {
 
             self.last_rgb_tick = self.env.clock.now();
         }
+
+        // Topology diagnostics: logged and published only, never fed back into
+        // recovery or addressing. Runs between ticks on this thread.
+        let detection = self.env.hubs.poll_detection(
+            self.env.clock.now(),
+            wall_ms(self.env.clock.wall_time()),
+            &self.control_loop,
+        );
+        emit_detection(&*self.env.events, &detection);
 
         // Sleep for remaining poll interval (account for RGB timing)
         let elapsed = self.env.clock.now().saturating_duration_since(cycle_start);
@@ -890,6 +985,7 @@ impl Telemetry for RealTelemetry {
 /// Production hub backend: the scanner kept alive from startup.
 struct RealHubBackend {
     scanner: DeviceScanner,
+    detection: DetectionState,
 }
 
 impl HubBackend for RealHubBackend {
@@ -916,7 +1012,372 @@ impl HubBackend for RealHubBackend {
     }
 
     fn device_tree(&self, control_loop: &ControlLoop) -> DeviceTree {
-        build_device_tree_from_loop(control_loop, &self.scanner)
+        let (detected, excluded) = self.detection.tree_fields();
+        build_device_tree_from_loop(control_loop, &self.scanner).with_detection(detected, excluded)
+    }
+
+    fn poll_detection(
+        &mut self,
+        now: Instant,
+        wall_ms: u64,
+        control_loop: &ControlLoop,
+    ) -> DetectionOutput {
+        self.detection
+            .poll(&mut self.scanner, now, wall_ms, Some(control_loop))
+    }
+}
+
+/// How often the periodic LINK sub-device check starts a round.
+const LINK_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+/// A single sub-device read slower than this is logged at warn.
+const LINK_CHECK_SLOW: Duration = Duration::from_millis(100);
+/// Arrivals of one device within `FLOOD_WINDOW` beyond `FLOOD_MAX` quarantine it.
+const FLOOD_MAX: usize = 5;
+const FLOOD_WINDOW: Duration = Duration::from_secs(60);
+/// A rescan (HID refresh + snapshot + readiness) slower than this is logged at warn: it
+/// runs on the hardware thread and delays fan/RGB work.
+const RESCAN_SLOW: Duration = Duration::from_millis(50);
+/// After a resume, "removed" events are held back this long so a slow USB re-enumeration
+/// does not show devices as disconnected.
+const RESUME_HOLD: Duration = Duration::from_secs(10);
+
+#[cfg(windows)]
+fn interface_ready(path: &str) -> bool {
+    corsair_hid::devnode::readiness(path).is_ready()
+}
+
+#[cfg(not(windows))]
+fn interface_ready(_path: &str) -> bool {
+    true
+}
+
+/// Milliseconds since the Unix epoch, for event timestamps.
+fn wall_ms(t: std::time::SystemTime) -> u64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Publish a detection poll's results as Tauri events.
+fn emit_detection(sink: &dyn crate::worker_env::EventSink, out: &DetectionOutput) {
+    for ev in &out.topology {
+        emit(sink, "device-topology", ev);
+    }
+    for ev in &out.link {
+        emit(sink, "link-subdevices-changed", ev);
+    }
+}
+
+/// Holds back "removed" devices for [`RESUME_HOLD`] after a resume. A held device that
+/// reappears in a rescan within the window is dropped silently (its "added" is suppressed
+/// too, since the removal was never reported); the rest are released once the window ends.
+#[derive(Debug, Default)]
+struct ResumeHold {
+    until: Option<Instant>,
+    held: Vec<DetectedDevice>,
+}
+
+impl ResumeHold {
+    fn start(&mut self, now: Instant) {
+        self.until = Some(now + RESUME_HOLD);
+    }
+
+    fn active(&self, now: Instant) -> bool {
+        self.until.is_some_and(|u| now < u)
+    }
+
+    /// Devices whose hold expired while still absent; empty while the window is open.
+    fn release(&mut self, now: Instant) -> Vec<DetectedDevice> {
+        match self.until {
+            Some(u) if now >= u => {
+                self.until = None;
+                std::mem::take(&mut self.held)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Apply the hold to a rescan's diff: hold back removals, drop arrivals of held keys.
+    fn filter(&mut self, mut d: TopologyDiff, now: Instant) -> TopologyDiff {
+        if !self.active(now) {
+            return d;
+        }
+        for dev in d.removed.drain(..) {
+            if !self.held.iter().any(|h| h.key == dev.key) {
+                self.held.push(dev);
+            }
+        }
+        let held = &mut self.held;
+        d.added.retain(|dev| match held.iter().position(|h| h.key == dev.key) {
+            Some(i) => {
+                held.remove(i);
+                false
+            }
+            None => true,
+        });
+        d
+    }
+}
+
+/// Per-hub state for confirming LINK sub-device changes: a difference from the baseline is
+/// reported only after two consecutive identical enumerations (one short or stale read must
+/// not produce a removed/added pair).
+#[derive(Debug, Default)]
+struct LinkConfirm {
+    /// Registry enumeration the baseline was built against.
+    registry: Vec<LinkDevice>,
+    /// Last reported enumeration (the baseline once it differs from the registry).
+    reported: Vec<LinkDevice>,
+    /// A differing enumeration seen once, awaiting a second identical one.
+    pending: Option<Vec<LinkDevice>>,
+}
+
+impl LinkConfirm {
+    /// `Some(baseline)` when `new` is a confirmed change to diff against; `None` otherwise.
+    fn observe(&mut self, registry: &[LinkDevice], new: &[LinkDevice]) -> Option<Vec<LinkDevice>> {
+        if self.registry != registry {
+            self.registry = registry.to_vec();
+            self.reported = registry.to_vec();
+            self.pending = None;
+        }
+        if new == self.reported.as_slice() {
+            self.pending = None;
+            return None;
+        }
+        if self.pending.as_deref() == Some(new) {
+            self.pending = None;
+            return Some(std::mem::replace(&mut self.reported, new.to_vec()));
+        }
+        self.pending = Some(new.to_vec());
+        None
+    }
+}
+
+/// Topology diagnostics owned by the hardware thread: the hotplug monitor, the latest
+/// enumeration snapshot, flood guard and the periodic LINK sub-device check.
+///
+/// Diagnostics only. Nothing here writes to a device, touches hub health or recovery
+/// scheduling, or changes the registry; the existing recovery paths stay authoritative.
+struct DetectionState {
+    monitor: DeviceMonitor,
+    snapshot: Snapshot,
+    /// `RefCell` because `HubBackend::device_tree` takes `&self` and the guard prunes on query.
+    flood: RefCell<FloodGuard>,
+    /// `RefCell` because `tree_fields` (`&self`) re-checks readiness and clears keys that are ready.
+    not_ready: RefCell<HashSet<DeviceKey>>,
+    resume_hold: ResumeHold,
+    next_link_round: Instant,
+    /// Hubs still to be checked in the current round; one is taken per poll.
+    link_pending: VecDeque<String>,
+    /// Per hub: diff baseline plus pending-confirmation state; an unchanged difference is
+    /// reported once, not every round.
+    link_seen: HashMap<String, LinkConfirm>,
+}
+
+impl DetectionState {
+    /// Take the initial snapshot (no events) and start the monitor.
+    fn new(scanner: &DeviceScanner, now: Instant) -> Self {
+        let snapshot = scanner.snapshot();
+        let not_ready = devices_not_ready(&snapshot, interface_ready);
+        info!(
+            devices = snapshot.devices.len(),
+            excluded = snapshot.excluded.len(),
+            "Initial Corsair device snapshot"
+        );
+        Self {
+            monitor: DeviceMonitor::new(now),
+            snapshot,
+            flood: RefCell::new(FloodGuard::new(FLOOD_MAX, FLOOD_WINDOW)),
+            not_ready: RefCell::new(not_ready),
+            resume_hold: ResumeHold::default(),
+            next_link_round: now + LINK_CHECK_INTERVAL,
+            link_pending: VecDeque::new(),
+            link_seen: HashMap::new(),
+        }
+    }
+
+    fn status_of(&self, dev: &DetectedDevice, now: Instant) -> DeviceStatus {
+        let quarantined = self.flood.borrow_mut().is_quarantined(&dev.key, now);
+        DeviceStatus::resolve(quarantined, false, !self.not_ready.borrow().contains(&dev.key))
+    }
+
+    /// `(detected, excluded_count)` for the `DeviceTree`.
+    fn tree_fields(&self) -> (Vec<DetectedDeviceDto>, u32) {
+        let now = Instant::now();
+        recheck_not_ready(&self.snapshot, &mut self.not_ready.borrow_mut(), interface_ready);
+        (
+            detected_devices(&self.snapshot, |d| self.status_of(d, now)),
+            self.snapshot.excluded.len() as u32,
+        )
+    }
+
+    /// Non-blocking: drain the monitor, rescan if it says so, and advance the LINK check.
+    fn poll(
+        &mut self,
+        scanner: &mut DeviceScanner,
+        now: Instant,
+        wall_ms: u64,
+        control_loop: Option<&ControlLoop>,
+    ) -> DetectionOutput {
+        let mut out = DetectionOutput::default();
+        let expired = self.resume_hold.release(now);
+        if !expired.is_empty() {
+            let d = TopologyDiff {
+                removed: expired,
+                ..Default::default()
+            };
+            info!(removed = d.removed.len(), "Devices still absent after resume hold");
+            out.topology
+                .extend(topology_events(&d, |dev| self.status_of(dev, now), wall_ms));
+        }
+        for signal in self.monitor.poll(now) {
+            match signal {
+                MonitorSignal::Suspending => {
+                    info!("System suspending");
+                    out.topology.push(TopologyEventDto::power("suspending", wall_ms));
+                }
+                MonitorSignal::Resumed => {
+                    info!("System resumed");
+                    self.resume_hold.start(now);
+                    out.topology.push(TopologyEventDto::power("resumed", wall_ms));
+                }
+                MonitorSignal::RescanNow { reason } => {
+                    self.rescan(scanner, reason, now, wall_ms, &mut out);
+                }
+            }
+        }
+        if let Some(control_loop) = control_loop {
+            self.check_link_subdevices(control_loop, now, wall_ms, &mut out);
+        }
+        out
+    }
+
+    fn rescan(
+        &mut self,
+        scanner: &mut DeviceScanner,
+        reason: RescanReason,
+        now: Instant,
+        wall_ms: u64,
+        out: &mut DetectionOutput,
+    ) {
+        let started = Instant::now();
+        if let Err(e) = scanner.refresh() {
+            warn!(error = %e, ?reason, "Topology rescan: HID refresh failed");
+            return;
+        }
+        let new = scanner.snapshot();
+        let not_ready = devices_not_ready(&new, interface_ready);
+        let took = started.elapsed();
+        if took > RESCAN_SLOW {
+            warn!(?reason, ms = took.as_millis() as u64, "Topology rescan was slow");
+        } else {
+            debug!(?reason, ms = took.as_millis() as u64, "Topology rescan");
+        }
+        let d = topology::diff(&self.snapshot, &new);
+        let d = self.resume_hold.filter(d, now);
+        {
+            let mut flood = self.flood.borrow_mut();
+            for dev in &d.added {
+                if !flood.record_arrival(&dev.key, now) {
+                    warn!(pid = dev.key.pid, "Device re-arriving too often; marked quarantined");
+                }
+            }
+        }
+        *self.not_ready.borrow_mut() = not_ready;
+        if d.is_empty() {
+            debug!(?reason, "Topology rescan: no change");
+        } else {
+            info!(
+                ?reason,
+                added = d.added.len(),
+                removed = d.removed.len(),
+                changed = d.changed.len(),
+                "Corsair device topology changed"
+            );
+        }
+        out.topology
+            .extend(topology_events(&d, |dev| self.status_of(dev, now), wall_ms));
+        self.snapshot = new;
+    }
+
+    /// Every [`LINK_CHECK_INTERVAL`] a round begins over the hubs that are healthy and not in
+    /// recovery; one hub is read per poll. The read is the hub's existing enumeration
+    /// transaction (same as the speed read). A failure only logs: it never reaches hub
+    /// health, recovery scheduling or the registry.
+    fn check_link_subdevices(
+        &mut self,
+        control_loop: &ControlLoop,
+        now: Instant,
+        wall_ms: u64,
+        out: &mut DetectionOutput,
+    ) {
+        if self.link_pending.is_empty() {
+            if now < self.next_link_round {
+                return;
+            }
+            self.next_link_round = now + LINK_CHECK_INTERVAL;
+            self.link_pending = control_loop
+                .subdevice_check_targets()
+                .into_iter()
+                .map(|(serial, ..)| serial)
+                .collect();
+        }
+        let Some(serial) = self.link_pending.pop_front() else {
+            return;
+        };
+        // Re-resolve: the hub may have become unhealthy or entered recovery since the round began.
+        let Some((_, transport, registry_devices)) = control_loop
+            .subdevice_check_targets()
+            .into_iter()
+            .find(|(s, ..)| *s == serial)
+        else {
+            debug!(serial = serial.as_str(), "LINK sub-device check skipped: hub not idle");
+            return;
+        };
+
+        let started = Instant::now();
+        let result = transport.enumerate_devices();
+        let took = started.elapsed();
+        if took > LINK_CHECK_SLOW {
+            warn!(serial = serial.as_str(), ms = took.as_millis() as u64, "LINK sub-device check was slow");
+        } else {
+            debug!(serial = serial.as_str(), ms = took.as_millis() as u64, "LINK sub-device check");
+        }
+
+        let new = match result {
+            Ok(devices) => devices,
+            Err(e) => {
+                debug!(serial = serial.as_str(), error = %e, "LINK sub-device check failed; retrying next round");
+                return;
+            }
+        };
+
+        let Some(baseline) = self
+            .link_seen
+            .entry(serial.clone())
+            .or_default()
+            .observe(&registry_devices, &new)
+        else {
+            return;
+        };
+        let diff = diff_subdevices(&baseline, &new);
+        if let Some(dto) = LinkSubdevicesChangedDto::from_diff(&serial, &diff, wall_ms) {
+            info!(
+                serial = serial.as_str(),
+                added = dto.added.len(),
+                removed = dto.removed.len(),
+                moved = dto.moved.len(),
+                "iCUE LINK sub-devices changed"
+            );
+            out.link.push(dto);
+        } else if !diff.retyped.is_empty() || !diff.anomalies.is_empty() {
+            info!(
+                serial = serial.as_str(),
+                retyped = diff.retyped.len(),
+                anomalies = diff.anomalies.len(),
+                "iCUE LINK sub-device enumeration differs (retyped or unkeyable entries)"
+            );
+        }
     }
 }
 
@@ -971,14 +1432,18 @@ fn run_degraded(rx: mpsc::Receiver<HwCommand>) {
 /// Discovery-only mode: can enumerate devices but no control loop.
 fn run_discovery_only(
     rx: mpsc::Receiver<HwCommand>,
-    scanner: &DeviceScanner,
-    _app: &tauri::AppHandle,
+    scanner: &mut DeviceScanner,
+    detection: &mut DetectionState,
+    app: &tauri::AppHandle,
 ) {
+    let sink = TauriEventSink::new(app.clone());
     loop {
-        match rx.recv() {
+        match rx.recv_timeout(DISCOVERY_POLL) {
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
             Ok(HwCommand::Shutdown) | Err(_) => return,
             Ok(HwCommand::GetDevices { reply }) => {
-                let tree = build_device_tree(scanner);
+                let (detected, excluded) = detection.tree_fields();
+                let tree = build_device_tree(scanner).with_detection(detected, excluded);
                 let _ = reply.send(Ok(tree));
             }
             Ok(HwCommand::GetSnapshot { reply }) => {
@@ -1018,8 +1483,14 @@ fn run_discovery_only(
                 let _ = reply.send(Err("Control loop not running".into()));
             }
         }
+
+        let out = detection.poll(scanner, Instant::now(), wall_ms(std::time::SystemTime::now()), None);
+        emit_detection(&sink, &out);
     }
 }
+
+/// Discovery-only mode wakes this often to poll the topology monitor.
+const DISCOVERY_POLL: Duration = Duration::from_millis(250);
 
 fn build_snapshot(
     control_loop: &mut ControlLoop,
@@ -1897,5 +2368,143 @@ mod tests {
         assert_eq!(reparsed.devices[0].name.as_deref(), Some("Top Front"));
         assert_eq!(reparsed.fan_groups.len(), 1);
         assert_eq!(reparsed.fan_groups[0].channels, vec![1, 2]);
+    }
+}
+
+#[cfg(test)]
+mod detection_helper_tests {
+    use super::*;
+    use corsair_common::CORSAIR_VID;
+    use corsair_hid::topology::{DevnodeContext, RawInterface};
+
+    fn dev(serial: &str) -> DetectedDevice {
+        let snap = Snapshot::from_records([(
+            RawInterface {
+                vid: CORSAIR_VID,
+                pid: 0x0C3F,
+                serial: Some(serial.to_string()),
+                interface_number: 0,
+                path: format!("path-{serial}"),
+                usage_page: 0xFF42,
+                usage: 1,
+            },
+            DevnodeContext::default(),
+        )]);
+        snap.devices.into_values().next().unwrap()
+    }
+
+    fn removed(serials: &[&str]) -> TopologyDiff {
+        TopologyDiff {
+            removed: serials.iter().map(|s| dev(s)).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resume_hold_is_transparent_outside_the_window() {
+        let t0 = Instant::now();
+        let mut hold = ResumeHold::default();
+        let d = hold.filter(removed(&["A"]), t0);
+        assert_eq!(d.removed.len(), 1);
+        assert!(hold.release(t0 + RESUME_HOLD * 2).is_empty());
+    }
+
+    #[test]
+    fn resume_hold_withholds_removals_then_releases_absent_ones() {
+        let t0 = Instant::now();
+        let mut hold = ResumeHold::default();
+        hold.start(t0);
+        let d = hold.filter(removed(&["A", "B"]), t0 + Duration::from_secs(2));
+        assert!(d.removed.is_empty());
+        assert!(hold.release(t0 + Duration::from_secs(9)).is_empty());
+        let released = hold.release(t0 + RESUME_HOLD);
+        assert_eq!(released.len(), 2);
+        // One-shot: nothing further, and later diffs pass through.
+        assert!(hold.release(t0 + RESUME_HOLD * 2).is_empty());
+        assert_eq!(hold.filter(removed(&["A"]), t0 + RESUME_HOLD * 2).removed.len(), 1);
+    }
+
+    #[test]
+    fn resume_hold_drops_removal_and_arrival_when_key_reappears() {
+        let t0 = Instant::now();
+        let mut hold = ResumeHold::default();
+        hold.start(t0);
+        hold.filter(removed(&["A", "B"]), t0 + Duration::from_secs(2));
+        let back = TopologyDiff {
+            added: vec![dev("A")],
+            ..Default::default()
+        };
+        let d = hold.filter(back, t0 + Duration::from_secs(5));
+        assert!(d.added.is_empty(), "arrival of a never-reported removal is suppressed");
+        let released = hold.release(t0 + RESUME_HOLD);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].key, dev("B").key);
+    }
+
+    #[test]
+    fn resume_hold_lets_new_arrivals_through() {
+        let t0 = Instant::now();
+        let mut hold = ResumeHold::default();
+        hold.start(t0);
+        let new = TopologyDiff {
+            added: vec![dev("NEW")],
+            ..Default::default()
+        };
+        assert_eq!(hold.filter(new, t0).added.len(), 1);
+    }
+
+    fn link(channel: u8, id: &str) -> LinkDevice {
+        LinkDevice {
+            channel,
+            device_type: LinkDeviceType::QxFan,
+            model: 0,
+            device_id: id.to_string(),
+        }
+    }
+
+    #[test]
+    fn link_confirm_ignores_a_single_differing_enumeration() {
+        let reg = vec![link(1, "A"), link(2, "B")];
+        let short = vec![link(1, "A")];
+        let mut c = LinkConfirm::default();
+        assert_eq!(c.observe(&reg, &reg), None);
+        assert_eq!(c.observe(&reg, &short), None, "first sighting only");
+        assert_eq!(c.observe(&reg, &reg), None, "transient: back to baseline");
+        assert_eq!(c.observe(&reg, &short), None, "pending was reset");
+    }
+
+    #[test]
+    fn link_confirm_reports_after_two_identical_and_then_only_once() {
+        let reg = vec![link(1, "A"), link(2, "B")];
+        let short = vec![link(1, "A")];
+        let mut c = LinkConfirm::default();
+        assert_eq!(c.observe(&reg, &short), None);
+        assert_eq!(c.observe(&reg, &short), Some(reg.clone()));
+        assert_eq!(c.observe(&reg, &short), None, "already reported");
+        // Returning to the registry state is itself a change from the reported baseline.
+        assert_eq!(c.observe(&reg, &reg), None);
+        assert_eq!(c.observe(&reg, &reg), Some(short.clone()));
+    }
+
+    #[test]
+    fn link_confirm_requires_consecutive_identical_changes() {
+        let reg = vec![link(1, "A")];
+        let x = vec![link(1, "A"), link(2, "X")];
+        let y = vec![link(1, "A"), link(3, "Y")];
+        let mut c = LinkConfirm::default();
+        assert_eq!(c.observe(&reg, &x), None);
+        assert_eq!(c.observe(&reg, &y), None, "different change restarts confirmation");
+        assert_eq!(c.observe(&reg, &y), Some(reg.clone()));
+    }
+
+    #[test]
+    fn link_confirm_resets_when_registry_changes() {
+        let reg1 = vec![link(1, "A")];
+        let reg2 = vec![link(1, "A"), link(2, "B")];
+        let mut c = LinkConfirm::default();
+        assert_eq!(c.observe(&reg1, &reg2), None);
+        // Registry caught up (e.g. after recovery): the pending change is moot.
+        assert_eq!(c.observe(&reg2, &reg2), None);
+        assert_eq!(c.observe(&reg2, &reg2), None);
     }
 }

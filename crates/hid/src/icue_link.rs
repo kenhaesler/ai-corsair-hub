@@ -45,7 +45,6 @@ const MAX_COLOR_PAYLOAD: usize = 508; // max bytes per USB transfer
 
 // Data types for response matching and write payload headers
 const DATA_TYPE_DEVICES: [u8; 2] = [0x21, 0x00];
-#[cfg(test)]
 const DATA_TYPE_SPEEDS: [u8; 2] = [0x25, 0x00];
 #[cfg(test)]
 const DATA_TYPE_TEMPS: [u8; 2] = [0x10, 0x00];
@@ -118,6 +117,31 @@ impl LinkDeviceType {
         }
     }
 
+    /// Inverse of `from_byte`. `None` for `LsStrip` (no known wire byte).
+    pub fn to_byte(&self) -> Option<u8> {
+        Some(match self {
+            Self::QxFan => 0x01,
+            Self::LxFan => 0x02,
+            Self::RxMaxRgbFan => 0x03,
+            Self::RxMaxFan => 0x04,
+            Self::LinkAdapter => 0x05,
+            Self::LiquidCooler => 0x07,
+            Self::WaterBlock => 0x09,
+            Self::GpuBlock => 0x0A,
+            Self::Psu => 0x0B,
+            Self::PumpXd5 => 0x0C,
+            Self::Xg7Block => 0x0D,
+            Self::RxRgbFan => 0x0F,
+            Self::VrmCooler => 0x10,
+            Self::TitanCooler => 0x11,
+            Self::RxFan => 0x13,
+            Self::PumpXd6 => 0x19,
+            Self::CommanderDuo => 0x1B,
+            Self::LsStrip => return None,
+            Self::Unknown(b) => *b,
+        })
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Self::QxFan => "QX Fan",
@@ -188,12 +212,139 @@ impl LinkDeviceType {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LinkDevice {
     pub channel: u8,
     pub device_type: LinkDeviceType,
+    /// Raw model byte from the enumeration entry (diagnostics only).
     pub model: u8,
     pub device_id: String,
+}
+
+impl LinkDevice {
+    /// Raw type byte from the enumeration entry, for diagnostics. Exact for
+    /// every type `from_byte` can produce; `None` for `LsStrip`, which has no
+    /// known wire byte and is never produced by the parser.
+    pub fn raw_type_byte(&self) -> Option<u8> {
+        self.device_type.to_byte()
+    }
+}
+
+/// Result of comparing two sub-device enumerations, keyed by `device_id`.
+/// All lists are sorted by `device_id` for deterministic output.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubdeviceDiff {
+    pub added: Vec<LinkDevice>,
+    pub removed: Vec<LinkDevice>,
+    pub moved: Vec<SubdeviceMove>,
+    pub retyped: Vec<SubdeviceRetype>,
+    /// Entries that cannot be keyed reliably; never guessed at (fix plan G02).
+    pub anomalies: Vec<SubdeviceAnomaly>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubdeviceMove {
+    pub device_id: String,
+    pub from_channel: u8,
+    pub to_channel: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubdeviceRetype {
+    pub device_id: String,
+    pub from: LinkDeviceType,
+    pub to: LinkDeviceType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffSide {
+    Old,
+    New,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnomalyKind {
+    EmptyDeviceId,
+    DuplicateDeviceId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubdeviceAnomaly {
+    pub side: DiffSide,
+    pub kind: AnomalyKind,
+    pub channel: u8,
+    pub device_id: String,
+}
+
+/// Split one side into keyable devices (unique, non-empty id) and anomalies.
+fn partition_subdevices<'a>(
+    side: DiffSide,
+    devs: &'a [LinkDevice],
+    anomalies: &mut Vec<SubdeviceAnomaly>,
+) -> std::collections::BTreeMap<&'a str, &'a LinkDevice> {
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for d in devs {
+        *counts.entry(d.device_id.as_str()).or_insert(0) += 1;
+    }
+    let mut keyed = std::collections::BTreeMap::new();
+    for d in devs {
+        let kind = if d.device_id.is_empty() {
+            Some(AnomalyKind::EmptyDeviceId)
+        } else if counts[d.device_id.as_str()] > 1 {
+            Some(AnomalyKind::DuplicateDeviceId)
+        } else {
+            None
+        };
+        match kind {
+            Some(kind) => anomalies.push(SubdeviceAnomaly {
+                side,
+                kind,
+                channel: d.channel,
+                device_id: d.device_id.clone(),
+            }),
+            None => {
+                keyed.insert(d.device_id.as_str(), d);
+            }
+        }
+    }
+    keyed
+}
+
+/// Diff two sub-device enumerations by `device_id`, ignoring order.
+/// Entries with an empty or duplicated `device_id` are excluded from the
+/// added/removed/moved/retyped lists and reported in `anomalies` instead.
+pub fn diff_subdevices(old: &[LinkDevice], new: &[LinkDevice]) -> SubdeviceDiff {
+    let mut diff = SubdeviceDiff::default();
+    let old_map = partition_subdevices(DiffSide::Old, old, &mut diff.anomalies);
+    let new_map = partition_subdevices(DiffSide::New, new, &mut diff.anomalies);
+
+    for (id, o) in &old_map {
+        match new_map.get(id) {
+            None => diff.removed.push((*o).clone()),
+            Some(n) => {
+                if o.channel != n.channel {
+                    diff.moved.push(SubdeviceMove {
+                        device_id: id.to_string(),
+                        from_channel: o.channel,
+                        to_channel: n.channel,
+                    });
+                }
+                if o.device_type != n.device_type {
+                    diff.retyped.push(SubdeviceRetype {
+                        device_id: id.to_string(),
+                        from: o.device_type.clone(),
+                        to: n.device_type.clone(),
+                    });
+                }
+            }
+        }
+    }
+    for (id, n) in &new_map {
+        if !old_map.contains_key(id) {
+            diff.added.push((*n).clone());
+        }
+    }
+    diff
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -236,6 +387,12 @@ pub trait IcueLinkTransport: Send + Sync + 'static {
     fn get_speeds(&self) -> Result<Vec<FanSpeed>>;
     fn set_rgb(&self, channel_leds: &[(u8, &[[u8; 3]])]) -> Result<()>;
     fn enter_hardware_mode(&self) -> Result<()>;
+    /// Read the hub's sub-device list (read-only: the same close/open/read/close
+    /// transaction as `get_speeds`). Diagnostic use only; transports that cannot
+    /// enumerate keep this default.
+    fn enumerate_devices(&self) -> Result<Vec<LinkDevice>> {
+        bail!("sub-device enumeration not supported by this transport")
+    }
 }
 
 impl IcueLinkTransport for IcueLinkHub {
@@ -250,6 +407,9 @@ impl IcueLinkTransport for IcueLinkHub {
     }
     fn enter_hardware_mode(&self) -> Result<()> {
         IcueLinkHub::enter_hardware_mode(self)
+    }
+    fn enumerate_devices(&self) -> Result<Vec<LinkDevice>> {
+        IcueLinkHub::enumerate_devices(self)
     }
 }
 
@@ -608,40 +768,22 @@ impl IcueLinkHub {
             return Ok(std::collections::HashMap::new());
         }
 
-        let channel_count = resp[6] as usize;
-        let mut counts = std::collections::HashMap::new();
-
-        // Sanity check: no hub has more than ~20 physical channels
-        if channel_count > 20 {
+        let counts = parse_led_counts(&resp);
+        if resp[6] as usize > MAX_LED_TABLE_CHANNELS {
             warn!(
                 serial = self.serial.as_ref(),
-                channel_count,
+                channel_count = resp[6],
                 "0x1d channel count unreasonable — falling back to device type defaults"
             );
-            return Ok(counts);
         }
 
-        // Per-channel data starts at byte 8, each channel is 2 bytes:
-        // [device_type_code, led_count]
-        for ch in 1..=channel_count {
-            let idx = 6 + ch * 2; // index of device_type byte for this channel
-            if idx + 1 >= resp.len() {
-                break;
-            }
-            let dev_type = resp[idx];
-            let led_count = resp[idx + 1] as u16;
-            // Sanity: max 255 LEDs per channel (single-byte encoding limit).
-            // LINK Adapters with multiple strips can report 80+ LEDs.
-            if led_count > 0 && led_count <= 255 {
-                debug!(
-                    serial = self.serial.as_ref(),
-                    channel = ch,
-                    dev_type = format!("0x{:02X}", dev_type),
-                    led_count,
-                    "  LED table entry"
-                );
-                counts.insert(ch as u8, led_count);
-            }
+        for (ch, led_count) in sorted_counts(&counts) {
+            debug!(
+                serial = self.serial.as_ref(),
+                channel = ch,
+                led_count,
+                "  LED table entry"
+            );
         }
 
         info!(
@@ -701,8 +843,13 @@ impl IcueLinkHub {
 
     /// Read current fan/pump RPMs.
     pub fn get_speeds(&self) -> Result<Vec<FanSpeed>> {
-        let resp = self.read_endpoint(MODE_SPEEDS)?;
-        parse_speed_entries(&resp)
+        speeds_from_reads(|| self.read_endpoint(MODE_SPEEDS), || {
+            warn!(
+                serial = self.serial.as_ref(),
+                "Speed read got wrong data type (stale mode data), retrying"
+            );
+            thread::sleep(Duration::from_millis(50));
+        })
     }
 
     /// Read temperatures from sensors on connected devices.
@@ -855,6 +1002,46 @@ fn parse_firmware_version(resp: &[u8]) -> Result<FirmwareVersion> {
     })
 }
 
+/// Largest channel count accepted from the 0x1d LED table. iCUE's hub manifest
+/// allows 12 sub-devices per side x 2 ports (docs/research/icue-device-detection/
+/// C-lifecycle-link.md 2.3/3); anything larger is treated as garbage.
+const MAX_LED_TABLE_CHANNELS: usize = 24;
+
+/// Parse the 0x1d LED-count table (status already checked, `resp.len() >= 8`).
+/// Layout: byte 6 = channel count, then per channel `[device_type_code, led_count]`
+/// starting at byte 8. An over-cap channel count or short buffer yields no/partial
+/// entries (caller falls back to device-type defaults).
+fn parse_led_counts(resp: &[u8]) -> std::collections::HashMap<u8, u16> {
+    let mut counts = std::collections::HashMap::new();
+    let Some(&raw_count) = resp.get(6) else {
+        return counts;
+    };
+    let channel_count = raw_count as usize;
+    if channel_count > MAX_LED_TABLE_CHANNELS {
+        return counts;
+    }
+
+    for ch in 1..=channel_count {
+        let idx = 6 + ch * 2; // index of device_type byte for this channel
+        if idx + 1 >= resp.len() {
+            break;
+        }
+        // Max 255 LEDs per channel (single-byte encoding limit).
+        // LINK Adapters with multiple strips can report 80+ LEDs.
+        let led_count = resp[idx + 1] as u16;
+        if led_count > 0 {
+            counts.insert(ch as u8, led_count);
+        }
+    }
+    counts
+}
+
+fn sorted_counts(counts: &std::collections::HashMap<u8, u16>) -> Vec<(u8, u16)> {
+    let mut v: Vec<_> = counts.iter().map(|(&c, &n)| (c, n)).collect();
+    v.sort_unstable();
+    v
+}
+
 fn parse_device_entries(resp: &[u8]) -> Result<Vec<LinkDevice>> {
     // Response: [xx, xx, cmd_echo, status, data_type_hi, data_type_lo, count, payload...]
     if resp.len() < 7 {
@@ -903,6 +1090,35 @@ fn parse_device_entries(resp: &[u8]) -> Result<Vec<LinkDevice>> {
     }
 
     Ok(devices)
+}
+
+/// Whether `resp` carries the speeds data type (`0x25 0x00`) in bytes `[4:6]`.
+fn is_speeds_response(resp: &[u8]) -> bool {
+    resp.len() > 5 && resp[4] == DATA_TYPE_SPEEDS[0] && resp[5] == DATA_TYPE_SPEEDS[1]
+}
+
+/// Read speeds, retrying once when the hub answers with stale data of another mode (as
+/// `enumerate_devices` does). `on_stale` runs before the retry. A second wrong answer is an
+/// error; the stale bytes are never decoded as RPM triplets.
+fn speeds_from_reads(
+    mut read: impl FnMut() -> Result<Vec<u8>>,
+    on_stale: impl FnOnce(),
+) -> Result<Vec<FanSpeed>> {
+    let mut resp = read()?;
+    if !is_speeds_response(&resp) {
+        on_stale();
+        resp = read()?;
+        if !is_speeds_response(&resp) {
+            bail!(
+                "Speed response has wrong data type: {:02X} {:02X} (expected {:02X} {:02X})",
+                resp.get(4).copied().unwrap_or(0),
+                resp.get(5).copied().unwrap_or(0),
+                DATA_TYPE_SPEEDS[0],
+                DATA_TYPE_SPEEDS[1]
+            );
+        }
+    }
+    parse_speed_entries(&resp)
 }
 
 fn parse_speed_entries(resp: &[u8]) -> Result<Vec<FanSpeed>> {
@@ -1137,6 +1353,85 @@ mod tests {
         assert_eq!(devices[1].device_type, LinkDeviceType::LxFan);
         assert_eq!(devices[1].model, 0x03);
         assert_eq!(devices[1].device_id, "FAN2");
+    }
+
+    fn speeds_resp(rpms: &[(u8, u16)]) -> Vec<u8> {
+        let mut resp = vec![0u8; 64];
+        resp[2] = 0x08;
+        resp[4] = DATA_TYPE_SPEEDS[0];
+        resp[5] = DATA_TYPE_SPEEDS[1];
+        resp[6] = rpms.len() as u8 + 1;
+        for (i, &(status, rpm)) in rpms.iter().enumerate() {
+            let o = 7 + (i + 1) * 3;
+            resp[o] = status;
+            resp[o + 1..o + 3].copy_from_slice(&rpm.to_le_bytes());
+        }
+        resp
+    }
+
+    #[test]
+    fn valid_speed_response_parses_identically_through_the_checked_path() {
+        let resp = speeds_resp(&[(0, 850), (0xFF, 1), (0, 920)]);
+        let direct = parse_speed_entries(&resp).unwrap();
+        let mut stale_calls = 0;
+        let mut reads = 0;
+        let checked = speeds_from_reads(
+            || {
+                reads += 1;
+                Ok(resp.clone())
+            },
+            || stale_calls += 1,
+        )
+        .unwrap();
+        assert_eq!(reads, 1, "valid data is read once");
+        assert_eq!(stale_calls, 0);
+        assert_eq!(checked.len(), direct.len());
+        for (a, b) in checked.iter().zip(&direct) {
+            assert_eq!((a.channel, a.rpm), (b.channel, b.rpm));
+        }
+        assert_eq!(checked.len(), 2, "invalid-status entry skipped as before");
+    }
+
+    #[test]
+    fn stale_then_valid_speed_read_retries_once() {
+        let mut stale = vec![0u8; 64];
+        stale[4] = DATA_TYPE_DEVICES[0];
+        stale[5] = DATA_TYPE_DEVICES[1];
+        stale[6] = 3;
+        let valid = speeds_resp(&[(0, 850), (0, 920)]);
+        let mut seq = vec![valid, stale]; // popped from the back: stale first
+        let mut stale_calls = 0;
+        let speeds = speeds_from_reads(|| Ok(seq.pop().unwrap()), || stale_calls += 1).unwrap();
+        assert_eq!(stale_calls, 1);
+        assert_eq!(
+            speeds.iter().map(|s| (s.channel, s.rpm)).collect::<Vec<_>>(),
+            [(1, 850), (2, 920)]
+        );
+    }
+
+    #[test]
+    fn two_wrong_speed_reads_error_without_decoding_stale_bytes() {
+        let mut stale = vec![0u8; 64];
+        stale[4] = DATA_TYPE_DEVICES[0];
+        stale[5] = DATA_TYPE_DEVICES[1];
+        stale[6] = 3;
+        let mut reads = 0;
+        let err = speeds_from_reads(
+            || {
+                reads += 1;
+                Ok(stale.clone())
+            },
+            || {},
+        )
+        .unwrap_err();
+        assert_eq!(reads, 2, "exactly one retry");
+        assert!(err.to_string().contains("wrong data type"), "{err}");
+    }
+
+    #[test]
+    fn failed_speed_read_propagates_the_read_error() {
+        let err = speeds_from_reads(|| bail!("No response from hub (timeout)"), || {}).unwrap_err();
+        assert!(err.to_string().contains("timeout"));
     }
 
     #[test]
@@ -1708,13 +2003,173 @@ mod tests {
 
     #[test]
     fn golden_read_led_counts_absurd_channel_count_is_empty() {
-        let table = led_table_resp(21, &[(15, 0x05, 80)]);
+        let table = led_table_resp(25, &[(15, 0x05, 80)]);
         let (hub, _s) = scripted_hub(vec![
             Reply::Resp(ok_resp()),
             Reply::Resp(table),
             Reply::Resp(ok_resp()),
         ]);
         assert!(hub.read_led_counts().unwrap().is_empty());
+    }
+
+    /// Verbatim copy of the pre-T4 table interpretation (cap 20), as an oracle.
+    fn legacy_parse_led_counts(resp: &[u8]) -> std::collections::HashMap<u8, u16> {
+        let mut counts = std::collections::HashMap::new();
+        let channel_count = resp[6] as usize;
+        if channel_count > 20 {
+            return counts;
+        }
+        for ch in 1..=channel_count {
+            let idx = 6 + ch * 2;
+            if idx + 1 >= resp.len() {
+                break;
+            }
+            let led_count = resp[idx + 1] as u16;
+            if led_count > 0 && led_count <= 255 {
+                counts.insert(ch as u8, led_count);
+            }
+        }
+        counts
+    }
+
+    #[test]
+    fn parse_led_counts_matches_legacy_for_up_to_20_channels() {
+        let fixtures = [
+            led_table_resp(15, &[(1, 0x01, 0), (2, 0x01, 0), (15, 0x05, 80)]),
+            led_table_resp(15, &[(1, 0x01, 30), (15, 0x05, 80)]),
+            led_table_resp(15, &[(1, 0x01, 0), (15, 0x05, 0)]),
+            led_table_resp(20, &(1..=20).map(|c| (c, 0x01, 34)).collect::<Vec<_>>()),
+            led_table_resp(0, &[]),
+            led_table_resp(20, &[(20, 0x05, 255)]),
+            // Truncated buffer: both must stop at the same entry.
+            led_table_resp(20, &(1..=20).map(|c| (c, 0x01, 34)).collect::<Vec<_>>())[..30].to_vec(),
+        ];
+        for f in &fixtures {
+            assert_eq!(parse_led_counts(f), legacy_parse_led_counts(f));
+        }
+    }
+
+    #[test]
+    fn parse_led_counts_accepts_21_to_24_channels() {
+        for n in 21..=24usize {
+            let table = led_table_resp(n, &[(n, 0x01, 34)]);
+            let counts = parse_led_counts(&table);
+            assert_eq!(counts.get(&(n as u8)), Some(&34), "n={n}");
+        }
+    }
+
+    #[test]
+    fn parse_led_counts_rejects_25_channels() {
+        let table = led_table_resp(25, &[(1, 0x01, 34), (15, 0x05, 80)]);
+        assert!(parse_led_counts(&table).is_empty());
+    }
+
+    #[test]
+    fn parse_led_counts_short_buffer_does_not_panic() {
+        assert!(parse_led_counts(&[]).is_empty());
+        let mut short = led_table_resp(24, &[(24, 0x01, 34)]);
+        short.truncate(20);
+        let counts = parse_led_counts(&short);
+        assert!(!counts.contains_key(&24));
+    }
+
+    #[test]
+    fn golden_read_led_counts_24_channels_accepted() {
+        let table = led_table_resp(24, &[(24, 0x01, 34)]);
+        let (hub, _s) = scripted_hub(vec![
+            Reply::Resp(ok_resp()),
+            Reply::Resp(table),
+            Reply::Resp(ok_resp()),
+        ]);
+        assert_eq!(hub.read_led_counts().unwrap().get(&24), Some(&34));
+    }
+
+    #[test]
+    fn golden_read_led_counts_21_channels_now_accepted() {
+        let table = led_table_resp(21, &[(15, 0x05, 80)]);
+        let (hub, _s) = scripted_hub(vec![
+            Reply::Resp(ok_resp()),
+            Reply::Resp(table),
+            Reply::Resp(ok_resp()),
+        ]);
+        assert_eq!(hub.read_led_counts().unwrap().get(&15), Some(&80));
+    }
+
+    #[test]
+    fn raw_type_byte_round_trips_from_byte() {
+        for b in 0u8..=255 {
+            let dev = LinkDevice {
+                channel: 1,
+                device_type: LinkDeviceType::from_byte(b),
+                model: 0,
+                device_id: "X".into(),
+            };
+            assert_eq!(dev.raw_type_byte(), Some(b));
+        }
+        assert_eq!(LinkDeviceType::LsStrip.to_byte(), None);
+    }
+
+    fn dev(channel: u8, ty: LinkDeviceType, id: &str) -> LinkDevice {
+        LinkDevice { channel, device_type: ty, model: 0, device_id: id.into() }
+    }
+
+    #[test]
+    fn diff_subdevices_identical_ignoring_order_is_empty() {
+        let a = vec![dev(1, LinkDeviceType::QxFan, "A"), dev(2, LinkDeviceType::QxFan, "B")];
+        let b = vec![dev(2, LinkDeviceType::QxFan, "B"), dev(1, LinkDeviceType::QxFan, "A")];
+        assert_eq!(diff_subdevices(&a, &b), SubdeviceDiff::default());
+    }
+
+    #[test]
+    fn diff_subdevices_added_removed_moved_retyped() {
+        let old = vec![
+            dev(1, LinkDeviceType::QxFan, "GONE"),
+            dev(2, LinkDeviceType::QxFan, "MOVE"),
+            dev(3, LinkDeviceType::QxFan, "RETYPE"),
+            dev(4, LinkDeviceType::QxFan, "BOTH"),
+        ];
+        let new = vec![
+            dev(5, LinkDeviceType::QxFan, "MOVE"),
+            dev(3, LinkDeviceType::LsStrip, "RETYPE"),
+            dev(6, LinkDeviceType::LxFan, "BOTH"),
+            dev(7, LinkDeviceType::QxFan, "NEW"),
+        ];
+        let d = diff_subdevices(&old, &new);
+        assert_eq!(d.removed.len(), 1);
+        assert_eq!(d.removed[0].device_id, "GONE");
+        assert_eq!(d.added.len(), 1);
+        assert_eq!(d.added[0].device_id, "NEW");
+        let moved: Vec<_> = d.moved.iter().map(|m| (m.device_id.as_str(), m.from_channel, m.to_channel)).collect();
+        assert_eq!(moved, vec![("BOTH", 4, 6), ("MOVE", 2, 5)]);
+        let retyped: Vec<_> = d.retyped.iter().map(|r| r.device_id.as_str()).collect();
+        assert_eq!(retyped, vec!["BOTH", "RETYPE"]);
+        assert!(d.anomalies.is_empty());
+    }
+
+    #[test]
+    fn diff_subdevices_reports_empty_and_duplicate_ids_as_anomalies() {
+        let old = vec![
+            dev(1, LinkDeviceType::QxFan, ""),
+            dev(2, LinkDeviceType::QxFan, "DUP"),
+            dev(3, LinkDeviceType::QxFan, "DUP"),
+            dev(4, LinkDeviceType::QxFan, "OK"),
+        ];
+        let new = vec![dev(4, LinkDeviceType::QxFan, "OK"), dev(9, LinkDeviceType::QxFan, "DUP")];
+        let d = diff_subdevices(&old, &new);
+        // Old-side unkeyable entries are never guessed into removed/moved; the
+        // unique new-side "DUP" has no keyed old match so it is reported as added.
+        assert_eq!(d.added.len(), 1);
+        assert_eq!(d.added[0].device_id, "DUP");
+        assert!(d.removed.is_empty() && d.moved.is_empty() && d.retyped.is_empty());
+        let kinds: Vec<_> = d.anomalies.iter().map(|a| (a.side, a.kind, a.channel)).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (DiffSide::Old, AnomalyKind::EmptyDeviceId, 1),
+                (DiffSide::Old, AnomalyKind::DuplicateDeviceId, 2),
+                (DiffSide::Old, AnomalyKind::DuplicateDeviceId, 3),
+            ]
+        );
     }
 
     /// Device-enumeration response with `channels` entries; `devs` = (channel, type byte, id).

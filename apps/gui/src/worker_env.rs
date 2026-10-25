@@ -18,7 +18,7 @@ use corsair_common::config::AppConfig;
 use corsair_fancontrol::control_loop::ControlLoop;
 use corsair_hid::{HubInfo, IcueLinkTransport, PsuStatus};
 
-use crate::dto::{CpuMetricsDto, DeviceTree, GpuMetricsDto};
+use crate::dto::{CpuMetricsDto, DetectionOutput, DeviceTree, GpuMetricsDto};
 
 /// Sink for events pushed to the frontend.
 ///
@@ -136,6 +136,16 @@ pub trait HubBackend {
     fn reopen(&mut self, serial: &str) -> anyhow::Result<(Arc<dyn IcueLinkTransport>, HubInfo)>;
     /// Device tree for the `GetDevices` command.
     fn device_tree(&self, control_loop: &ControlLoop) -> DeviceTree;
+    /// Non-blocking topology diagnostics poll (hotplug monitor + periodic LINK
+    /// sub-device check). Read-only; the caller only emits the result.
+    fn poll_detection(
+        &mut self,
+        _now: Instant,
+        _wall_ms: u64,
+        _control_loop: &ControlLoop,
+    ) -> DetectionOutput {
+        DetectionOutput::default()
+    }
 }
 
 /// Everything the worker loop needs from the outside world.

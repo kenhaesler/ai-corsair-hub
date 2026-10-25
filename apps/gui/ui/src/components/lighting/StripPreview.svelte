@@ -13,8 +13,6 @@
   let canvas: HTMLCanvasElement;
   let animFrame: number;
 
-  const LED_COUNT = 21; // LS350
-
   onMount(() => {
     const dpr = window.devicePixelRatio || 1;
     canvas.width = width * dpr;
@@ -28,12 +26,12 @@
     function draw() {
       ctx.clearRect(0, 0, width, height);
 
-      const count = leds?.length ?? LED_COUNT;
+      const count = leds?.length ?? 0;
       const cy = height / 2;
       const padding = 12;
-      const ledRadius = 4;
       const glowRadius = 10;
       const spacing = (width - padding * 2) / Math.max(count - 1, 1);
+      const ledRadius = Math.min(4, Math.max(spacing * 0.4, 1.5));
 
       // Background bar
       ctx.beginPath();
@@ -43,7 +41,7 @@
 
       for (let i = 0; i < count; i++) {
         const x = padding + i * spacing;
-        const [r, g, b] = leds?.[i] ?? [30, 30, 30];
+        const [r, g, b] = leds![i];
 
         // Glow
         const glow = ctx.createRadialGradient(x, cy, 0, x, cy, glowRadius);

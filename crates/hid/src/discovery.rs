@@ -2,7 +2,31 @@ use anyhow::{Context, Result};
 use corsair_common::{CorsairDevice, DeviceInfo, CORSAIR_VID};
 use hidapi::HidApi;
 use serde::Serialize;
+use std::ffi::CString;
 use tracing::{debug, info};
+
+use crate::topology::{DevnodeContext, RawInterface, Snapshot};
+
+#[cfg(windows)]
+fn devnode_context(path: &str) -> DevnodeContext {
+    use crate::devnode::{interface_path_to_instance_id, query_devnode, usb_device_instance_id};
+
+    let Some(instance_id) = interface_path_to_instance_id(path) else {
+        return DevnodeContext::default();
+    };
+    let info = query_devnode(&instance_id).ok();
+    let usb_instance_id = usb_device_instance_id(&instance_id);
+    DevnodeContext {
+        instance_id: Some(instance_id),
+        info,
+        usb_instance_id,
+    }
+}
+
+#[cfg(not(windows))]
+fn devnode_context(_path: &str) -> DevnodeContext {
+    DevnodeContext::default()
+}
 
 pub struct DeviceScanner {
     api: HidApi,
@@ -85,6 +109,45 @@ impl DeviceScanner {
         let mut result: Vec<DeviceGroup> = groups.into_values().collect();
         result.sort_by(|a, b| a.pid.cmp(&b.pid).then(a.serial.cmp(&b.serial)));
         result
+    }
+
+    /// Enriched enumeration: Corsair interfaces grouped by [`DeviceKey`], with Bluetooth
+    /// transports and devnodes with a problem recorded in `excluded`.
+    pub fn snapshot(&self) -> Snapshot {
+        let records = self
+            .api
+            .device_list()
+            .filter(|dev| dev.vendor_id() == CORSAIR_VID)
+            .map(|dev| {
+                let path = dev.path().to_string_lossy().to_string();
+                let ctx = devnode_context(&path);
+                let raw = RawInterface {
+                    vid: dev.vendor_id(),
+                    pid: dev.product_id(),
+                    serial: dev.serial_number().map(String::from),
+                    interface_number: dev.interface_number(),
+                    path,
+                    usage_page: dev.usage_page(),
+                    usage: dev.usage(),
+                };
+                (raw, ctx)
+            })
+            .collect::<Vec<_>>();
+        let snapshot = Snapshot::from_records(records);
+        debug!(
+            devices = snapshot.devices.len(),
+            excluded = snapshot.excluded.len(),
+            "Enumerated Corsair devices"
+        );
+        snapshot
+    }
+
+    /// Open a specific interface by its hidapi path (as reported in a [`Snapshot`]).
+    pub fn open_path(&self, path: &str) -> Result<hidapi::HidDevice> {
+        let c_path = CString::new(path).context("HID path contains an interior NUL")?;
+        self.api
+            .open_path(&c_path)
+            .with_context(|| format!("Failed to open HID path {path}"))
     }
 
     pub fn open_device(

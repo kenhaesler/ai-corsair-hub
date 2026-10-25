@@ -745,6 +745,23 @@ impl ControlLoop {
         result
     }
 
+    /// Hubs eligible for the periodic read-only sub-device check: healthy and not in a
+    /// recovery episode, sorted by serial. Returns the transport and the cached
+    /// enumeration to diff against. Read-only; the check's outcome never feeds hub
+    /// health, recovery scheduling or the registry.
+    pub fn subdevice_check_targets(
+        &self,
+    ) -> Vec<(String, Arc<dyn IcueLinkTransport>, Vec<corsair_hid::LinkDevice>)> {
+        let mut targets: Vec<_> = self
+            .hubs
+            .iter()
+            .filter(|(_, c)| c.healthy && c.recovery_attempts == 0)
+            .map(|(serial, c)| (serial.clone(), Arc::clone(&c.hub), c.info.devices.clone()))
+            .collect();
+        targets.sort_by(|a, b| a.0.cmp(&b.0));
+        targets
+    }
+
     /// Return `(hub_serial, channel) → device_id` for every currently-
     /// enumerated device across all hubs. Used by DTO construction to
     /// populate `FanReading.device_id` so the frontend can key on stable
@@ -2222,6 +2239,34 @@ mod tests {
         assert_eq!(recovery_backoff(100), Duration::from_secs(120));
         // No overflow panic at u32::MAX
         assert_eq!(recovery_backoff(u32::MAX), Duration::from_secs(120));
+    }
+
+    // --- Diagnostic sub-device check must not touch hub health ---
+
+    #[test]
+    fn subdevice_check_failure_leaves_hub_health_untouched() {
+        let mock = Arc::new(MockHub::new());
+        let (mut cl, _mock) = loop_with_mock_hub(mock, FanMode::Fixed { duty_percent: 50.0 });
+        let _ = cl.tick();
+
+        let targets = cl.subdevice_check_targets();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].0, "TESTHUB0");
+        // MockHub keeps the default enumerate_devices, which fails.
+        assert!(targets[0].1.enumerate_devices().is_err());
+
+        assert!(cl.hubs_needing_recovery().is_empty());
+        let health = cl.tick().hub_health;
+        assert!(health.iter().all(|h| h.healthy && h.consecutive_failures == 0));
+    }
+
+    #[test]
+    fn subdevice_check_targets_skip_unhealthy_and_recovering_hubs() {
+        let mock = Arc::new(MockHub::new());
+        let (mut cl, mock) = loop_with_mock_hub(mock, FanMode::Fixed { duty_percent: 50.0 });
+        mock.set_fail(true);
+        let _ = cl.tick();
+        assert!(cl.subdevice_check_targets().is_empty(), "unhealthy hub");
     }
 
     // --- B2: healthy→failed transition schedules immediate recovery ---

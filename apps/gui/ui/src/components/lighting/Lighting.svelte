@@ -169,6 +169,7 @@
       <HardwarePreview
         zone={currentZone()}
         frames={rgb.frames}
+        hubs={availableHubs}
       />
     </div>
 

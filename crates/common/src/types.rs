@@ -54,6 +54,14 @@ impl CorsairDevice {
         }
     }
 
+    /// Name from the device catalog for an unrecognised PID; `None` for named variants.
+    pub fn catalog_name(&self) -> Option<&'static str> {
+        match self {
+            Self::Unknown(pid) => crate::catalog::lookup(CORSAIR_VID, *pid).map(|d| d.name),
+            _ => None,
+        }
+    }
+
     pub fn supports_fan_control(&self) -> bool {
         matches!(
             self,

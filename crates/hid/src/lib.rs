@@ -1,6 +1,10 @@
 pub mod corsair_psu;
+pub mod devnode;
 pub mod discovery;
+pub mod hotplug;
 pub mod icue_link;
+pub mod monitor;
+pub mod topology;
 
 pub use corsair_psu::{CorsairPsu, PsuStatus, RailReading};
 pub use discovery::{DeviceGroup, DeviceScanner, InterfaceInfo};

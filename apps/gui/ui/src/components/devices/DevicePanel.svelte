@@ -3,10 +3,13 @@
     getDevices,
     rgbIdentifyChannels,
     rgbMarkerDiagnostic,
+    onDeviceTopology,
+    onLinkSubdevicesChanged,
     type ChannelIdentity,
     type LedMarkerReport,
+    type MarkerMode,
   } from '../../lib/api';
-  import type { DeviceTree } from '../../lib/types';
+  import type { DetectedDevice, DeviceTree, LinkSubdevicesChanged, TopologyEvent } from '../../lib/types';
   import HubDetail from './HubDetail.svelte';
   import { loadConfig, configStore } from '../../lib/stores/config.svelte';
   import { onMount } from 'svelte';
@@ -48,6 +51,19 @@
   let markerRunning = $state(false);
   let markerDeadline = $state<number | null>(null);
   let markerRemaining = $state(0);
+  // Mode selector. Walk needs a target device and a step time.
+  let markerModeKind = $state<'markers' | 'markers_black' | 'ruler' | 'walk'>('markers');
+  let walkDeviceId = $state('');
+  let walkStepMs = $state(400);
+  let walkLed = $state(0);
+  const walkDevices = $derived(
+    (devices?.hubs ?? []).flatMap((h) =>
+      h.devices.map((d) => ({
+        id: d.device_id,
+        label: `Hub ${shortSerial(h.serial)} Ch ${d.channel} · ${d.device_type}`,
+      })),
+    ),
+  );
   const diagnosticBusy = $derived(identifyRunning || markerRunning);
 
   $effect(() => {
@@ -65,10 +81,34 @@
     return () => clearInterval(handle);
   });
 
+  // Walk mode: current LED is derived client-side from the report timing
+  // (no backend polling), on a faster tick than the countdown.
+  $effect(() => {
+    const walk = markerRunning ? markerReport?.walk : null;
+    if (!walk) return;
+    const tick = () => {
+      walkLed = Math.floor(Math.max(0, Date.now() - walk.started_at) / walk.step_ms) % walk.led_count;
+    };
+    tick();
+    const handle = setInterval(tick, 100);
+    return () => clearInterval(handle);
+  });
+
   async function runMarkers() {
     if (diagnosticBusy) return;
+    let mode: MarkerMode | undefined;
+    if (markerModeKind === 'walk') {
+      if (!walkDeviceId) {
+        error = 'LED markers failed: pick a device for Walk mode';
+        return;
+      }
+      const step = Math.min(2000, Math.max(100, Math.round(Number(walkStepMs)) || 400));
+      mode = { kind: 'walk', device_id: walkDeviceId, step_ms: step };
+    } else if (markerModeKind !== 'markers') {
+      mode = { kind: markerModeKind };
+    }
     try {
-      const report = await rgbMarkerDiagnostic(MARKER_SECS);
+      const report = await rgbMarkerDiagnostic(MARKER_SECS, mode);
       markerReport = report;
       markerRunning = true;
       markerDeadline = Date.now() + report.duration_secs * 1000;
@@ -103,15 +143,111 @@
     await refresh();
   });
 
-  async function refresh() {
-    loading = true;
-    error = null;
+  // Hotplug / resume notices (diagnostic only; never touches addressing or config).
+  const NOTICE_MS = 6000;
+  const REFRESH_DEBOUNCE_MS = 500;
+  let notice = $state<{ text: string; tone: 'info' | 'success' | 'warning' } | null>(null);
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function showNotice(text: string, tone: 'info' | 'success' | 'warning') {
+    notice = { text, tone };
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => (notice = null), NOTICE_MS);
+  }
+
+  function scheduleRefresh() {
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(() => refresh({ silent: true }), REFRESH_DEBOUNCE_MS);
+  }
+
+  function onTopology(e: TopologyEvent) {
+    const name = e.device?.name ?? 'Corsair device';
+    switch (e.kind) {
+      case 'added':
+        showNotice(`${name} connected`, 'success');
+        break;
+      case 'removed':
+        showNotice(`${name} disconnected`, 'warning');
+        break;
+      case 'changed':
+        showNotice(`${name} changed`, 'info');
+        break;
+      case 'suspending':
+        showNotice('System suspending', 'info');
+        break;
+      case 'resumed':
+        showNotice('System resumed - re-checking devices', 'info');
+        break;
+      default:
+        return;
+    }
+    scheduleRefresh();
+  }
+
+  function plural(n: number, word: string): string {
+    return `${n} ${word}${n === 1 ? '' : 's'}`;
+  }
+
+  function onSubdevices(e: LinkSubdevicesChanged) {
+    const parts: string[] = [];
+    const added = e.added?.length ?? 0;
+    const removed = e.removed?.length ?? 0;
+    const moved = e.moved?.length ?? 0;
+    if (added) parts.push(`${plural(added, 'device')} added`);
+    if (removed) parts.push(`${plural(removed, 'device')} removed`);
+    if (moved) parts.push(`${plural(moved, 'device')} moved`);
+    if (parts.length === 0) return;
+    showNotice(`Hub ${shortSerial(e.hub_serial ?? '')}: ${parts.join(', ')}`, 'info');
+    scheduleRefresh();
+  }
+
+  onMount(() => {
+    let disposed = false;
+    const unlisten: (() => void)[] = [];
+    for (const sub of [onDeviceTopology(onTopology), onLinkSubdevicesChanged(onSubdevices)]) {
+      sub.then((fn) => (disposed ? fn() : unlisten.push(fn))).catch(() => {});
+    }
+    return () => {
+      disposed = true;
+      unlisten.forEach((fn) => fn());
+      clearTimeout(noticeTimer);
+      clearTimeout(refreshTimer);
+    };
+  });
+
+  const SUPPORT_LABEL: Record<string, string> = {
+    supported: 'Supported',
+    detect_only: 'Detected - no driver',
+    unknown: 'Unknown',
+  };
+  const STATUS_LABEL: Record<string, string> = {
+    not_ready: 'Not ready',
+    quarantined: 'Quarantined',
+    backoff: 'Retrying',
+  };
+  const supportLabel = (d: DetectedDevice) => SUPPORT_LABEL[d.support] ?? 'Unknown';
+  const pidHex = (d: DetectedDevice) =>
+    `0x${d.pid.toString(16).toUpperCase().padStart(4, '0')}`;
+
+  // Overlapping fetches can resolve out of order; only the newest response is applied.
+  let refreshSeq = 0;
+
+  /** `silent` (event-driven) refreshes do not set `loading` or touch `error`. */
+  async function refresh(opts: { silent?: boolean } = {}) {
+    const silent = opts.silent === true;
+    const seq = ++refreshSeq;
+    if (!silent) {
+      loading = true;
+      error = null;
+    }
     try {
-      devices = await getDevices();
+      const tree = await getDevices();
+      if (seq === refreshSeq) devices = tree;
     } catch (e) {
-      error = String(e);
+      if (!silent && seq === refreshSeq) error = String(e);
     } finally {
-      loading = false;
+      if (seq === refreshSeq) loading = false;
     }
   }
 
@@ -140,10 +276,35 @@
       <button class="identify-btn" onclick={runIdentify} disabled={diagnosticBusy}>
         {identifyRunning ? `Identifying… ${identifyRemaining}s` : 'Identify Channels'}
       </button>
+      <select bind:value={markerModeKind} disabled={diagnosticBusy} aria-label="LED marker mode">
+        <option value="markers">Markers</option>
+        <option value="markers_black">Markers (black body)</option>
+        <option value="ruler">Ruler</option>
+        <option value="walk">Walk</option>
+      </select>
+      {#if markerModeKind === 'walk'}
+        <select bind:value={walkDeviceId} disabled={diagnosticBusy} aria-label="Walk device">
+          <option value="">Device…</option>
+          {#each walkDevices as d}
+            <option value={d.id}>{d.label}</option>
+          {/each}
+        </select>
+        <input
+          type="number"
+          min="100"
+          max="2000"
+          step="50"
+          bind:value={walkStepMs}
+          disabled={diagnosticBusy}
+          aria-label="Walk step (ms)"
+          title="Step time in ms (100-2000)"
+          style="width: 72px"
+        />
+      {/if}
       <button class="identify-btn" onclick={runMarkers} disabled={diagnosticBusy}>
         {markerRunning ? `LED markers… ${markerRemaining}s` : 'LED markers'}
       </button>
-      <button onclick={refresh} disabled={loading}>
+      <button onclick={() => refresh()} disabled={loading}>
         {loading ? 'Scanning...' : 'Refresh'}
       </button>
     </div>
@@ -152,6 +313,18 @@
   {#if error}
     <div class="banner error">{error}</div>
   {/if}
+
+  <div class="notice-region" role="status" aria-live="polite">
+    {#if notice}
+      <div
+        class="banner"
+        class:success={notice.tone === 'success'}
+        class:notice-info={notice.tone === 'info'}
+      >
+        {notice.text}
+      </div>
+    {/if}
+  </div>
 
   {#if identifyMap && identifyRunning}
     <div class="identify-legend">
@@ -184,18 +357,24 @@
   {#if markerReport && markerRunning}
     <div class="identify-legend">
       <p class="legend-intro">
-        Every LED slot shows a marker for {markerReport.duration_secs} seconds:
-        {#each markerReport.legend.slice(0, 3) as entry, i}
+        {markerReport.mode === 'walk' ? 'Walk' : 'Every LED slot shows a marker'} for {markerReport.duration_secs} seconds:
+        {#each markerReport.legend as entry, i}
           <span
             class="legend-swatch inline-swatch"
             style="background: rgb({entry.rgb[0]},{entry.rgb[1]},{entry.rgb[2]})"
           ></span>
-          {entry.label} = {entry.meaning}{i < 2 ? ';' : '.'}
+          {entry.label} = {entry.meaning}{i < markerReport.legend.length - 1 ? ';' : '.'}
         {/each}
-        All other LEDs use the device's palette colour. Colours are scaled by port
+        {#if markerReport.mode === 'markers'}
+          All other LEDs use the device's palette colour.
+        {/if}
+        Colours are scaled by port
         power protection (factor {markerReport.power_factor}, {markerReport.total_leds} LEDs
         total), exactly like normal rendering.
       </p>
+      {#if markerReport.walk}
+        <p class="walk-pos">LED {walkLed} / {markerReport.walk.led_count}</p>
+      {/if}
       {#each markerReport.hubs as hub}
         <div class="legend-hub">
           <span class="legend-hub-title">
@@ -269,6 +448,35 @@
       </div>
     {/if}
 
+    {#if devices.detected && devices.detected.length > 0}
+      <section class="card detected" aria-labelledby="detected-title">
+        <h4 id="detected-title" class="detected-title">All Corsair devices</h4>
+        <ul class="detected-list">
+          {#each devices.detected as d (d.key)}
+            <li class="detected-row">
+              <span class="detected-name">{d.name}</span>
+              <span class="mono detected-meta">PID {pidHex(d)}</span>
+              {#if d.serial}
+                <span class="mono detected-meta">S/N {d.serial}</span>
+              {/if}
+              <span class="badge badge-{d.support}">{supportLabel(d)}</span>
+              {#if d.status !== 'ok'}
+                <span class="badge badge-status">{STATUS_LABEL[d.status] ?? d.status}</span>
+              {/if}
+              {#if d.bootloader}
+                <span class="badge badge-status">Bootloader</span>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+        {#if (devices.excluded_count ?? 0) > 0}
+          <p class="excluded-note">
+            {devices.excluded_count} interfaces filtered (Bluetooth / driver problem)
+          </p>
+        {/if}
+      </section>
+    {/if}
+
     {#if devices.hubs.length === 0 && !devices.psu}
       <div class="card empty">
         <p>No Corsair devices detected on USB bus.</p>
@@ -317,6 +525,70 @@
     text-align: center;
     padding: 40px;
     color: var(--text-secondary);
+  }
+  .notice-region .banner {
+    margin-bottom: 12px;
+  }
+  .banner.notice-info {
+    background: var(--bg-card-inset);
+    border-color: var(--accent-dim);
+    color: var(--text-secondary);
+  }
+  .detected {
+    margin-top: 12px;
+  }
+  .detected-title {
+    margin: 0 0 8px 0;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .detected-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .detected-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 10px;
+    font-size: 12px;
+  }
+  .detected-name {
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .detected-meta {
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+    font-size: 11px;
+  }
+  .badge {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    padding: 1px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--text-muted);
+    color: var(--text-muted);
+  }
+  .badge-supported {
+    color: var(--success);
+    border-color: var(--success);
+  }
+  .badge-detect_only,
+  .badge-status {
+    color: var(--warning);
+    border-color: var(--warning);
+  }
+  .excluded-note {
+    margin: 10px 0 0;
+    font-size: 11px;
+    color: var(--text-muted);
   }
   .header-actions {
     display: flex;
@@ -416,6 +688,13 @@
   }
   .marker-table .skipped {
     color: var(--text-muted);
+  }
+  .walk-pos {
+    margin: 0 0 12px;
+    font-size: 20px;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    color: var(--text-primary);
   }
   .marker-file {
     margin: 10px 0 0;
