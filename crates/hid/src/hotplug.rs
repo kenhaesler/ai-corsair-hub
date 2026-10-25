@@ -12,6 +12,7 @@
 use std::collections::HashSet;
 #[cfg(not(windows))]
 use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
 
 /// Result of the injected readiness check for a newly arrived device path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +54,7 @@ const DBT_DEVICEREMOVECOMPLETE: u32 = 0x8004;
 const DBT_DEVTYP_DEVICEINTERFACE: u32 = 5;
 const DBT_DEVTYP_HANDLE: u32 = 6;
 const PBT_APMSUSPEND: u32 = 0x4;
+const PBT_APMRESUMESUSPEND: u32 = 0x7;
 const PBT_APMRESUMEAUTOMATIC: u32 = 0x12;
 const WAIT_TIMEOUT: u32 = 258;
 
@@ -90,8 +92,33 @@ pub(crate) fn classify_device_change(wparam: usize, devtype: Option<u32>) -> Dev
 pub(crate) fn classify_power(wparam: usize) -> Option<HotplugEvent> {
     match wparam as u32 {
         PBT_APMSUSPEND => Some(HotplugEvent::Suspending),
-        PBT_APMRESUMEAUTOMATIC => Some(HotplugEvent::Resumed),
+        PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => Some(HotplugEvent::Resumed),
         _ => None,
+    }
+}
+
+/// A resume is reported by both `WM_POWERBROADCAST` and the suspend/resume notification
+/// registration, and by both resume codes after a user wake; collapse them into one event.
+const RESUME_DEDUPE_WINDOW: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Default)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) struct ResumeDedupe {
+    last: Option<Instant>,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl ResumeDedupe {
+    /// `true` if a resume seen at `now` should be reported, `false` if it repeats one
+    /// reported within the last 5 seconds.
+    pub(crate) fn should_emit(&mut self, now: Instant) -> bool {
+        if let Some(last) = self.last
+            && now.saturating_duration_since(last) < RESUME_DEDUPE_WINDOW
+        {
+            return false;
+        }
+        self.last = Some(now);
+        true
     }
 }
 
@@ -196,6 +223,9 @@ mod win {
         CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::Power::{
+        RegisterSuspendResumeNotification, UnregisterSuspendResumeNotification,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
         CREATESTRUCTW, CreateWindowExW, DBT_DEVTYP_DEVICEINTERFACE, DBT_DEVTYP_HANDLE,
         DEV_BROADCAST_DEVICEINTERFACE_W, DEV_BROADCAST_HANDLE, DEV_BROADCAST_HDR,
@@ -264,6 +294,7 @@ mod win {
     struct WndContext {
         shared: Arc<Shared>,
         watches: Arc<Watches>,
+        resume: Mutex<ResumeDedupe>,
     }
 
     pub struct HotplugWatcher {
@@ -519,6 +550,7 @@ mod win {
         let ctx = WndContext {
             shared: Arc::clone(&shared),
             watches: Arc::clone(&watches),
+            resume: Mutex::new(ResumeDedupe::default()),
         };
 
         // SAFETY: top-level (parentless), never shown window; `ctx` outlives it and is only
@@ -570,6 +602,18 @@ mod win {
             }
         }
 
+        // Complements WM_POWERBROADCAST; failure only costs the redundant resume signal.
+        // SAFETY: `hwnd` is the live window created above on this thread.
+        let power_notify = match unsafe {
+            RegisterSuspendResumeNotification(HANDLE(hwnd.0), DEVICE_NOTIFY_WINDOW_HANDLE)
+        } {
+            Ok(n) => Some(n),
+            Err(e) => {
+                warn!(error = %e, "RegisterSuspendResumeNotification failed");
+                None
+            }
+        };
+
         watches.hwnd.store(hwnd.0 as isize, Ordering::SeqCst);
 
         let _ = ready.send(Ok((SendHwnd(hwnd.0 as isize), Arc::clone(&watches))));
@@ -584,6 +628,10 @@ mod win {
         }
 
         // The window is gone (WM_NCDESTROY cleared GWLP_USERDATA) before `ctx` drops.
+        if let Some(n) = power_notify {
+            // SAFETY: registered above, unregistered once.
+            let _ = unsafe { UnregisterSuspendResumeNotification(n) };
+        }
         for n in interface_notifies {
             // SAFETY: registered above, unregistered once (idempotent failure is ignored).
             let _ = unsafe { UnregisterDeviceNotification(HDEVNOTIFY(n.0)) };
@@ -664,7 +712,10 @@ mod win {
                 Some(LRESULT(1))
             }
             WM_POWERBROADCAST => {
-                if let Some(event) = classify_power(wparam.0) {
+                if let Some(event) = classify_power(wparam.0)
+                    && (event != HotplugEvent::Resumed
+                        || lock(&ctx.resume).should_emit(Instant::now()))
+                {
                     ctx.shared.send(event);
                 }
                 Some(LRESULT(1))
@@ -736,18 +787,27 @@ mod win {
     }
 
     fn handle_notify(header: *const DEV_BROADCAST_HDR) -> Option<*mut core::ffi::c_void> {
-        // SAFETY: classify_device_change confirmed a DBT_DEVTYP_HANDLE broadcast; verify the
-        // size covers dbch_hdevnotify before reading it (packed layout, so read unaligned).
-        unsafe {
-            let size = (*header).dbch_size as usize;
-            let end = std::mem::offset_of!(DEV_BROADCAST_HANDLE, dbch_hdevnotify)
-                + size_of::<HDEVNOTIFY>();
-            if size < end {
-                return None;
-            }
-            let h = (header as *const DEV_BROADCAST_HANDLE).read_unaligned();
-            Some(h.dbch_hdevnotify.0)
+        // SAFETY: classify_device_change confirmed a DBT_DEVTYP_HANDLE broadcast of
+        // `dbch_size` bytes (>= the header, validated by the caller).
+        unsafe { read_handle_notify(header as *const u8, (*header).dbch_size as usize) }
+    }
+
+    /// Read only `dbch_hdevnotify` from a `DEV_BROADCAST_HANDLE` of `size` bytes at `base`,
+    /// provided `size` covers it (packed layout, so read unaligned).
+    ///
+    /// # Safety
+    /// `base` must be valid for reads of `size` bytes.
+    pub(super) unsafe fn read_handle_notify(
+        base: *const u8,
+        size: usize,
+    ) -> Option<*mut core::ffi::c_void> {
+        let offset = std::mem::offset_of!(DEV_BROADCAST_HANDLE, dbch_hdevnotify);
+        if size < offset + size_of::<HDEVNOTIFY>() {
+            return None;
         }
+        // SAFETY: the check above keeps the field inside the `size` readable bytes.
+        let n = unsafe { (base.add(offset) as *const HDEVNOTIFY).read_unaligned() };
+        Some(n.0)
     }
 
     fn token_for(
@@ -927,9 +987,29 @@ mod tests {
     fn classify_power_events() {
         assert_eq!(classify_power(0x4), Some(HotplugEvent::Suspending));
         assert_eq!(classify_power(0x12), Some(HotplugEvent::Resumed));
-        // PBT_APMRESUMESUSPEND (0x7) and PBT_POWERSETTINGCHANGE (0x8013) are not reported.
-        assert_eq!(classify_power(0x7), None);
+        assert_eq!(classify_power(0x7), Some(HotplugEvent::Resumed));
+        // PBT_POWERSETTINGCHANGE (0x8013) is not reported.
         assert_eq!(classify_power(0x8013), None);
+    }
+
+    #[test]
+    fn resume_dedupe_ignores_repeat_within_window() {
+        let t0 = Instant::now();
+        let mut d = ResumeDedupe::default();
+        assert!(d.should_emit(t0));
+        assert!(!d.should_emit(t0 + Duration::from_millis(10)));
+        assert!(!d.should_emit(t0 + Duration::from_millis(4999)));
+        // The window is anchored on the reported resume, not on suppressed repeats.
+        assert!(d.should_emit(t0 + Duration::from_secs(5)));
+        assert!(!d.should_emit(t0 + Duration::from_secs(6)));
+    }
+
+    #[test]
+    fn resume_dedupe_tolerates_backwards_clock() {
+        let t0 = Instant::now() + Duration::from_secs(10);
+        let mut d = ResumeDedupe::default();
+        assert!(d.should_emit(t0));
+        assert!(!d.should_emit(t0 - Duration::from_secs(1)));
     }
 
     #[test]
@@ -981,6 +1061,27 @@ mod tests {
     fn start_fails_off_windows() {
         let (tx, _rx) = std::sync::mpsc::channel();
         assert!(HotplugWatcher::start(tx, Box::new(|_| Readiness::Ready)).is_err());
+    }
+
+    /// A broadcast too short to hold `dbch_hdevnotify` must not be read past its end.
+    #[cfg(windows)]
+    #[test]
+    fn handle_notify_respects_buffer_size() {
+        use windows::Win32::UI::WindowsAndMessaging::{DEV_BROADCAST_HANDLE, HDEVNOTIFY};
+        let offset = std::mem::offset_of!(DEV_BROADCAST_HANDLE, dbch_hdevnotify);
+        let field = size_of::<HDEVNOTIFY>();
+        let mut buf = vec![0u8; offset + field];
+        let marker = 0x1234usize;
+        buf[offset..].copy_from_slice(&marker.to_ne_bytes());
+        // SAFETY: `buf` is valid for `buf.len()` bytes; shorter sizes only read less.
+        unsafe {
+            assert_eq!(
+                win::read_handle_notify(buf.as_ptr(), buf.len()).map(|p| p as usize),
+                Some(marker)
+            );
+            assert!(win::read_handle_notify(buf.as_ptr(), buf.len() - 1).is_none());
+            assert!(win::read_handle_notify(buf.as_ptr(), 0).is_none());
+        }
     }
 
     /// Creates a real (hidden) window; run explicitly with `-- --ignored`.
