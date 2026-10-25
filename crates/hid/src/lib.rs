@@ -1,5 +1,6 @@
 pub mod corsair_psu;
 pub mod discovery;
+pub mod hotplug;
 pub mod icue_link;
 
 pub use corsair_psu::{CorsairPsu, PsuStatus, RailReading};
