@@ -120,7 +120,7 @@
 
   function scheduleRefresh() {
     clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(refresh, REFRESH_DEBOUNCE_MS);
+    refreshTimer = setTimeout(() => refresh({ silent: true }), REFRESH_DEBOUNCE_MS);
   }
 
   function onTopology(e: TopologyEvent) {
@@ -192,15 +192,24 @@
   const pidHex = (d: DetectedDevice) =>
     `0x${d.pid.toString(16).toUpperCase().padStart(4, '0')}`;
 
-  async function refresh() {
-    loading = true;
-    error = null;
+  // Overlapping fetches can resolve out of order; only the newest response is applied.
+  let refreshSeq = 0;
+
+  /** `silent` (event-driven) refreshes do not set `loading` or touch `error`. */
+  async function refresh(opts: { silent?: boolean } = {}) {
+    const silent = opts.silent === true;
+    const seq = ++refreshSeq;
+    if (!silent) {
+      loading = true;
+      error = null;
+    }
     try {
-      devices = await getDevices();
+      const tree = await getDevices();
+      if (seq === refreshSeq) devices = tree;
     } catch (e) {
-      error = String(e);
+      if (!silent && seq === refreshSeq) error = String(e);
     } finally {
-      loading = false;
+      if (seq === refreshSeq) loading = false;
     }
   }
 
@@ -232,7 +241,7 @@
       <button class="identify-btn" onclick={runMarkers} disabled={diagnosticBusy}>
         {markerRunning ? `LED markers… ${markerRemaining}s` : 'LED markers'}
       </button>
-      <button onclick={refresh} disabled={loading}>
+      <button onclick={() => refresh()} disabled={loading}>
         {loading ? 'Scanning...' : 'Refresh'}
       </button>
     </div>
