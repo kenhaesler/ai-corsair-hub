@@ -122,6 +122,34 @@ impl ResumeDedupe {
     }
 }
 
+/// Whether a power event should be reported: `Suspending` and `Resumed` are each reported by
+/// both `WM_POWERBROADCAST` and the suspend/resume registration, so each has its own dedupe.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn power_event_passes(
+    event: &HotplugEvent,
+    resume: &mut ResumeDedupe,
+    suspend: &mut ResumeDedupe,
+    now: Instant,
+) -> bool {
+    match event {
+        HotplugEvent::Resumed => resume.should_emit(now),
+        HotplugEvent::Suspending => suspend.should_emit(now),
+        _ => true,
+    }
+}
+
+/// Corsair's USB vendor id as it appears in device paths (`...#vid_1b1c&pid_...`).
+const CORSAIR_VID_TOKEN: &str = "vid_1b1c";
+
+/// Whether an interface arrival/removal path belongs to a Corsair device. Both HID paths and
+/// USB device-interface paths embed the VID; anything else must not trigger a rescan.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn is_corsair_path(path: &str) -> bool {
+    path.as_bytes()
+        .windows(CORSAIR_VID_TOKEN.len())
+        .any(|w| w.eq_ignore_ascii_case(CORSAIR_VID_TOKEN.as_bytes()))
+}
+
 /// Read a NUL-terminated UTF-16 name out of a bounded buffer. Stops at the first NUL or the
 /// end of `units`, whichever comes first.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -295,6 +323,7 @@ mod win {
         shared: Arc<Shared>,
         watches: Arc<Watches>,
         resume: Mutex<ResumeDedupe>,
+        suspend: Mutex<ResumeDedupe>,
     }
 
     pub struct HotplugWatcher {
@@ -368,15 +397,20 @@ mod win {
             let wide = to_wide(path);
             let handle = open_notification_handle(&wide)
                 .with_context(|| format!("opening notification handle for {path}"))?;
+            let id = self.watches.next_token.fetch_add(1, Ordering::Relaxed);
+            // Hold the lock across register + insert: the window thread looks entries up under
+            // this lock, so a QUERYREMOVE delivered right after registration waits for the
+            // entry instead of finding none and leaving the handle open (vetoing removal).
+            let mut entries = lock(&self.watches.entries);
             let notify = match register_handle_notification(self.hwnd, handle) {
                 Ok(n) => n,
                 Err(e) => {
+                    drop(entries);
                     close_handle(handle);
                     return Err(e).context("registering handle notification");
                 }
             };
-            let id = self.watches.next_token.fetch_add(1, Ordering::Relaxed);
-            lock(&self.watches.entries).insert(
+            entries.insert(
                 id,
                 WatchEntry {
                     path: wide,
@@ -551,6 +585,7 @@ mod win {
             shared: Arc::clone(&shared),
             watches: Arc::clone(&watches),
             resume: Mutex::new(ResumeDedupe::default()),
+            suspend: Mutex::new(ResumeDedupe::default()),
         };
 
         // SAFETY: top-level (parentless), never shown window; `ctx` outlives it and is only
@@ -713,8 +748,12 @@ mod win {
             }
             WM_POWERBROADCAST => {
                 if let Some(event) = classify_power(wparam.0)
-                    && (event != HotplugEvent::Resumed
-                        || lock(&ctx.resume).should_emit(Instant::now()))
+                    && power_event_passes(
+                        &event,
+                        &mut lock(&ctx.resume),
+                        &mut lock(&ctx.suspend),
+                        Instant::now(),
+                    )
                 {
                     ctx.shared.send(event);
                 }
@@ -737,14 +776,14 @@ mod win {
             .map(|h| h.dbch_devicetype.0);
         match classify_device_change(wparam, devtype) {
             DeviceChange::InterfaceArrival => {
-                if let Some(path) = interface_path(header) {
+                if let Some(path) = interface_path(header).filter(|p| is_corsair_path(p)) {
                     debug!(%path, "device interface arrival");
                     lock(&ctx.shared.queue).push(path);
                     ctx.shared.wake.notify_one();
                 }
             }
             DeviceChange::InterfaceRemoval => {
-                if let Some(path) = interface_path(header) {
+                if let Some(path) = interface_path(header).filter(|p| is_corsair_path(p)) {
                     debug!(%path, "device interface removal");
                     lock(&ctx.shared.queue).cancel(&path);
                     ctx.shared.send(HotplugEvent::Removed { path });
@@ -990,6 +1029,32 @@ mod tests {
         assert_eq!(classify_power(0x7), Some(HotplugEvent::Resumed));
         // PBT_POWERSETTINGCHANGE (0x8013) is not reported.
         assert_eq!(classify_power(0x8013), None);
+    }
+
+    #[test]
+    fn corsair_path_filter_matches_vid_case_insensitively() {
+        assert!(is_corsair_path(
+            "//?/HID#VID_1B1C&PID_0C3F&MI_00#8&2f1a&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        ));
+        assert!(is_corsair_path("//?/usb#vid_1b1c&pid_1c1f#5&abc&0&1#{a5dcbf10}"));
+        assert!(!is_corsair_path("//?/HID#VID_046D&PID_C52B&MI_00#7&1&0&0000#{4d1e55b2}"));
+        assert!(!is_corsair_path(""));
+        assert!(!is_corsair_path("vid_1b1"));
+    }
+
+    #[test]
+    fn power_events_dedupe_suspend_like_resume() {
+        let t0 = Instant::now();
+        let mut resume = ResumeDedupe::default();
+        let mut suspend = ResumeDedupe::default();
+        let mut pass = |e: &HotplugEvent, dt: u64| {
+            power_event_passes(e, &mut resume, &mut suspend, t0 + Duration::from_millis(dt))
+        };
+        assert!(pass(&HotplugEvent::Suspending, 0));
+        assert!(!pass(&HotplugEvent::Suspending, 50), "duplicate suspend");
+        assert!(pass(&HotplugEvent::Resumed, 100), "resume has its own window");
+        assert!(!pass(&HotplugEvent::Resumed, 150));
+        assert!(pass(&HotplugEvent::Suspending, 6_000), "later suspend passes");
     }
 
     #[test]
