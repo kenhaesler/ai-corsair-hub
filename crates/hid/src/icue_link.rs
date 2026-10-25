@@ -45,7 +45,6 @@ const MAX_COLOR_PAYLOAD: usize = 508; // max bytes per USB transfer
 
 // Data types for response matching and write payload headers
 const DATA_TYPE_DEVICES: [u8; 2] = [0x21, 0x00];
-#[cfg(test)]
 const DATA_TYPE_SPEEDS: [u8; 2] = [0x25, 0x00];
 #[cfg(test)]
 const DATA_TYPE_TEMPS: [u8; 2] = [0x10, 0x00];
@@ -844,8 +843,13 @@ impl IcueLinkHub {
 
     /// Read current fan/pump RPMs.
     pub fn get_speeds(&self) -> Result<Vec<FanSpeed>> {
-        let resp = self.read_endpoint(MODE_SPEEDS)?;
-        parse_speed_entries(&resp)
+        speeds_from_reads(|| self.read_endpoint(MODE_SPEEDS), || {
+            warn!(
+                serial = self.serial.as_ref(),
+                "Speed read got wrong data type (stale mode data), retrying"
+            );
+            thread::sleep(Duration::from_millis(50));
+        })
     }
 
     /// Read temperatures from sensors on connected devices.
@@ -1088,6 +1092,35 @@ fn parse_device_entries(resp: &[u8]) -> Result<Vec<LinkDevice>> {
     Ok(devices)
 }
 
+/// Whether `resp` carries the speeds data type (`0x25 0x00`) in bytes `[4:6]`.
+fn is_speeds_response(resp: &[u8]) -> bool {
+    resp.len() > 5 && resp[4] == DATA_TYPE_SPEEDS[0] && resp[5] == DATA_TYPE_SPEEDS[1]
+}
+
+/// Read speeds, retrying once when the hub answers with stale data of another mode (as
+/// `enumerate_devices` does). `on_stale` runs before the retry. A second wrong answer is an
+/// error; the stale bytes are never decoded as RPM triplets.
+fn speeds_from_reads(
+    mut read: impl FnMut() -> Result<Vec<u8>>,
+    on_stale: impl FnOnce(),
+) -> Result<Vec<FanSpeed>> {
+    let mut resp = read()?;
+    if !is_speeds_response(&resp) {
+        on_stale();
+        resp = read()?;
+        if !is_speeds_response(&resp) {
+            bail!(
+                "Speed response has wrong data type: {:02X} {:02X} (expected {:02X} {:02X})",
+                resp.get(4).copied().unwrap_or(0),
+                resp.get(5).copied().unwrap_or(0),
+                DATA_TYPE_SPEEDS[0],
+                DATA_TYPE_SPEEDS[1]
+            );
+        }
+    }
+    parse_speed_entries(&resp)
+}
+
 fn parse_speed_entries(resp: &[u8]) -> Result<Vec<FanSpeed>> {
     // Response: [xx, xx, cmd_echo, status, data_type_hi, data_type_lo, count, entries...]
     // Entry: [status, value_lo, value_hi] — 3 bytes each
@@ -1320,6 +1353,85 @@ mod tests {
         assert_eq!(devices[1].device_type, LinkDeviceType::LxFan);
         assert_eq!(devices[1].model, 0x03);
         assert_eq!(devices[1].device_id, "FAN2");
+    }
+
+    fn speeds_resp(rpms: &[(u8, u16)]) -> Vec<u8> {
+        let mut resp = vec![0u8; 64];
+        resp[2] = 0x08;
+        resp[4] = DATA_TYPE_SPEEDS[0];
+        resp[5] = DATA_TYPE_SPEEDS[1];
+        resp[6] = rpms.len() as u8 + 1;
+        for (i, &(status, rpm)) in rpms.iter().enumerate() {
+            let o = 7 + (i + 1) * 3;
+            resp[o] = status;
+            resp[o + 1..o + 3].copy_from_slice(&rpm.to_le_bytes());
+        }
+        resp
+    }
+
+    #[test]
+    fn valid_speed_response_parses_identically_through_the_checked_path() {
+        let resp = speeds_resp(&[(0, 850), (0xFF, 1), (0, 920)]);
+        let direct = parse_speed_entries(&resp).unwrap();
+        let mut stale_calls = 0;
+        let mut reads = 0;
+        let checked = speeds_from_reads(
+            || {
+                reads += 1;
+                Ok(resp.clone())
+            },
+            || stale_calls += 1,
+        )
+        .unwrap();
+        assert_eq!(reads, 1, "valid data is read once");
+        assert_eq!(stale_calls, 0);
+        assert_eq!(checked.len(), direct.len());
+        for (a, b) in checked.iter().zip(&direct) {
+            assert_eq!((a.channel, a.rpm), (b.channel, b.rpm));
+        }
+        assert_eq!(checked.len(), 2, "invalid-status entry skipped as before");
+    }
+
+    #[test]
+    fn stale_then_valid_speed_read_retries_once() {
+        let mut stale = vec![0u8; 64];
+        stale[4] = DATA_TYPE_DEVICES[0];
+        stale[5] = DATA_TYPE_DEVICES[1];
+        stale[6] = 3;
+        let valid = speeds_resp(&[(0, 850), (0, 920)]);
+        let mut seq = vec![valid, stale]; // popped from the back: stale first
+        let mut stale_calls = 0;
+        let speeds = speeds_from_reads(|| Ok(seq.pop().unwrap()), || stale_calls += 1).unwrap();
+        assert_eq!(stale_calls, 1);
+        assert_eq!(
+            speeds.iter().map(|s| (s.channel, s.rpm)).collect::<Vec<_>>(),
+            [(1, 850), (2, 920)]
+        );
+    }
+
+    #[test]
+    fn two_wrong_speed_reads_error_without_decoding_stale_bytes() {
+        let mut stale = vec![0u8; 64];
+        stale[4] = DATA_TYPE_DEVICES[0];
+        stale[5] = DATA_TYPE_DEVICES[1];
+        stale[6] = 3;
+        let mut reads = 0;
+        let err = speeds_from_reads(
+            || {
+                reads += 1;
+                Ok(stale.clone())
+            },
+            || {},
+        )
+        .unwrap_err();
+        assert_eq!(reads, 2, "exactly one retry");
+        assert!(err.to_string().contains("wrong data type"), "{err}");
+    }
+
+    #[test]
+    fn failed_speed_read_propagates_the_read_error() {
+        let err = speeds_from_reads(|| bail!("No response from hub (timeout)"), || {}).unwrap_err();
+        assert!(err.to_string().contains("timeout"));
     }
 
     #[test]

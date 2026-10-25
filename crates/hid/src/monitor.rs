@@ -7,7 +7,8 @@
 //!
 //! Settling: any arrival or removal (re)starts a quiet timer ([`SETTLE_QUIET`]); the rescan
 //! is signalled once the bus has been quiet that long, so a burst of interface events from one
-//! plug-in costs one enumeration. A resume schedules a forced rescan [`RESUME_RESCAN_DELAY`]
+//! plug-in costs one enumeration. A device that flaps forever cannot starve the rescan: it fires
+//! at the latest [`SETTLE_MAX_WAIT`] after the first event of a burst. A resume schedules a forced rescan [`RESUME_RESCAN_DELAY`]
 //! later. If the watcher cannot start, the monitor degrades to a rescan every
 //! [`DEGRADED_POLL`].
 
@@ -23,7 +24,9 @@ pub const SETTLE_QUIET: Duration = Duration::from_millis(750);
 /// Delay between a resume and the forced rescan (devices re-enumerate after wake).
 pub const RESUME_RESCAN_DELAY: Duration = Duration::from_secs(2);
 /// Rescan period when the hotplug watcher is unavailable.
-pub const DEGRADED_POLL: Duration = Duration::from_secs(10);
+pub const DEGRADED_POLL: Duration = Duration::from_secs(60);
+/// Longest a burst of arrivals/removals may defer the rescan, however busy the bus stays.
+pub const SETTLE_MAX_WAIT: Duration = Duration::from_secs(5);
 
 /// Why a rescan was signalled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +51,9 @@ pub enum MonitorSignal {
 pub struct SettleTimer {
     quiet: Duration,
     resume_delay: Duration,
+    max_wait: Duration,
+    /// When the current burst began; `None` while idle.
+    burst_start: Option<Instant>,
     settle_deadline: Option<Instant>,
     resume_deadline: Option<Instant>,
 }
@@ -63,14 +69,18 @@ impl SettleTimer {
         Self {
             quiet,
             resume_delay,
+            max_wait: SETTLE_MAX_WAIT,
+            burst_start: None,
             settle_deadline: None,
             resume_deadline: None,
         }
     }
 
-    /// An interface arrived or was removed: (re)start the quiet timer.
+    /// An interface arrived or was removed: (re)start the quiet timer, capped at
+    /// `max_wait` after the first event of the burst.
     pub fn note_topology_event(&mut self, now: Instant) {
-        self.settle_deadline = Some(now + self.quiet);
+        let first = *self.burst_start.get_or_insert(now);
+        self.settle_deadline = Some((now + self.quiet).min(first + self.max_wait));
     }
 
     /// The system resumed: schedule the forced rescan.
@@ -90,10 +100,12 @@ impl SettleTimer {
         let resumed = self.resume_deadline.is_some_and(|d| now >= d);
         if resumed {
             self.settle_deadline = None;
+            self.burst_start = None;
             self.resume_deadline = None;
             Some(RescanReason::Resume)
         } else if settled {
             self.settle_deadline = None;
+            self.burst_start = None;
             Some(RescanReason::Settled)
         } else {
             None
@@ -313,6 +325,23 @@ mod tests {
     }
 
     #[test]
+    fn continuous_flapping_still_fires_at_max_wait() {
+        let t0 = Instant::now();
+        let mut t = timer();
+        // An event every 500 ms keeps resetting the 750 ms quiet timer.
+        for i in 0..10 {
+            t.note_topology_event(t0 + MS(i * 500));
+        }
+        // Capped at first + 5 s even though the last event was at +4500 ms.
+        assert_eq!(t.poll(t0 + MS(4999)), None);
+        assert_eq!(t.poll(t0 + MS(5000)), Some(RescanReason::Settled));
+        // The next burst starts a fresh window.
+        t.note_topology_event(t0 + MS(6000));
+        assert_eq!(t.poll(t0 + MS(6749)), None);
+        assert_eq!(t.poll(t0 + MS(6750)), Some(RescanReason::Settled));
+    }
+
+    #[test]
     fn resume_forces_rescan_after_delay() {
         let t0 = Instant::now();
         let mut t = timer();
@@ -359,6 +388,11 @@ mod tests {
         assert!(p.poll(t0 + Duration::from_secs(10)));
         assert!(!p.poll(t0 + Duration::from_secs(11)));
         assert!(p.poll(t0 + Duration::from_secs(20)));
+    }
+
+    #[test]
+    fn degraded_poll_period_is_sixty_seconds() {
+        assert_eq!(DEGRADED_POLL, Duration::from_secs(60));
     }
 
     #[test]
@@ -436,6 +470,7 @@ mod tests {
         let mut m = DeviceMonitor::degraded(t0);
         assert!(m.is_degraded());
         assert!(m.poll(t0 + Duration::from_secs(5)).is_empty());
-        assert_eq!(m.poll(t0 + Duration::from_secs(10)).len(), 1);
+        assert!(m.poll(t0 + Duration::from_secs(59)).is_empty());
+        assert_eq!(m.poll(t0 + DEGRADED_POLL).len(), 1);
     }
 }

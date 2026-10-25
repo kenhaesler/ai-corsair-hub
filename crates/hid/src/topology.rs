@@ -174,6 +174,7 @@ impl Snapshot {
     /// in `excluded`.
     pub fn from_records(records: impl IntoIterator<Item = (RawInterface, DevnodeContext)>) -> Self {
         let mut snap = Snapshot::default();
+        let mut kept = Vec::new();
 
         for (raw, ctx) in records {
             if raw.vid != CORSAIR_VID {
@@ -193,16 +194,41 @@ impl Snapshot {
                 });
                 continue;
             }
+            kept.push((raw, ctx));
+        }
 
+        // Interfaces of one composite USB device share an identity: a serial read that failed
+        // for one interface must not split the device, so any interface's serial serves the
+        // group. Interfaces without a `usb_instance_id` keep per-interface keys.
+        let mut group_serial: HashMap<&str, String> = HashMap::new();
+        for (raw, ctx) in &kept {
+            if let (Some(usb), Some(serial)) =
+                (ctx.usb_instance_id.as_deref(), normalize_serial(raw.serial.as_deref()))
+            {
+                group_serial.entry(usb).or_insert(serial);
+            }
+        }
+        let group_serial: HashMap<String, String> = group_serial
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+
+        for (raw, ctx) in kept {
             let transport = if ctx.usb_instance_id.is_some() {
                 Transport::Usb
             } else {
                 Transport::Unknown
             };
+            let own_serial = normalize_serial(raw.serial.as_deref());
+            let serial = own_serial.or_else(|| {
+                ctx.usb_instance_id
+                    .as_ref()
+                    .and_then(|usb| group_serial.get(usb).cloned())
+            });
             let key = DeviceKey::new(
                 raw.vid,
                 raw.pid,
-                raw.serial.as_deref(),
+                serial.as_deref(),
                 ctx.usb_instance_id.clone(),
             );
             let iface = DetectedInterface {
@@ -441,6 +467,36 @@ mod tests {
         let nums: Vec<_> = d.interfaces.iter().map(|i| i.interface_number).collect();
         assert_eq!(nums, [0, 1]);
         assert_eq!(d.interfaces[0].transport, Transport::Usb);
+    }
+
+    #[test]
+    fn failed_serial_read_on_one_interface_does_not_split_the_device() {
+        let full = snap(vec![
+            (raw(HUB, Some("S1"), 0, "p0"), usb_ctx("USB\\A")),
+            (raw(HUB, Some("S1"), 1, "p1"), usb_ctx("USB\\A")),
+        ]);
+        for order in [[0, 1], [1, 0]] {
+            let mut recs = vec![
+                (raw(HUB, Some("S1"), 0, "p0"), usb_ctx("USB\\A")),
+                (raw(HUB, None, 1, "p1"), usb_ctx("USB\\A")),
+            ];
+            recs = order.iter().map(|&i| recs[i].clone()).collect();
+            let s = snap(recs);
+            assert_eq!(s.devices.len(), 1, "order {order:?}");
+            let d = s.devices.values().next().unwrap();
+            assert_eq!(d.key.serial.as_deref(), Some("S1"));
+            assert_eq!(d.interfaces.len(), 2);
+            assert!(diff(&full, &s).is_empty(), "no phantom change/add");
+        }
+    }
+
+    #[test]
+    fn interfaces_without_usb_instance_keep_per_interface_keys() {
+        let s = snap(vec![
+            (raw(HUB, Some("S1"), 0, "p0"), DevnodeContext::default()),
+            (raw(HUB, None, 1, "p1"), DevnodeContext::default()),
+        ]);
+        assert_eq!(s.devices.len(), 2);
     }
 
     #[test]

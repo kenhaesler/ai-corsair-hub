@@ -114,6 +114,9 @@ pub struct LinkSubdeviceDef {
     pub model: Option<&'static str>,
     /// Only where a manifest gives a fixed LED count.
     pub default_led_count: Option<u16>,
+    /// The id's meaning here disagrees with the live decoder (`crates/hid` `LinkDeviceType`);
+    /// treat the category as unconfirmed until a capture resolves it.
+    pub decoder_conflict: bool,
 }
 
 const fn sub(
@@ -127,16 +130,40 @@ const fn sub(
         category,
         model,
         default_led_count,
+        decoder_conflict: false,
+    }
+}
+
+/// Same as [`sub`], flagged as disagreeing with the live decoder.
+const fn conflicting(
+    type_id: u16,
+    category: LinkCategory,
+    model: Option<&'static str>,
+    default_led_count: Option<u16>,
+) -> LinkSubdeviceDef {
+    LinkSubdeviceDef {
+        decoder_conflict: true,
+        ..sub(type_id, category, model, default_led_count)
     }
 }
 
 /// Look up an iCUE LINK sub-device by its full 16-bit type id (low byte = type,
 /// high byte = variant; variants are not folded onto the base type).
+///
+/// The key is iCUE's `corsairDeviceId`, NOT the single type byte the hub reports
+/// (`LinkDevice::to_byte()` / `raw_type_byte()` in `crates/hid`): passing that byte here only
+/// ever hits base ids and can never reach the `0x01xx`-`0x08xx` variants. For a hub-reported
+/// type byte use [`link_subdevice_by_type`].
 pub fn link_subdevice(type_id: u16) -> Option<&'static LinkSubdeviceDef> {
     LINK_SUBDEVICES
         .binary_search_by_key(&type_id, |d| d.type_id)
         .ok()
         .map(|i| &LINK_SUBDEVICES[i])
+}
+
+/// Look up a base sub-device id (variant byte 0) from a single hub-reported type byte.
+pub fn link_subdevice_by_type(type_byte: u8) -> Option<&'static LinkSubdeviceDef> {
+    link_subdevice(u16::from(type_byte))
 }
 
 use LinkCategory as C;
@@ -157,7 +184,7 @@ pub static LINK_SUBDEVICES: &[LinkSubdeviceDef] = &[
     // C-lifecycle-link: DeviceEmulation entry
     sub(0x0007, C::LiquidCooler, Some("iCUE LINK H100i RGB"), None),
     sub(0x0009, C::LiquidCooler, None, None),
-    sub(0x000A, C::Fan, None, None),
+    conflicting(0x000A, C::Fan, None, None),
     sub(0x000B, C::Psu, None, None),
     sub(0x000C, C::LiquidCooler, None, None),
     sub(0x000D, C::LightingNode, None, None),
@@ -426,7 +453,7 @@ pub static DEVICES: &[DeviceDef] = &[
     dev(
         0x0C06,
         "Robbins PSU (RM, low-level)",
-        DeviceFamily::HidPsu,
+        DeviceFamily::Other,
         Protocol::Legacy,
         None,
         false,
@@ -1895,10 +1922,10 @@ pub static DEVICES: &[DeviceDef] = &[
     // D-clink §2.3; B-manifests §2.2; liquidctl corsair_hid_psu; OpenLinkHub devices.go
     dev(
         0x1C1F,
-        "Corsair HX1500i",
+        "HX1500i PSU",
         DeviceFamily::HidPsu,
         Protocol::HidPsu,
-        None,
+        Some(0),
         false,
         SupportLevel::Supported,
     ),
@@ -2467,7 +2494,9 @@ mod tests {
         assert_eq!(hub.data_interface, Some(0));
         let psu = lookup(CORSAIR_VID, 0x1C1F).unwrap();
         assert_eq!(psu.family, DeviceFamily::HidPsu);
-        assert_eq!(psu.name, "Corsair HX1500i");
+        assert_eq!(psu.name, "HX1500i PSU");
+        assert_eq!(psu.data_interface, Some(0));
+        assert_eq!(lookup(CORSAIR_VID, 0x0C06).unwrap().family, DeviceFamily::Other);
     }
 
     #[test]
@@ -2549,5 +2578,25 @@ mod tests {
         );
         assert!(link_subdevice(0x0008).is_none());
         assert!(link_subdevice(0x7777).is_none());
+    }
+
+    #[test]
+    fn link_subdevice_by_type_hits_base_ids_only() {
+        assert_eq!(link_subdevice_by_type(0x01), link_subdevice(0x0001));
+        assert_eq!(link_subdevice_by_type(0x0B).unwrap().category, LinkCategory::Psu);
+        // 0x1A is a base id; its 0x081A variant is reachable only through the u16 key.
+        assert_eq!(link_subdevice_by_type(0x1A), link_subdevice(0x001A));
+        assert!(link_subdevice_by_type(0x08).is_none());
+        assert!(link_subdevice_by_type(0xFF).is_none());
+    }
+
+    #[test]
+    fn only_0x0a_conflicts_with_the_decoder() {
+        let conflicts: Vec<u16> = LINK_SUBDEVICES
+            .iter()
+            .filter(|d| d.decoder_conflict)
+            .map(|d| d.type_id)
+            .collect();
+        assert_eq!(conflicts, [0x000A]);
     }
 }
