@@ -141,6 +141,17 @@ export interface HubDeviceEntry {
   model: number;
   device_id: string;
   rpm: number | null;
+  /**
+   * LS350 strips decoded from a LINK Adapter's LED total (display only).
+   * Absent for non-adapters and for totals iCUE's table doesn't list.
+   */
+  strips?: StripSegment[] | null;
+}
+
+export interface StripSegment {
+  index: number;
+  led_start: number;
+  led_count: number;
 }
 
 export interface PsuDeviceInfo {

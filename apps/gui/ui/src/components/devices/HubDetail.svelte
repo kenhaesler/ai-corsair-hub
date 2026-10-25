@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { HubSnapshot } from '../../lib/types';
-  import { displayNameFromTree, shortHubSerial } from '../../lib/identity';
+  import { displayNameFromTree, shortHubSerial, deviceTypeLabel } from '../../lib/identity';
   import { configStore, loadConfig } from '../../lib/stores/config.svelte';
   import { renameDevice } from '../../lib/api';
 
@@ -99,7 +99,7 @@
       {#each hub.devices as device}
         <tr>
           <td class="tabular-nums">{device.channel}</td>
-          <td>{device.device_type}</td>
+          <td>{deviceTypeLabel(device)}</td>
           <td class="name-cell">
             {#if editingId === device.device_id}
               <input

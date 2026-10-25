@@ -111,3 +111,16 @@ export function isFanGroupV2(group: { device_ids?: string[] }): boolean {
 export function isDeviceRefV2(ref: { device_id?: string }): boolean {
   return typeof ref.device_id === 'string' && ref.device_id.length > 0;
 }
+
+/**
+ * Summary like "LINK Adapter · 2 strips (40 + 40 LEDs)" for adapters whose
+ * LED total decodes to strips; plain `device_type` otherwise. Segment order
+ * is the manifest's, not a verified physical order.
+ */
+export function deviceTypeLabel(dev: HubDeviceEntry): string {
+  const strips = dev.strips;
+  if (!strips || strips.length === 0) return dev.device_type;
+  const n = strips.length;
+  const counts = strips.map((s) => s.led_count).join(' + ');
+  return `${dev.device_type} · ${n} ${n === 1 ? 'strip' : 'strips'} (${counts} LEDs)`;
+}

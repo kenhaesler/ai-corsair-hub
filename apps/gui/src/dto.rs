@@ -5,7 +5,7 @@ use serde::Serialize;
 use corsair_common::catalog::{self, SupportLevel};
 use corsair_common::identity::DeviceRegistry;
 use corsair_fancontrol::CycleResult;
-use corsair_hid::icue_link::{SubdeviceDiff, SubdeviceMove};
+use corsair_hid::icue_link::{LinkDevice, LinkDeviceType, SubdeviceDiff, SubdeviceMove};
 use corsair_hid::topology::{DetectedDevice, DeviceKey, Snapshot, TopologyDiff};
 use corsair_hid::{DeviceGroup, FanSpeed, HubInfo, PsuStatus};
 use corsair_rgb::RgbFrame;
@@ -384,6 +384,18 @@ pub struct HubDeviceEntry {
     pub model: u8,
     pub device_id: String,
     pub rpm: Option<u16>,
+    /// LS350 strips decoded from a LINK Adapter's effective LED total
+    /// (display only). `None` for every other device type and for adapter
+    /// totals not in the iCUE manifest table.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strips: Option<Vec<StripSegmentDto>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StripSegmentDto {
+    pub index: u8,
+    pub led_start: u16,
+    pub led_count: u16,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -568,6 +580,29 @@ impl SystemSnapshot {
     }
 }
 
+/// Strip segments for a LINK Adapter, from the same effective LED count the
+/// control loop registers (hub 0x1d table, else the type default).
+fn adapter_strips(info: &HubInfo, dev: &LinkDevice) -> Option<Vec<StripSegmentDto>> {
+    if dev.device_type != LinkDeviceType::LinkAdapter {
+        return None;
+    }
+    let effective = info
+        .led_counts
+        .get(&dev.channel)
+        .copied()
+        .filter(|&c| c > 0)
+        .unwrap_or_else(|| dev.device_type.led_count());
+    catalog::decode_adapter_strips(effective).map(|segs| {
+        segs.into_iter()
+            .map(|s| StripSegmentDto {
+                index: s.index,
+                led_start: s.led_start,
+                led_count: s.led_count,
+            })
+            .collect()
+    })
+}
+
 impl DeviceTree {
     pub fn from_discovery(
         hub_groups: &[DeviceGroup],
@@ -591,6 +626,7 @@ impl DeviceTree {
                             model: d.model,
                             device_id: d.device_id.clone(),
                             rpm,
+                            strips: adapter_strips(info, d),
                         }
                     })
                     .collect();
@@ -629,8 +665,48 @@ impl DeviceTree {
 mod detection_tests {
     use super::*;
     use corsair_common::CORSAIR_VID;
-    use corsair_hid::icue_link::{diff_subdevices, LinkDevice, LinkDeviceType};
+    use corsair_hid::icue_link::{diff_subdevices, FirmwareVersion};
     use corsair_hid::topology::{diff, DevnodeContext, RawInterface};
+
+    fn tree_for(devices: Vec<LinkDevice>, leds: &[(u8, u16)]) -> DeviceTree {
+        let info = HubInfo {
+            firmware: FirmwareVersion { major: 1, minor: 0, patch: 0 },
+            devices,
+            led_counts: leds.iter().copied().collect(),
+        };
+        DeviceTree::from_discovery(&[], &[("HUB".to_string(), info, Vec::new())], None)
+    }
+
+    fn link_dev(channel: u8, device_type: LinkDeviceType) -> LinkDevice {
+        LinkDevice { channel, device_type, model: 0, device_id: format!("dev{channel}") }
+    }
+
+    #[test]
+    fn adapter_with_80_leds_gets_two_40_led_strips_and_fan_gets_none() {
+        let tree = tree_for(
+            vec![
+                link_dev(1, LinkDeviceType::LinkAdapter),
+                link_dev(2, LinkDeviceType::QxFan),
+            ],
+            &[(1, 80), (2, 34)],
+        );
+        let devs = &tree.hubs[0].devices;
+        let strips = devs[0].strips.as_ref().unwrap();
+        assert_eq!(
+            strips,
+            &vec![
+                StripSegmentDto { index: 0, led_start: 0, led_count: 40 },
+                StripSegmentDto { index: 1, led_start: 40, led_count: 40 },
+            ]
+        );
+        assert!(devs[1].strips.is_none());
+    }
+
+    #[test]
+    fn adapter_with_undecodable_total_gets_no_strips() {
+        let tree = tree_for(vec![link_dev(1, LinkDeviceType::LinkAdapter)], &[(1, 77)]);
+        assert!(tree.hubs[0].devices[0].strips.is_none());
+    }
 
     const HUB: u16 = 0x0C3F;
     const PSU: u16 = 0x1C1F;

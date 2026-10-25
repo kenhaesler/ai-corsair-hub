@@ -2481,6 +2481,64 @@ pub static DEVICES: &[DeviceDef] = &[
     ),
 ];
 
+/// One LS350 strip inside a LINK Adapter's LED range.
+///
+/// `led_start`/`led_count` index into the adapter's frame, contiguous in
+/// manifest table order. Physical order and direction of the segments on the
+/// strips are not yet verified on hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StripSegment {
+    pub index: u8,
+    pub led_start: u16,
+    pub led_count: u16,
+}
+
+/// Known LINK Adapter LED totals and the strip lengths they decode to.
+///
+/// Source: iCUE `link_adapter` manifest, `LedChannelConfigurationsByLedCountMap`
+/// (`docs/research/icue-device-detection/`); 40 = Strip40Leds, 49 = Strip49Leds
+/// (DefaultLedChannelTypes LSAuroraSeries).
+const ADAPTER_STRIP_TABLE: &[(u16, &[u16])] = &[
+    (40, &[40]),
+    (49, &[49]),
+    (80, &[40, 40]),
+    (89, &[40, 49]),
+    (98, &[49, 49]),
+    (120, &[40, 40, 40]),
+    (129, &[40, 40, 49]),
+    (138, &[40, 49, 49]),
+    (147, &[49, 49, 49]),
+    (160, &[40, 40, 40, 40]),
+    (169, &[40, 40, 40, 49]),
+    (178, &[40, 40, 49, 49]),
+    (187, &[40, 49, 49, 49]),
+    (196, &[49, 49, 49, 49]),
+    (200, &[40, 40, 40, 40, 40]),
+];
+
+/// Split a LINK Adapter's total LED count into its strips, as iCUE does for
+/// display. `None` for totals not in the manifest table (including 0, which
+/// the manifest maps to no strips). Display only; never used for addressing.
+pub fn decode_adapter_strips(total_leds: u16) -> Option<Vec<StripSegment>> {
+    let (_, counts) = ADAPTER_STRIP_TABLE.iter().find(|(t, _)| *t == total_leds)?;
+    let mut start = 0u16;
+    Some(
+        counts
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| {
+                let seg = StripSegment {
+                    index: i as u8,
+                    led_start: start,
+                    led_count: c,
+                };
+                start += c;
+                seg
+            })
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2598,5 +2656,47 @@ mod tests {
             .map(|d| d.type_id)
             .collect();
         assert_eq!(conflicts, [0x000A]);
+    }
+
+    #[test]
+    fn adapter_strips_decode_every_table_entry() {
+        for (total, counts) in ADAPTER_STRIP_TABLE {
+            let segs = decode_adapter_strips(*total).unwrap();
+            assert_eq!(segs.len(), counts.len());
+            let mut start = 0;
+            for (i, (seg, &c)) in segs.iter().zip(counts.iter()).enumerate() {
+                assert_eq!(seg.index as usize, i);
+                assert_eq!(seg.led_start, start);
+                assert_eq!(seg.led_count, c);
+                start += c;
+            }
+            assert_eq!(start, *total);
+        }
+        assert_eq!(ADAPTER_STRIP_TABLE.len(), 15);
+    }
+
+    #[test]
+    fn adapter_strips_80_is_two_40() {
+        let segs = decode_adapter_strips(80).unwrap();
+        assert_eq!(
+            segs,
+            vec![
+                StripSegment { index: 0, led_start: 0, led_count: 40 },
+                StripSegment { index: 1, led_start: 40, led_count: 40 },
+            ]
+        );
+    }
+
+    #[test]
+    fn adapter_strips_mixed_89() {
+        let segs = decode_adapter_strips(89).unwrap();
+        assert_eq!((segs[1].led_start, segs[1].led_count), (40, 49));
+    }
+
+    #[test]
+    fn adapter_strips_unknown_totals_are_none() {
+        for t in [0u16, 21, 34, 79, 81, 201, u16::MAX] {
+            assert!(decode_adapter_strips(t).is_none(), "{t}");
+        }
     }
 }
