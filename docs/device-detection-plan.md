@@ -48,3 +48,43 @@ the coordinator merges finished tasks into the integration branch. The main chec
 - T7 review (opus): adversarial review of the integrated diff against the invariants. Fixes are dispatched back to sonnet workers.
 - Hardware checklist for Ken: plug/unplug of a non-cooling Corsair USB device, sleep/resume, start with iCUE services
   running, and confirm unchanged fan/RGB behaviour (marker check per `hardware-baseline.md`).
+
+## Status (2026-10-25)
+
+T1–T6 are merged on `feat/device-detection`. The T7 review found 0 critical, 0 high, 1 medium and 11 low. The medium
+and the lows were fixed in T8a/T8b, except two that are deferred to PR 6/7:
+
+- L2: releasing our own hidapi handles on query-remove (`watch_path` is ready but unwired; its registration race is fixed).
+- L4: resume rescan after PnP idle. A 10 s hold-back of resume removals is in place.
+
+`cargo test --workspace` passes, there are no clippy warnings on lines this branch changed, and the frontend check
+and build are clean. What changed:
+
+- Detection is event-driven and Corsair-only (VID filter): settle (750 ms quiet, 5 s cap), then snapshot, then diff.
+- Resume, flood guard and readiness are handled.
+- A catalog of 226 USB PIDs and 39 LINK sub-device ids drives naming and support level.
+- Identity is the serial, else the composite USB instance id.
+- The LED-table cap is 24, with legacy-oracle equivalence tests.
+- `get_speeds` rejects stale-mode payloads. It retries once, and an error is only logged, as in OpenLinkHub.
+- A 30 s LINK sub-device check reports changes after 2 confirmations.
+- The GUI lists all Corsair devices and shows connect/disconnect notices.
+- All of it is diagnostics only: fan/RGB addressing, registry, recovery and config are unchanged.
+
+### Hardware acceptance checklist (run before merging to `main`)
+
+Run with only this app controlling the hardware (iCUE closed).
+
+1. **Baseline:** start the GUI. The Devices tab lists both hubs and the HX1500i as Supported, and the log shows
+   `Initial Corsair device snapshot`.
+2. **RGB/fan regression:** run the G05 LED marker diagnostic and compare it with `docs/hardware-baseline.md`. It must
+   match exactly. Fan RPMs must be plausible on every channel.
+3. **Periodic LINK check soak:** RGB on, at least 5 minutes (10 check rounds). Search the log for
+   `wrong data type` (at most an occasional retry warning) and for the `LINK sub-device` diff lines (none expected).
+   Repeat the marker check afterwards.
+4. **Hotplug, non-Corsair:** plug and unplug a USB stick or phone. No rescan should be logged (VID filter) and RGB
+   must not hitch.
+5. **Hotplug, Corsair non-cooling device (if available, e.g. a peripheral):** plug and unplug it. You should see a
+   "connected"/"disconnected" notice, a Detected-no-driver badge, and the rescan duration logged (warn if > 50 ms).
+6. **Sleep/resume:** suspend for 1 minute and resume. You should see suspending/resumed notices, no false
+   "disconnected" for the hubs, and fans and RGB recover through the existing recovery path. Repeat the marker check.
+7. **Do not** unplug a hub or the pump during these tests (see the fix plan's hardware gate).
