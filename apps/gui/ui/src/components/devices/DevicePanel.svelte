@@ -3,10 +3,12 @@
     getDevices,
     rgbIdentifyChannels,
     rgbMarkerDiagnostic,
+    onDeviceTopology,
+    onLinkSubdevicesChanged,
     type ChannelIdentity,
     type LedMarkerReport,
   } from '../../lib/api';
-  import type { DeviceTree } from '../../lib/types';
+  import type { DetectedDevice, DeviceTree, LinkSubdevicesChanged, TopologyEvent } from '../../lib/types';
   import HubDetail from './HubDetail.svelte';
   import { loadConfig, configStore } from '../../lib/stores/config.svelte';
   import { onMount } from 'svelte';
@@ -103,6 +105,93 @@
     await refresh();
   });
 
+  // Hotplug / resume notices (diagnostic only; never touches addressing or config).
+  const NOTICE_MS = 6000;
+  const REFRESH_DEBOUNCE_MS = 500;
+  let notice = $state<{ text: string; tone: 'info' | 'success' | 'warning' } | null>(null);
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function showNotice(text: string, tone: 'info' | 'success' | 'warning') {
+    notice = { text, tone };
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => (notice = null), NOTICE_MS);
+  }
+
+  function scheduleRefresh() {
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(refresh, REFRESH_DEBOUNCE_MS);
+  }
+
+  function onTopology(e: TopologyEvent) {
+    const name = e.device?.name ?? 'Corsair device';
+    switch (e.kind) {
+      case 'added':
+        showNotice(`${name} connected`, 'success');
+        break;
+      case 'removed':
+        showNotice(`${name} disconnected`, 'warning');
+        break;
+      case 'changed':
+        showNotice(`${name} changed`, 'info');
+        break;
+      case 'suspending':
+        showNotice('System suspending', 'info');
+        break;
+      case 'resumed':
+        showNotice('System resumed - re-checking devices', 'info');
+        break;
+      default:
+        return;
+    }
+    scheduleRefresh();
+  }
+
+  function plural(n: number, word: string): string {
+    return `${n} ${word}${n === 1 ? '' : 's'}`;
+  }
+
+  function onSubdevices(e: LinkSubdevicesChanged) {
+    const parts: string[] = [];
+    const added = e.added?.length ?? 0;
+    const removed = e.removed?.length ?? 0;
+    const moved = e.moved?.length ?? 0;
+    if (added) parts.push(`${plural(added, 'device')} added`);
+    if (removed) parts.push(`${plural(removed, 'device')} removed`);
+    if (moved) parts.push(`${plural(moved, 'device')} moved`);
+    if (parts.length === 0) return;
+    showNotice(`Hub ${shortSerial(e.hub_serial ?? '')}: ${parts.join(', ')}`, 'info');
+    scheduleRefresh();
+  }
+
+  onMount(() => {
+    let disposed = false;
+    const unlisten: (() => void)[] = [];
+    for (const sub of [onDeviceTopology(onTopology), onLinkSubdevicesChanged(onSubdevices)]) {
+      sub.then((fn) => (disposed ? fn() : unlisten.push(fn))).catch(() => {});
+    }
+    return () => {
+      disposed = true;
+      unlisten.forEach((fn) => fn());
+      clearTimeout(noticeTimer);
+      clearTimeout(refreshTimer);
+    };
+  });
+
+  const SUPPORT_LABEL: Record<string, string> = {
+    supported: 'Supported',
+    detect_only: 'Detected - no driver',
+    unknown: 'Unknown',
+  };
+  const STATUS_LABEL: Record<string, string> = {
+    not_ready: 'Not ready',
+    quarantined: 'Quarantined',
+    backoff: 'Retrying',
+  };
+  const supportLabel = (d: DetectedDevice) => SUPPORT_LABEL[d.support] ?? 'Unknown';
+  const pidHex = (d: DetectedDevice) =>
+    `0x${d.pid.toString(16).toUpperCase().padStart(4, '0')}`;
+
   async function refresh() {
     loading = true;
     error = null;
@@ -152,6 +241,18 @@
   {#if error}
     <div class="banner error">{error}</div>
   {/if}
+
+  <div class="notice-region" role="status" aria-live="polite">
+    {#if notice}
+      <div
+        class="banner"
+        class:success={notice.tone === 'success'}
+        class:notice-info={notice.tone === 'info'}
+      >
+        {notice.text}
+      </div>
+    {/if}
+  </div>
 
   {#if identifyMap && identifyRunning}
     <div class="identify-legend">
@@ -269,6 +370,35 @@
       </div>
     {/if}
 
+    {#if devices.detected && devices.detected.length > 0}
+      <section class="card detected" aria-labelledby="detected-title">
+        <h4 id="detected-title" class="detected-title">All Corsair devices</h4>
+        <ul class="detected-list">
+          {#each devices.detected as d (d.key)}
+            <li class="detected-row">
+              <span class="detected-name">{d.name}</span>
+              <span class="mono detected-meta">PID {pidHex(d)}</span>
+              {#if d.serial}
+                <span class="mono detected-meta">S/N {d.serial}</span>
+              {/if}
+              <span class="badge badge-{d.support}">{supportLabel(d)}</span>
+              {#if d.status !== 'ok'}
+                <span class="badge badge-status">{STATUS_LABEL[d.status] ?? d.status}</span>
+              {/if}
+              {#if d.bootloader}
+                <span class="badge badge-status">Bootloader</span>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+        {#if (devices.excluded_count ?? 0) > 0}
+          <p class="excluded-note">
+            {devices.excluded_count} interfaces filtered (Bluetooth / driver problem)
+          </p>
+        {/if}
+      </section>
+    {/if}
+
     {#if devices.hubs.length === 0 && !devices.psu}
       <div class="card empty">
         <p>No Corsair devices detected on USB bus.</p>
@@ -317,6 +447,70 @@
     text-align: center;
     padding: 40px;
     color: var(--text-secondary);
+  }
+  .notice-region .banner {
+    margin-bottom: 12px;
+  }
+  .banner.notice-info {
+    background: var(--bg-card-inset);
+    border-color: var(--accent-dim);
+    color: var(--text-secondary);
+  }
+  .detected {
+    margin-top: 12px;
+  }
+  .detected-title {
+    margin: 0 0 8px 0;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .detected-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .detected-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 10px;
+    font-size: 12px;
+  }
+  .detected-name {
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+  .detected-meta {
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+    font-size: 11px;
+  }
+  .badge {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    padding: 1px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--text-muted);
+    color: var(--text-muted);
+  }
+  .badge-supported {
+    color: var(--success);
+    border-color: var(--success);
+  }
+  .badge-detect_only,
+  .badge-status {
+    color: var(--warning);
+    border-color: var(--warning);
+  }
+  .excluded-note {
+    margin: 10px 0 0;
+    font-size: 11px;
+    color: var(--text-muted);
   }
   .header-actions {
     display: flex;
