@@ -1,6 +1,7 @@
 pub mod corsair_psu;
 pub mod devnode;
 pub mod discovery;
+pub mod hotplug;
 pub mod icue_link;
 pub mod topology;
 
