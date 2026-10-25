@@ -1,4 +1,5 @@
 pub mod atomic_write;
+pub mod catalog;
 pub mod config;
 pub mod config_migration;
 pub mod config_validation;
