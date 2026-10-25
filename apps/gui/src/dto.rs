@@ -246,6 +246,21 @@ pub fn devices_not_ready(
         .collect()
 }
 
+/// Re-check the keys in `not_ready` against `snapshot` and drop those whose interfaces are
+/// all ready now (or that left the snapshot). Cheap per-interface devnode queries only.
+pub fn recheck_not_ready(
+    snapshot: &Snapshot,
+    not_ready: &mut HashSet<DeviceKey>,
+    is_ready: impl Fn(&str) -> bool,
+) {
+    not_ready.retain(|key| {
+        snapshot
+            .devices
+            .get(key)
+            .is_some_and(|d| d.interfaces.iter().any(|i| !is_ready(&i.path)))
+    });
+}
+
 /// What one detection poll produced, to be emitted by the caller as Tauri events
 /// (`device-topology`, `link-subdevices-changed`).
 #[derive(Debug, Default)]
@@ -715,6 +730,22 @@ mod detection_tests {
             .map(|d| d.key.as_str())
             .collect();
         assert_eq!(hubs, ["1B1C:0C3F:HUB-A", "1B1C:0C3F:HUB-B"]);
+    }
+
+    #[test]
+    fn recheck_not_ready_clears_devices_that_became_ready() {
+        let snap = fixture();
+        let mut not_ready = devices_not_ready(&snap, |_| false);
+        assert_eq!(not_ready.len(), 5);
+        // DRAM becomes ready; every other device stays not ready.
+        recheck_not_ready(&snap, &mut not_ready, |p| p.contains("0006"));
+        assert_eq!(not_ready.len(), 4);
+        assert!(!not_ready.iter().any(|k| k.pid == DRAM));
+        // A key that left the snapshot is dropped too.
+        let smaller = Snapshot::from_records([rec(HUB, Some("HUB-A"), 0, None)]);
+        recheck_not_ready(&smaller, &mut not_ready, |_| false);
+        assert_eq!(not_ready.len(), 1);
+        assert!(not_ready.iter().all(|k| k.pid == HUB));
     }
 
     #[test]
