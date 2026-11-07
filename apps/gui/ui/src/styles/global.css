@@ -16,7 +16,6 @@ body {
   font-family: var(--font-sans);
   font-size: var(--fs-body);
   line-height: var(--lh-body);
-  font-feature-settings: 'cv11', 'ss01';
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   -webkit-tap-highlight-color: transparent;
@@ -28,7 +27,7 @@ body {
 
 /* ---- Browser surfaces ---- */
 ::selection {
-  background: rgba(124, 156, 255, 0.36);
+  background: rgba(195, 209, 234, 0.3);
   color: #fff;
 }
 input,
@@ -119,7 +118,7 @@ code,
 .t-large-title {
   font-size: var(--fs-large-title);
   line-height: var(--lh-large-title);
-  font-weight: 700;
+  font-weight: 300;
   letter-spacing: var(--ls-large-title);
 }
 .t-figure-xl {
@@ -177,9 +176,10 @@ code,
   font-weight: 500;
 }
 .t-caption {
+  font-family: var(--font-mono);
   font-size: var(--fs-caption);
   line-height: var(--lh-caption);
-  font-weight: 600;
+  font-weight: 500;
   letter-spacing: var(--ls-caption);
   text-transform: uppercase;
 }

@@ -1,56 +1,80 @@
 <!--
-  Ambient: Weather-style background light.
-  - Cool (idle): glacier-blue/violet light pooling from the top, behind the
-    large title, plus a dimmer violet counter-glow low on the opposite side.
-  - Warm (load): the same geometry in muted amber / ember.
-  The two sets cross-fade (equal-power) by the display's thermal state t,
-  smoothed by a very slow spring (~20 s); while scrubbing it follows the past
-  thermal state quickly. Only opacity and transform animate (compositor-only).
-  Peak alpha stays low so text keeps AA contrast (backdrop luminance < 0.03).
-  Grain overlay at 3% stops banding. Drift pauses when hidden and is off
-  under reduced motion.
+  Ambient: the one light source of the "technical luminous" world.
+  - Graphite canvas, hairline 120px columns (fading down), faint stars, grain.
+  - A soft nebula low-left (and a dim counter-glow top-right) whose colour IS
+    the system state: silver-blue at idle → violet under load → orange when hot,
+    red in emergency. Driven by display.thermalT through a slow spring, so it
+    follows the time-scrub too.
+  - A few vertical light streaks fall slowly; their speed follows the mean fan
+    duty (airflow you can see). Transform-only, paused when hidden, off under
+    reduced motion.
+  Publishes the state colour as --sc on :root for every component.
 -->
 <script lang="ts">
   import { Spring } from 'svelte/motion';
   import { display, scrub } from '../../lib/stores/scrub.svelte';
+  import { sensors } from '../../lib/stores/sensors.svelte';
   import { pageVisibility, reducedMotion, springs } from '../../lib/motion.svelte';
 
   const t = new Spring(display.thermalT, { ...springs.ambient });
-
   $effect(() => {
-    const target = display.thermalT;
+    const target = sensors.snapshot?.emergency && !scrub.active ? 1 : display.thermalT;
     const preset = scrub.active ? springs.ambientScrub : springs.ambient;
     t.stiffness = preset.stiffness;
     t.damping = preset.damping;
     t.set(target, { instant: reducedMotion.current });
   });
 
-  // Remap thermal t so idle (~45 °C) stays fully cool and sustained load
-  // (~60 °C, t ≈ .5) already reads clearly amber.
-  const smooth = (e0: number, e1: number, x: number) => {
-    const k = Math.max(0, Math.min(1, (x - e0) / (e1 - e0)));
-    return k * k * (3 - 2 * k);
-  };
-  const warm = $derived(smooth(0.2, 0.62, t.current));
-  // equal-power cross-fade so the mid state is not dimmer than either end
-  const coolA = $derived(Math.cos((warm * Math.PI) / 2));
-  const warmA = $derived(Math.sin((warm * Math.PI) / 2));
+  // silver-blue → violet → orange (OKLab mix in CSS keeps it smooth)
+  const STOPS: [number, [number, number, number]][] = [
+    [0, [169, 193, 230]],
+    [0.5, [143, 134, 255]],
+    [1, [255, 116, 72]],
+  ];
+  function mix(x: number): string {
+    const k = Math.max(0, Math.min(1, x));
+    const i = k <= 0.5 ? 0 : 1;
+    const [a, ca] = STOPS[i];
+    const [b, cb] = STOPS[i + 1];
+    const f = (k - a) / (b - a);
+    const c = ca.map((v, j) => Math.round(v + (cb[j] - v) * f));
+    return `rgb(${c.join(' ')})`;
+  }
+  const sc = $derived(sensors.snapshot?.emergency && !scrub.active ? 'rgb(255 90 69)' : mix(t.current));
+  $effect(() => {
+    document.documentElement.style.setProperty('--sc', sc);
+  });
+
+  const meanDuty = $derived.by(() => {
+    const g = display.snapshot?.group_duties ?? [];
+    return g.length ? g.reduce((a, d) => a + d.duty_percent, 0) / g.length : 30;
+  });
+  // 12 s per fall at rest, 4.5 s at full airflow
+  const fall = $derived(`${(12 - (Math.min(100, meanDuty) / 100) * 7.5).toFixed(1)}s`);
   const paused = $derived(!pageVisibility.visible || reducedMotion.current);
 
+  const STREAKS = [
+    { x: '21%', d: '-1s' },
+    { x: '43%', d: '-4.6s' },
+    { x: '50%', d: '-2.3s' },
+    { x: '58.5%', d: '-6.1s' },
+    { x: '79%', d: '-3.4s' },
+    { x: '87.5%', d: '-7.7s' },
+  ];
   const grain =
-    "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 .55 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>\")";
+    "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 .6 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>\")";
 </script>
 
-<div class="ambient" class:paused aria-hidden="true">
-  <div class="set cool" style:opacity={coolA}>
-    <div class="pool"></div>
-    <div class="counter"></div>
+<div class="ambient" class:paused aria-hidden="true" style:--fall={fall}>
+  <div class="nebula main"></div>
+  <div class="nebula counter"></div>
+  <div class="stars"></div>
+  <div class="columns"></div>
+  <div class="streaks">
+    {#each STREAKS as s (s.x)}
+      <i style:left={s.x} style:animation-delay={s.d}></i>
+    {/each}
   </div>
-  <div class="set warm" style:opacity={warmA}>
-    <div class="pool"></div>
-    <div class="counter"></div>
-  </div>
-  <div class="vignette"></div>
   <div class="grain" style:background-image={grain}></div>
 </div>
 
@@ -63,104 +87,95 @@
     background: var(--bg-0);
     overflow: hidden;
   }
-  .set {
+  .nebula {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(30px);
+    transition: background 1.2s ease;
+  }
+  .nebula.main {
+    left: -18vw;
+    bottom: -46vh;
+    width: 78vw;
+    height: 100vh;
+    opacity: 0.55;
+    background: radial-gradient(
+      closest-side,
+      color-mix(in oklab, var(--sc) 55%, transparent),
+      color-mix(in oklab, var(--sc) 14%, transparent) 55%,
+      transparent
+    );
+  }
+  .nebula.counter {
+    right: -30vw;
+    top: -60vh;
+    width: 64vw;
+    height: 90vh;
+    opacity: 0.18;
+    background: radial-gradient(closest-side, color-mix(in oklab, var(--sc) 55%, transparent), transparent);
+  }
+  .stars {
     position: absolute;
     inset: 0;
-    will-change: opacity;
+    opacity: 0.65;
+    background-image:
+      radial-gradient(1px 1px at 12% 22%, #fff8, transparent),
+      radial-gradient(1px 1px at 31% 64%, #fff5, transparent),
+      radial-gradient(1px 1px at 58% 12%, #fff6, transparent),
+      radial-gradient(1px 1px at 77% 38%, #fff4, transparent),
+      radial-gradient(1px 1px at 88% 81%, #fff6, transparent),
+      radial-gradient(1px 1px at 44% 88%, #fff4, transparent),
+      radial-gradient(1px 1px at 6% 76%, #fff5, transparent),
+      radial-gradient(1px 1px at 67% 70%, #fff3, transparent),
+      radial-gradient(1.4px 1.4px at 93% 16%, #fff7, transparent),
+      radial-gradient(1px 1px at 22% 46%, #fff3, transparent);
   }
-  .pool,
-  .counter {
+  .columns {
     position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(90deg, transparent 0 119px, rgba(255, 255, 255, 0.03) 119px 120px);
+    -webkit-mask: linear-gradient(180deg, #000, transparent 85%);
+    mask: linear-gradient(180deg, #000, transparent 85%);
+  }
+  .streaks i {
+    position: absolute;
+    top: -30%;
+    width: 1px;
+    height: 240px;
+    background: linear-gradient(180deg, transparent, color-mix(in oklab, var(--sc) 70%, #fff));
+    opacity: 0.4;
+    animation: fall var(--fall, 9s) linear infinite;
     will-change: transform;
   }
-  /* light pooling from the top, centred behind the large title */
-  .pool {
-    left: -10%;
-    right: -10%;
-    top: -38vh;
-    height: 110vh;
-    animation: drift-pool 70s ease-in-out infinite alternate;
-  }
-  /* dimmer counter-glow, low on the opposite side */
-  .counter {
-    right: -22vw;
-    bottom: -40vh;
-    width: 80vw;
-    height: 90vh;
-    animation: drift-counter 90s ease-in-out infinite alternate;
-  }
-  .cool .pool {
-    background: radial-gradient(
-      50% 50% at 42% 50%,
-      hsl(222 78% 54% / 0.34) 0%,
-      hsl(240 66% 50% / 0.2) 34%,
-      hsl(258 60% 44% / 0.08) 62%,
-      transparent 100%
-    );
-  }
-  .cool .counter {
-    background: radial-gradient(
-      50% 50% at 50% 50%,
-      hsl(258 58% 46% / 0.2) 0%,
-      hsl(250 55% 40% / 0.08) 50%,
-      transparent 100%
-    );
-  }
-  .warm .pool {
-    background: radial-gradient(
-      50% 50% at 42% 50%,
-      hsl(34 80% 50% / 0.3) 0%,
-      hsl(26 74% 45% / 0.17) 34%,
-      hsl(16 64% 40% / 0.07) 62%,
-      transparent 100%
-    );
-  }
-  .warm .counter {
-    background: radial-gradient(
-      50% 50% at 50% 50%,
-      hsl(14 70% 42% / 0.2) 0%,
-      hsl(20 60% 36% / 0.08) 50%,
-      transparent 100%
-    );
-  }
-  .paused .pool,
-  .paused .counter {
-    animation-play-state: paused;
-  }
-  @keyframes drift-pool {
-    from {
-      transform: translate3d(-3vw, 0, 0) scale(1);
-    }
-    to {
-      transform: translate3d(4vw, 2vh, 0) scale(1.06);
-    }
-  }
-  @keyframes drift-counter {
-    from {
-      transform: translate3d(0, 0, 0) scale(1.04);
-    }
-    to {
-      transform: translate3d(-6vw, -4vh, 0) scale(0.96);
-    }
-  }
-  .vignette {
+  .streaks i::after {
+    content: '';
     position: absolute;
-    inset: 0;
-    background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.02) 0%, transparent 14%),
-      radial-gradient(140% 90% at 50% 50%, transparent 55%, rgba(0, 0, 0, 0.35) 100%);
+    bottom: -2px;
+    left: -1px;
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 0 8px 2px color-mix(in oklab, var(--sc) 80%, #fff);
+  }
+  @keyframes fall {
+    to {
+      transform: translateY(140vh);
+    }
+  }
+  .paused .streaks i {
+    animation-play-state: paused;
   }
   .grain {
     position: absolute;
     inset: 0;
-    opacity: 0.03;
-    background-size: 160px 160px;
+    opacity: 0.045;
+    background-size: 200px 200px;
     mix-blend-mode: overlay;
   }
   @media (prefers-reduced-motion: reduce) {
-    .pool,
-    .counter {
-      animation: none !important;
+    .streaks {
+      display: none;
     }
   }
 </style>

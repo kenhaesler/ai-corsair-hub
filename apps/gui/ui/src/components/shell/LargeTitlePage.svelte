@@ -26,6 +26,8 @@
     /** view-transition-name for the title block */
     titleTransition?: string;
     maxWidth?: number;
+    /** replaces the large title block (the title still drives the toolbar) */
+    header?: Snippet;
     children: Snippet;
   }
   let {
@@ -36,12 +38,13 @@
     headerTrailing,
     titleTransition,
     maxWidth,
+    header,
     children,
   }: Props = $props();
 
   const tab = getContext<Tab | undefined>(PAGE_TAB) ?? 'dashboard';
   let scroller: HTMLDivElement;
-  let titleEl: HTMLHeadingElement;
+  let titleEl = $state<HTMLElement>();
   let collapse = $state(0);
 
   let lastScroll = 0;
@@ -76,6 +79,9 @@
 <div class="page-scroll" bind:this={scroller} onscroll={measure}>
   <div class="page-inner" style:max-width={maxWidth ? `${maxWidth}px` : undefined}>
     <GlobalBanners />
+    {#if header}
+      <div bind:this={titleEl}>{@render header()}</div>
+    {:else}
     <header class="lt-head">
       <div class="lt-titles" style:view-transition-name={titleTransition}>
         <h1 class="t-large-title" bind:this={titleEl}>{title}</h1>
@@ -87,6 +93,7 @@
       </div>
       {#if headerTrailing}<div class="lt-trail">{@render headerTrailing()}</div>{/if}
     </header>
+    {/if}
     {@render children()}
   </div>
 </div>

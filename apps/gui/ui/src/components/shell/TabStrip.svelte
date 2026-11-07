@@ -99,10 +99,6 @@
     gap: 2px;
     padding: 3px;
     border-radius: 11px;
-    background: rgba(255, 255, 255, 0.05);
-    box-shadow:
-      inset 0 0 0 1px var(--hair),
-      var(--hair-inner);
     isolation: isolate;
     -webkit-app-region: no-drag;
   }
@@ -111,12 +107,11 @@
     left: 0;
     top: 3px;
     bottom: 3px;
-    border-radius: 8px;
-    background: rgba(255, 255, 255, 0.13);
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.06);
     box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.09),
-      0 1px 2px rgb(0 0 0 / 0.45),
-      0 4px 12px -4px rgb(0 0 0 / 0.5);
+      inset 0 0 0 1px rgba(255, 255, 255, 0.09),
+      inset 0 -1px 0 color-mix(in oklab, var(--sc) 55%, transparent);
     z-index: -1;
     opacity: 0;
     will-change: transform, width;
@@ -129,14 +124,14 @@
     display: inline-flex;
     align-items: center;
     gap: 7px;
-    height: 30px;
-    padding: 0 13px;
+    height: 34px;
+    padding: 0 14px;
     border: 0;
     border-radius: 8px;
     background: transparent;
     color: var(--t2);
-    font-size: 13px;
-    font-weight: 500;
+    font-size: 14px;
+    font-weight: 400;
     cursor: pointer;
     white-space: nowrap;
     transition:
@@ -151,7 +146,7 @@
   }
   .tab.sel {
     color: var(--t1);
-    font-weight: 600;
+    font-weight: 500;
   }
   .tab.sel :global(svg) {
     color: var(--accent-strong);

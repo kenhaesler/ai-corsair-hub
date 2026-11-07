@@ -41,29 +41,31 @@
 </div>
 
 <style>
+  /* Floating glass navigation bar (always present; the page scrolls beneath). */
   .toolbar {
     position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
+    top: 8px;
+    left: 24px;
+    right: 24px;
     height: var(--toolbar-h);
     z-index: 20;
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
     align-items: center;
     gap: 16px;
-    padding: 0 16px;
+    padding: 0 8px 0 12px;
+    border-radius: 14px;
+    background: rgba(12, 13, 16, 0.8);
+    -webkit-backdrop-filter: var(--mat-blur);
+    backdrop-filter: var(--mat-blur);
+    box-shadow:
+      inset 0 0 0 1px var(--hair-strong),
+      inset 0 1px 0 rgba(255, 255, 255, 0.05),
+      0 12px 32px -18px rgb(0 0 0 / 0.8);
     -webkit-app-region: drag;
   }
   .mat {
-    position: absolute;
-    inset: 0;
-    background: rgba(14, 16, 22, 0.62);
-    -webkit-backdrop-filter: var(--mat-blur);
-    backdrop-filter: var(--mat-blur);
-    box-shadow: inset 0 -1px 0 var(--hair);
-    pointer-events: none;
-    z-index: -1;
+    display: none;
   }
   .lead,
   .trail {

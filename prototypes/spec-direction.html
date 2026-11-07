@@ -1,0 +1,340 @@
+<title>Corsair Hub Specification</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@200;300;400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: the real app window (1440×900) scaled to fit; graphite canvas, hairline grid, one light source whose colour is the system state.
+   Intro row (headline + reason) → spec panel with tabs (left) + control-path schematic (right) → figures row. */
+:root{
+  color-scheme:dark;
+  --canvas:#08090b; --panel:#0e1013; --panel-2:#121418; --hair:#ffffff12; --hair-2:#ffffff1f;
+  --ink:#eef0f4; --ink-2:#a7acb6; --ink-3:#6b707a;
+  --sans:"Inter Tight","Helvetica Neue",Arial,sans-serif; --mono:"Geist Mono",ui-monospace,Consolas,monospace;
+}
+@property --h{syntax:"<number>";inherits:true;initial-value:0}
+html,body{height:100%;background:#050506;color:var(--ink)}
+body{margin:0;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:16px;box-sizing:border-box;display:grid;place-items:center;font-family:var(--sans)}
+.viewport{position:relative;width:100%;max-width:1440px;aspect-ratio:1440/900;max-height:calc(100vh - 32px - 44px)}
+.app{position:absolute;left:0;top:0;width:1440px;height:900px;transform-origin:0 0;transform:scale(var(--s,1));background:var(--canvas);overflow:hidden;border-radius:14px;box-shadow:0 0 0 1px #ffffff14,0 40px 120px #000;
+  --sc:color-mix(in oklab,color-mix(in oklab,#a9c1e6,#8f86ff calc(min(var(--h),.5)*200%)),#ff7448 calc(max(var(--h) - .5,0)*200%));
+  transition:--h 2.4s ease}
+.app *{box-sizing:border-box}
+
+/* light & texture */
+.bg{position:absolute;inset:0;pointer-events:none}
+.nebula{position:absolute;left:-240px;bottom:-380px;width:1100px;height:900px;border-radius:50%;background:radial-gradient(closest-side,color-mix(in oklab,var(--sc) 55%,transparent),color-mix(in oklab,var(--sc) 14%,transparent) 55%,transparent);filter:blur(30px);opacity:.55}
+.nebula.b{left:auto;right:-420px;top:-520px;bottom:auto;width:900px;height:800px;opacity:.18}
+.gridlines{position:absolute;inset:0;background:repeating-linear-gradient(90deg,transparent 0 119px,#ffffff08 119px 120px);-webkit-mask:linear-gradient(180deg,#000,transparent 85%);mask:linear-gradient(180deg,#000,transparent 85%)}
+.stars{position:absolute;inset:0;background-image:radial-gradient(1px 1px at 12% 22%,#fff8,transparent),radial-gradient(1px 1px at 31% 64%,#fff5,transparent),radial-gradient(1px 1px at 58% 12%,#fff6,transparent),radial-gradient(1px 1px at 77% 38%,#fff4,transparent),radial-gradient(1px 1px at 88% 81%,#fff6,transparent),radial-gradient(1px 1px at 44% 88%,#fff4,transparent),radial-gradient(1px 1px at 6% 76%,#fff5,transparent),radial-gradient(1px 1px at 67% 70%,#fff3,transparent),radial-gradient(1.4px 1.4px at 93% 16%,#fff7,transparent),radial-gradient(1px 1px at 22% 46%,#fff3,transparent);opacity:.7}
+.streaks{position:absolute;inset:0}
+.streaks i{position:absolute;top:-30%;width:1px;height:240px;background:linear-gradient(180deg,transparent,color-mix(in oklab,var(--sc) 70%,#fff));opacity:.45;animation:fall var(--fs,9s) linear infinite;animation-delay:var(--d)}
+.streaks i::after{content:"";position:absolute;bottom:-2px;left:-1px;width:3px;height:3px;border-radius:50%;background:#fff;box-shadow:0 0 8px 2px color-mix(in oklab,var(--sc) 80%,#fff)}
+@keyframes fall{to{transform:translateY(1300px)}}
+.brk{position:absolute;width:150px;height:110px;border:1px solid #ffffff1c;pointer-events:none}
+.brk.tl{left:-1px;top:96px;border-width:0 0 1px 0;border-bottom-right-radius:40px;width:120px;height:40px}
+.brk.tr{right:-1px;top:96px;border-width:0 0 1px 0;border-bottom-left-radius:40px;width:120px;height:40px}
+.noise{position:absolute;inset:0;opacity:.05;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+
+/* nav */
+.nav{position:absolute;left:36px;right:36px;top:22px;height:52px;display:flex;align-items:center;gap:8px;padding:0 8px 0 18px;border-radius:14px;background:#0c0d10cc;border:1px solid var(--hair-2);backdrop-filter:blur(14px)}
+.brand{display:flex;align-items:center;gap:10px;font-weight:600;font-size:16px;letter-spacing:-.01em;margin-right:auto}
+.brand svg{width:22px;height:22px}
+.tabs-main{position:absolute;left:50%;translate:-50% 0;display:flex;gap:4px}
+.tabs-main a{font-size:14px;color:var(--ink-2);text-decoration:none;padding:8px 14px;border-radius:9px;display:flex;gap:8px;align-items:center}
+.tabs-main a svg{width:15px;height:15px;opacity:.8}
+.tabs-main a.on{color:var(--ink);background:#ffffff0d;box-shadow:inset 0 0 0 1px #ffffff12}
+.tabs-main a:hover{color:var(--ink)}
+.st-pill{display:flex;align-items:center;gap:8px;font:500 12px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2);padding:8px 12px;border-radius:9px;border:1px solid var(--hair-2)}
+.st-pill i{width:7px;height:7px;border-radius:50%;background:var(--sc);box-shadow:0 0 10px var(--sc)}
+.btn-w{display:flex;align-items:center;gap:10px;background:#f3f4f6;color:#0b0c0f;font-size:14px;font-weight:500;padding:6px 6px 6px 14px;border-radius:10px;border:0}
+.btn-w b{display:grid;place-items:center;width:26px;height:26px;border-radius:7px;background:#0b0c0f;color:#fff}
+.btn-w b svg{width:13px;height:13px}
+
+/* intro */
+.intro{position:absolute;left:60px;right:60px;top:118px;display:grid;grid-template-columns:1fr 430px;gap:60px;align-items:end}
+.eyebrow{font:500 11.5px var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3);display:flex;gap:10px;align-items:center;margin-bottom:14px}
+.eyebrow::before{content:"";width:18px;height:1px;background:var(--ink-3)}
+h1{margin:0;font-weight:300;font-size:50px;line-height:1.04;letter-spacing:-.035em;text-wrap:balance}
+h1 em{font-style:normal;font-weight:400;color:color-mix(in oklab,var(--sc) 60%,#fff)}
+.lede{margin:0;color:var(--ink-2);font-size:15px;line-height:1.55}
+.lede b{color:var(--ink);font-weight:500}
+
+/* main row */
+.main{position:absolute;left:36px;right:36px;top:262px;height:452px;display:grid;grid-template-columns:780px 1fr;gap:20px}
+.card{position:relative;background:linear-gradient(180deg,#101216e6,#0c0d10e6);border:1px solid var(--hair-2);border-radius:16px;overflow:hidden}
+.card::before{content:"";position:absolute;inset:0;background:repeating-linear-gradient(90deg,transparent 0 77px,#ffffff07 77px 78px);pointer-events:none}
+.card .hd{position:relative;display:flex;justify-content:space-between;align-items:center;height:44px;padding:0 18px;border-bottom:1px solid var(--hair);font:500 11px var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--ink-2)}
+.card .hd span:last-child{color:var(--ink-3)}
+.live{display:flex;gap:8px;align-items:center}.live i{width:6px;height:6px;border-radius:50%;background:#55e39a;box-shadow:0 0 8px #55e39a;animation:blink 2s ease-in-out infinite}
+@keyframes blink{50%{opacity:.35}}
+
+/* spec tabs */
+.spec{display:grid;grid-template-rows:auto 1fr}
+.stabs{position:relative;display:grid;grid-template-columns:repeat(4,1fr);padding:0 6px;border-bottom:1px solid var(--hair)}
+.stabs button{all:unset;cursor:pointer;font-size:13.5px;color:var(--ink-3);padding:16px 12px 14px;display:flex;gap:9px;align-items:center;transition:color .3s}
+.stabs button svg{width:15px;height:15px}
+.stabs button[aria-selected="true"]{color:var(--ink)}
+.stabs button:hover{color:var(--ink-2)}
+.stabs button:focus-visible{outline:1px solid var(--sc);outline-offset:-4px;border-radius:6px}
+.uline{position:absolute;bottom:-1px;left:0;height:1px;width:25%;background:linear-gradient(90deg,transparent,color-mix(in oklab,var(--sc) 70%,#fff),transparent);box-shadow:0 0 12px var(--sc);transition:transform .55s cubic-bezier(.3,1.25,.4,1);transform:translateX(calc(var(--ti,0)*100%))}
+.panel{position:relative;margin:16px;border:1px solid var(--hair);border-radius:12px;background:#0b0c0fcc;display:grid;grid-template-rows:44px 1fr 30px}
+.rows{display:grid;align-content:space-evenly;padding:4px 18px}
+.r{display:grid;grid-template-columns:200px 1fr 74px;align-items:center;gap:16px;min-height:46px;animation:rowin .6s cubic-bezier(.2,.8,.2,1) backwards;animation-delay:calc(var(--i)*60ms)}
+@keyframes rowin{from{opacity:.0;transform:translateY(6px)}}
+.r .nm{display:grid;gap:3px}.r .nm b{font-weight:500;font-size:14.5px;display:flex;gap:9px;align-items:center}.r .nm b svg{width:14px;height:14px;color:var(--ink-3)}
+.r .nm span{font-size:12px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.track{position:relative;height:30px;border-radius:3px;background:#ffffff06;box-shadow:inset 0 0 0 1px #ffffff0a}
+.env{position:absolute;top:3px;bottom:3px;left:calc(var(--e0)*100%);width:calc((var(--e1) - var(--e0))*100%);border:1px solid #ffffff22;border-radius:2px;background:#ffffff05;transition:left .8s,width .8s}
+.fill{position:absolute;left:0;top:0;bottom:0;width:100%;transform-origin:left;transform:scaleX(var(--v,0));border-radius:3px;
+  background:linear-gradient(90deg,color-mix(in oklab,var(--c) 18%,#15171c),color-mix(in oklab,var(--c) 75%,#1a1c22) 70%,color-mix(in oklab,var(--c) 40%,#fff));
+  transition:transform 1s cubic-bezier(.2,.8,.2,1),background .9s;box-shadow:0 0 22px -4px color-mix(in oklab,var(--c) 70%,transparent)}
+.cap{position:absolute;top:-3px;bottom:-3px;width:2px;left:calc(var(--v,0)*100% - 1px);background:#fff;border-radius:2px;box-shadow:0 0 10px 2px color-mix(in oklab,var(--c) 85%,#fff);transition:left 1s cubic-bezier(.2,.8,.2,1)}
+.spark{position:absolute;top:50%;width:3px;height:3px;border-radius:50%;background:#fff;opacity:0;left:calc(var(--v,0)*100% - 40px);animation:spark 2.6s ease-in-out infinite;animation-delay:var(--sd)}
+@keyframes spark{0%{opacity:0;transform:translate(0,-6px)}30%{opacity:.9}100%{opacity:0;transform:translate(34px,5px)}}
+.r .val{text-align:right;font-weight:400;font-size:20px;letter-spacing:-.02em;font-variant-numeric:tabular-nums;color:color-mix(in oklab,var(--c) 45%,#fff)}
+.r .val small{font-size:12px;color:var(--ink-3);margin-left:2px}
+.axis{display:grid;grid-template-columns:200px 1fr 74px;gap:16px;padding:0 18px;align-items:start}
+.ticks{display:flex;justify-content:space-between;font:11px var(--mono);color:var(--ink-3)}
+
+/* schematic */
+.schem{display:grid;grid-template-rows:44px 1fr auto}
+.sbody{position:relative}
+.sbody>svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.wire{fill:none;stroke:#ffffff24;stroke-width:1}
+.wire.hot{stroke:color-mix(in oklab,var(--sc) 55%,transparent)}
+.pulse{offset-rotate:0deg;position:absolute;left:0;top:0;width:5px;height:5px;margin:-2.5px 0 0 -2.5px;border-radius:50%;background:#fff;box-shadow:0 0 10px 2px var(--c,var(--sc));animation:run var(--ps,2.4s) linear infinite;animation-delay:var(--pd,0s)}
+@keyframes run{from{offset-distance:0%;opacity:0}12%{opacity:1}88%{opacity:1}to{offset-distance:100%;opacity:0}}
+.port{position:absolute;width:7px;height:7px;margin:-3.5px 0 0 -3.5px;background:#0b0c0f;border:1px solid #ffffff55;border-radius:2px}
+.pill{position:absolute;height:44px;margin-top:-22px;display:flex;align-items:center;gap:10px;padding:0 12px;border-radius:11px;background:#121419;border:1px solid var(--hair-2);font-size:13.5px;box-shadow:0 8px 24px -12px #000}
+.pill .ic{display:grid;place-items:center;width:26px;height:26px;border-radius:7px;background:#ffffff0b;color:var(--c,var(--ink-2))}
+.pill .ic svg{width:14px;height:14px}
+.pill .v{margin-left:auto;font-variant-numeric:tabular-nums;color:color-mix(in oklab,var(--c) 50%,#fff);font-weight:500}
+.pill.in{left:16px;width:178px}
+.pill.out{left:358px;width:206px}
+.pill.out .tag{font:500 10.5px var(--mono);letter-spacing:.06em;text-transform:uppercase;padding:4px 7px;border-radius:6px;background:#5fd6ff14;color:#8fdcff;border:1px solid #5fd6ff2a;white-space:nowrap}
+.app[data-state="hot"] .pill.out .tag{background:#ff6a5514;color:#ff9a88;border-color:#ff6a552e}
+.hub{position:absolute;left:252px;top:50%;width:68px;height:68px;margin-top:-34px;border-radius:16px;background:#f2f3f5;display:grid;place-items:center;box-shadow:0 0 0 6px #ffffff0a,0 0 40px -6px color-mix(in oklab,var(--sc) 80%,transparent)}
+.hub svg{width:30px;height:30px;color:#0b0c0f}
+.hub::after{content:"";position:absolute;inset:-14px;border-radius:22px;border:1px solid color-mix(in oklab,var(--sc) 50%,transparent);animation:ring 3s ease-out infinite}
+@keyframes ring{from{transform:scale(.85);opacity:.9}to{transform:scale(1.15);opacity:0}}
+.hublab{position:absolute;left:226px;width:120px;text-align:center;top:calc(50% + 50px);font:500 10.5px var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3)}
+.sfoot{display:flex;justify-content:space-between;padding:12px 18px;border-top:1px solid var(--hair);font:11px var(--mono);color:var(--ink-3);letter-spacing:.04em}
+
+/* figures */
+.figs{position:absolute;left:36px;right:36px;bottom:30px;height:118px;display:grid;grid-template-columns:repeat(4,1fr) 1.35fr;border:1px solid var(--hair-2);border-radius:16px;background:#0c0d10cc;backdrop-filter:blur(10px)}
+.fig{padding:18px 22px;display:grid;align-content:space-between;border-left:1px solid var(--hair)}
+.fig:first-child{border-left:0}
+.fig .k{font:500 10.5px var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3)}
+.fig .n{font-weight:300;font-size:40px;letter-spacing:-.04em;line-height:1;font-variant-numeric:tabular-nums}
+.fig .n small{font-size:15px;color:var(--ink-3);margin-left:4px;letter-spacing:0}
+.fig .d{font-size:12.5px;color:var(--ink-2)}
+.seg{position:relative;display:grid;grid-template-columns:repeat(3,1fr);padding:4px;border-radius:11px;background:#ffffff07;border:1px solid var(--hair)}
+.seg button{all:unset;cursor:pointer;position:relative;z-index:1;text-align:center;font-size:13px;padding:9px 0;color:var(--ink-2);transition:color .3s}
+.seg button[aria-pressed="true"]{color:#0b0c0f;font-weight:500}
+.seg button:focus-visible{outline:1px solid var(--sc);border-radius:8px}
+.seg .knob{position:absolute;top:4px;bottom:4px;left:4px;width:calc((100% - 8px)/3);border-radius:8px;background:#f2f3f5;transition:transform .5s cubic-bezier(.3,1.3,.4,1);transform:translateX(calc(var(--pi,0)*100%))}
+
+/* demo control (outside the app) */
+.demo{display:flex;gap:10px;align-items:center;justify-content:center;margin-top:12px;font:12px var(--mono);color:#8a8f99}
+.demo .dseg{display:inline-flex;border:1px solid #2a2d33;border-radius:999px;padding:3px}
+.demo button{all:unset;cursor:pointer;padding:6px 12px;border-radius:999px;color:#a7acb6}
+.demo button[aria-pressed="true"]{background:#eef0f4;color:#0b0c0f}
+.demo button:focus-visible{outline:1px solid #8f86ff}
+
+@media (prefers-reduced-motion:reduce){.streaks,.spark,.pulse,.hub::after{display:none}.fill,.cap,.uline,.seg .knob,.env{transition:none}.r{animation:none}.app{transition:none}}
+</style>
+
+<div style="width:100%;max-width:1440px">
+<div class="viewport" id="vp">
+<div class="app" id="app" data-state="idle">
+  <div class="bg">
+    <div class="nebula"></div><div class="nebula b"></div><div class="stars"></div><div class="gridlines"></div>
+    <div class="streaks">
+      <i style="left:300px;--d:-1s"></i><i style="left:618px;--d:-4.5s"></i><i style="left:720px;--d:-2.2s"></i><i style="left:842px;--d:-6s"></i><i style="left:1140px;--d:-3.3s"></i><i style="left:1260px;--d:-7.5s"></i>
+    </div>
+    <div class="brk tl"></div><div class="brk tr"></div><div class="noise"></div>
+  </div>
+
+  <nav class="nav" aria-label="Main">
+    <div class="brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>Corsair Hub</div>
+    <div class="tabs-main">
+      <a href="#" class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>Overview</a>
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 12c-3-5 1-9 4-7 2 1 1 4-4 7zm0 0c5-3 9 1 7 4-1 2-4 1-7-4zm0 0c3 5-1 9-4 7-2-1-1-4 4-7zm0 0c-5 3-9-1-7-4 1-2 4-1 7 4z"/></svg>Cooling</a>
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>Lighting</a>
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>Devices</a>
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings</a>
+    </div>
+    <span class="st-pill"><i></i><span data-k="word">Calm</span></span>
+    <button class="btn-w" type="button">History<b><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M7 17 17 7M9 7h8v8"/></svg></b></button>
+  </nav>
+
+  <section class="intro">
+    <div><div class="eyebrow">System overview · live</div><h1 id="h1">Everything is <em>quiet and cool</em>.</h1></div>
+    <p class="lede" id="lede"></p>
+  </section>
+
+  <section class="main">
+    <div class="card spec">
+      <div class="stabs" role="tablist" aria-label="Readings">
+        <button role="tab" id="t-temps" aria-selected="true" data-t="temps"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 14.8V4a2 2 0 0 0-4 0v10.8a4 4 0 1 0 4 0z"/></svg>Temperatures</button>
+        <button role="tab" id="t-fans" aria-selected="false" data-t="fans"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 12c-3-5 1-9 4-7 2 1 1 4-4 7zm0 0c5-3 9 1 7 4-1 2-4 1-7-4zm0 0c3 5-1 9-4 7-2-1-1-4 4-7zm0 0c-5 3-9-1-7-4 1-2 4-1 7 4z"/></svg>Fan groups</button>
+        <button role="tab" id="t-power" aria-selected="false" data-t="power"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>Power</button>
+        <button role="tab" id="t-rpm" aria-selected="false" data-t="rpm"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>Speeds</button>
+        <i class="uline" id="uline"></i>
+      </div>
+      <div class="panel">
+        <div class="hd"><span id="phd">Temperatures</span><span>Operating envelope</span></div>
+        <div class="rows" id="rows" role="tabpanel"></div>
+        <div class="axis"><span></span><div class="ticks" id="ticks"></div><span></span></div>
+      </div>
+    </div>
+
+    <div class="card schem">
+      <div class="hd"><span>Control path</span><span class="live"><i></i>Live · 1 Hz</span></div>
+      <div class="sbody" id="sbody"></div>
+      <div class="sfoot"><span>3 sources → weighted mix → 4 groups</span><span id="sfoot">Preset · Silent</span></div>
+    </div>
+  </section>
+
+  <section class="figs">
+    <div class="fig" data-c="pwr"><span class="k">Power draw</span><span class="n"><span data-k="pwr">153</span><small>W</small></span><span class="d">HX1500i · <span data-k="eff">89</span>% efficient</span></div>
+    <div class="fig" data-c="avg"><span class="k">Average fan</span><span class="n"><span data-k="avg">30</span><small>%</small></span><span class="d">10 fans · ~<span data-k="rr">903</span> rpm</span></div>
+    <div class="fig" data-c="cpu"><span class="k">Hottest part</span><span class="n"><span data-k="hot">47.3</span><small>°C</small></span><span class="d" data-k="hotn">CPU package</span></div>
+    <div class="fig" data-c="head"><span class="k">Headroom</span><span class="n"><span data-k="head">37.7</span><small>°C</small></span><span class="d">to the 85 °C limit</span></div>
+    <div class="fig"><span class="k">Fan preset</span>
+      <div class="seg" role="group" aria-label="Fan preset" id="seg"><i class="knob"></i>
+        <button type="button" id="p-silent" aria-pressed="true" data-p="0">Silent</button><button type="button" id="p-bal" aria-pressed="false" data-p="1">Balanced</button><button type="button" id="p-perf" aria-pressed="false" data-p="2">Performance</button></div>
+      <span class="d" id="pdesc">Quiet default, relies on radiator mass</span></div>
+  </section>
+</div>
+</div>
+<div class="demo"><span>Demo load</span><span class="dseg"><button type="button" id="d-idle" data-s="idle" aria-pressed="true">Idle</button><button type="button" id="d-gaming" data-s="gaming" aria-pressed="false">Gaming</button><button type="button" id="d-hot" data-s="hot" aria-pressed="false">Overheat</button></span><button type="button" id="d-cycle">Play cycle</button></div>
+</div>
+
+<script>
+const IC={
+ cpu:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M19 9h3M19 15h3M2 9h3M2 15h3"/></svg>',
+ gpu:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="9" cy="12" r="3"/><circle cx="16" cy="12" r="2"/><path d="M6 18v3M10 18v3"/></svg>',
+ psu:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>',
+ temp:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 14.8V4a2 2 0 0 0-4 0v10.8a4 4 0 1 0 4 0z"/></svg>',
+ fan:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 12c-3-5 1-9 4-7 2 1 1 4-4 7zm0 0c5-3 9 1 7 4-1 2-4 1-7-4zm0 0c3 5-1 9-4 7-2-1-1-4 4-7zm0 0c-5 3-9-1-7-4 1-2 4-1 7 4z"/></svg>',
+ drop:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2.7s-6 6.6-6 11.3a6 6 0 0 0 12 0c0-4.7-6-11.3-6-11.3z"/></svg>',
+ hub:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v4M12 16.5v4M3.5 12h4M16.5 12h4"/><circle cx="12" cy="12" r="2.6" fill="currentColor"/></svg>'
+};
+const STATES={
+ idle:{h:0,cpu:47.3,gpu:36.6,vrm:40.2,case:35.0,r:30,c:27,e:25,p:70,rr:903,cr:822,er:788,pr:3433,pwr:153,load:4,util:1,eff:89,
+  word:'Calm',h1:'Everything is <em>quiet and cool</em>.',lede:'Fans idle on their curves. <b>Radiator Fans</b> follow a 63/37 mix of GPU and CPU, the <b>Exhaust</b> PID holds the CPU under 55°, and the pump runs at a fixed 70%.',
+  rw:'63% GPU + 37% CPU → 40.6°',cw:'60% CPU + 40% GPU → 43.0°',ew:'Holding CPU at 55° · at its 25% floor',pw:'Fixed duty',tags:['On curve','On curve','Holding','Fixed']},
+ gaming:{h:.5,cpu:71.8,gpu:68.4,vrm:52.1,case:41.3,r:58,c:52,e:61,p:70,rr:1540,cr:1390,er:1610,pr:3433,pwr:642,load:38,util:97,eff:93,
+  word:'Busy',h1:'Working hard, <em>holding steady</em>.',lede:'The GPU is under full load. <b>Radiator Fans</b> are climbing their curve with it, the <b>Exhaust</b> PID is pushing to 61% to keep the CPU near 55°, and nothing is near its limit.',
+  rw:'63% GPU + 37% CPU → 69.6°',cw:'60% CPU + 40% GPU → 70.4°',ew:'Holding CPU at 55° · pushing to 61%',pw:'Fixed duty',tags:['Climbing','On curve','Pushing','Fixed']},
+ hot:{h:1,cpu:89.6,gpu:83.1,vrm:66.0,case:48.7,r:100,c:100,e:100,p:100,rr:1890,cr:1850,er:1960,pr:4800,pwr:1012,load:100,util:100,eff:91,
+  word:'Hot',h1:'The CPU is <em>running hot</em>.',lede:'<b>Emergency override.</b> The CPU passed 85°, so every fan group and the pump run at 100% until it drops back below 80°. Your curves resume automatically.',
+  rw:'Emergency override',cw:'Emergency override',ew:'Emergency override',pw:'Emergency override',tags:['Override','Override','Override','Override']}
+};
+const PRESETS=[{n:'Silent',d:'Quiet default, relies on radiator mass',env:[.2,.6]},{n:'Balanced',d:'Daily driver: quiet at idle, cool under load',env:[.25,.75]},{n:'Performance',d:'Cooling first, fans ramp early',env:[.4,1]}];
+const NUM=['cpu','gpu','vrm','case','r','c','e','p','rr','cr','er','pr','pwr','load','util','eff'];
+const NOISE={cpu:.6,gpu:.45,vrm:.25,case:.2,r:.7,c:.7,e:1,p:0,rr:10,cr:10,er:12,pr:6,pwr:8,load:2,util:1,eff:.2};
+let target=STATES.idle,stateName='idle',preset=0,tab='temps';
+const cur={},shown={};NUM.forEach(k=>{cur[k]=target[k];shown[k]=target[k]});
+
+function heat(t){const st=[[38,[127,180,255]],[60,[143,224,200]],[72,[255,195,107]],[86,[255,106,85]]];
+  if(t<=st[0][0])return st[0][1];for(let i=1;i<st.length;i++){if(t<=st[i][0]){const[a,ca]=st[i-1],[b,cb]=st[i],f=(t-a)/(b-a);return ca.map((x,j)=>Math.round(x+(cb[j]-x)*f))}}return st[st.length-1][1]}
+const rgb=a=>`rgb(${a.join(',')})`;
+const derived=()=>{const avg=(cur.r+cur.c+cur.e)/3;const hotK=cur.cpu>=cur.gpu?'cpu':'gpu';return{avg,hot:Math.max(cur.cpu,cur.gpu),hotn:hotK==='cpu'?'CPU package':'GPU core',head:Math.max(0,85-Math.max(cur.cpu,cur.gpu))}};
+function colorFor(k){const d=derived();if(['cpu','gpu','vrm','case'].includes(k))return rgb(heat(cur[k]));if('rcep'.includes(k)&&k.length===1)return rgb(heat(35+cur[k]*.55));
+  if(['rr','cr','er','pr'].includes(k))return rgb(heat(35+cur[k[0]]*.55));if(k==='pwr'||k==='12v'||k==='5v'||k==='3v')return rgb(heat(35+cur.pwr/1500*60));if(k==='avg')return rgb(heat(35+d.avg*.55));if(k==='head')return rgb(heat(90-d.head));return '#a9c1e6'}
+
+/* spec tabs */
+const TABS={
+ temps:{label:'Temperatures',ticks:[20,30,40,50,60,70,80,90,100],min:20,max:100,unit:'°',dec:1,rows:()=>[
+   {k:'cpu',ic:'cpu',n:'CPU package',s:()=>`Load ${Math.round(cur.load)}% · Tctl`,env:[30,75]},
+   {k:'gpu',ic:'gpu',n:'GPU core',s:()=>`Utilisation ${Math.round(cur.util)}% · NVML`,env:[30,75]},
+   {k:'vrm',ic:'psu',n:'PSU VRM',s:()=>'HX1500i · internal',env:[30,70]},
+   {k:'case',ic:'temp',n:'PSU case',s:()=>'HX1500i · ambient side',env:[25,55]}]},
+ fans:{label:'Fan groups',ticks:[0,10,20,30,40,50,60,70,80,90,100],min:0,max:100,unit:'%',dec:0,rows:()=>[
+   {k:'r',ic:'fan',n:'Radiator Fans',s:()=>target.rw,env:null},{k:'c',ic:'fan',n:'Case Fans',s:()=>target.cw,env:null},
+   {k:'e',ic:'fan',n:'Exhaust',s:()=>target.ew,env:null},{k:'p',ic:'drop',n:'Pump',s:()=>target.pw,env:[65,75]}]},
+ power:{label:'Power',ticks:[0,150,300,450,600,750,900,1050,1200,1350,1500],min:0,max:1500,unit:' W',dec:0,rows:()=>[
+   {k:'pwr',ic:'psu',n:'Total input',s:()=>`Efficiency ${Math.round(cur.eff)}% · sweet spot 20–80%`,env:[300,1200]},
+   {k:'12v',ic:'psu',n:'12 V rail',s:()=>`${(12.05+(Math.random()-.5)*.04).toFixed(2)} V`,env:null},
+   {k:'5v',ic:'psu',n:'5 V rail',s:()=>'5.02 V',env:null},{k:'3v',ic:'psu',n:'3.3 V rail',s:()=>'3.31 V',env:null}]},
+ rpm:{label:'Speeds',ticks:[0,500,1000,1500,2000,2500,3000,3500,4000,4500,5000],min:0,max:5000,unit:'',dec:0,rows:()=>[
+   {k:'rr',ic:'fan',n:'Radiator Fans',s:()=>'6 × QX140 · rpm',env:[400,2000]},{k:'cr',ic:'fan',n:'Case Fans',s:()=>'3 × QX140 · rpm',env:[400,2000]},
+   {k:'er',ic:'fan',n:'Exhaust',s:()=>'1 × QX120 · rpm',env:[400,2200]},{k:'pr',ic:'drop',n:'Pump',s:()=>'D5 · rpm',env:[1800,4800]}]}
+};
+const valOf=k=>({'12v':cur.pwr*.86,'5v':12+cur.pwr*.004,'3v':5+cur.pwr*.0015})[k]??cur[k];
+const shownOf=k=>({'12v':shown.pwr*.86,'5v':12+shown.pwr*.004,'3v':5+shown.pwr*.0015})[k]??shown[k];
+const rowsEl=document.getElementById('rows');
+function renderTab(){const T=TABS[tab];document.getElementById('phd').textContent=T.label;
+  document.getElementById('ticks').innerHTML=T.ticks.map(t=>`<span>${t}</span>`).join('');
+  rowsEl.innerHTML=T.rows().map((r,i)=>`<div class="r" style="--i:${i}" data-row="${r.k}"><div class="nm"><b>${IC[r.ic]}${r.n}</b><span data-sub="${i}"></span></div>
+    <div class="track">${(()=>{const env=r.k.length===1&&'rce'.includes(r.k)&&tab==='fans'?PRESETS[preset].env.map(x=>x*100):r.env;return env?`<i class="env" style="--e0:${(env[0]-T.min)/(T.max-T.min)};--e1:${(env[1]-T.min)/(T.max-T.min)}"></i>`:''})()}<i class="fill"></i><i class="cap"></i><i class="spark" style="--sd:${i*.6}s"></i><i class="spark" style="--sd:${i*.6+1.3}s"></i></div>
+    <div class="val"><span data-rv="${r.k}"></span><small>${T.unit.trim()}</small></div></div>`).join('');
+  paintRows(true)}
+function paintRows(){const T=TABS[tab],defs=T.rows();
+  rowsEl.querySelectorAll('.r').forEach((el,i)=>{const r=defs[i],v=valOf(r.k);el.style.setProperty('--c',colorFor(r.k));
+    el.style.setProperty('--v',Math.max(.01,Math.min(1,(v-T.min)/(T.max-T.min))));el.querySelector('[data-sub]').textContent=r.s();})}
+function paintRowNums(){const T=TABS[tab];rowsEl.querySelectorAll('[data-rv]').forEach(e=>{const v=shownOf(e.dataset.rv);e.textContent=T.dec?v.toFixed(1):Math.round(v).toLocaleString('en-US')})}
+document.querySelectorAll('.stabs button').forEach((b,i)=>b.addEventListener('click',()=>{if(tab===b.dataset.t)return;tab=b.dataset.t;
+  document.querySelectorAll('.stabs button').forEach(x=>x.setAttribute('aria-selected',String(x===b)));document.getElementById('uline').style.setProperty('--ti',i);
+  rowsEl.querySelectorAll('.fill').forEach(f=>f.style.transform='scaleX(0)');renderTab();
+  rowsEl.querySelectorAll('.r').forEach(el=>{const v=el.style.getPropertyValue('--v');el.style.setProperty('--v',0);requestAnimationFrame(()=>requestAnimationFrame(()=>el.style.setProperty('--v',v)))});paintRowNums()}));
+
+/* schematic */
+const sb=document.getElementById('sbody');
+function buildSchem(){const H=sb.clientHeight||300,cy=H/2;const ins=[cy-86,cy,cy+86],outs=[cy-123,cy-41,cy+41,cy+123];
+  const IN=[['cpu','CPU','cpu'],['gpu','GPU','gpu'],['vrm','PSU','psu']],OUT=[['r','Radiator','fan'],['c','Case','fan'],['e','Exhaust','fan'],['p','Pump','drop']];
+  const pIn=ins.map(y=>`M194 ${y} H222 V${cy} H252`),pOut=outs.map(y=>`M320 ${cy} H338 V${y} H358`);
+  sb.innerHTML=`<svg aria-hidden="true">${pIn.map(d=>`<path class="wire" d="${d}"/>`).join('')}${pOut.map(d=>`<path class="wire" d="${d}"/>`).join('')}</svg>
+   ${IN.map(([k,n,ic],i)=>`<div class="pill in" data-pc="${k}" style="top:${ins[i]}px"><span class="ic">${IC[ic]}</span>${n}<span class="v"><span data-k="${k}"></span>°</span></div><i class="port" style="left:194px;top:${ins[i]}px"></i>`).join('')}
+   ${OUT.map(([k,n,ic],i)=>`<div class="pill out" data-pc="${k}" style="top:${outs[i]}px"><span class="ic">${IC[ic]}</span>${n}<span class="v"><span data-k="${k}"></span>%</span><span class="tag" data-tag="${i}"></span></div><i class="port" style="left:358px;top:${outs[i]}px"></i>`).join('')}
+   <div class="hub">${IC.hub}</div><div class="hublab">Control loop</div>
+   ${pIn.map((d,i)=>`<i class="pulse" data-pin="${IN[i][0]}" style="offset-path:path('${d}');--pd:${-i*.7}s"></i>`).join('')}
+   ${pOut.map((d,i)=>`<i class="pulse" data-pout="${OUT[i][0]}" style="offset-path:path('${d}');--pd:${-i*.5}s"></i>`).join('')}`}
+buildSchem();
+
+/* engine */
+const app=document.getElementById('app');
+const fmt=(k,v)=>{if(['cpu','gpu','vrm','case','hot','head'].includes(k))return v.toFixed(1);if(typeof v==='number')return Math.round(v).toLocaleString('en-US');return v};
+let raf;const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
+function paint(){
+  app.style.setProperty('--h',target.h);
+  document.querySelectorAll('[data-pc]').forEach(e=>e.style.setProperty('--c',colorFor(e.dataset.pc)));
+  document.querySelectorAll('.fig[data-c]').forEach(e=>e.style.setProperty('--c',colorFor(e.dataset.c)));
+  document.querySelectorAll('[data-pin]').forEach(e=>{e.style.setProperty('--c',colorFor(e.dataset.pin));e.style.setProperty('--ps',(3.4-(target.h)*1.6)+'s')});
+  document.querySelectorAll('[data-pout]').forEach(e=>{const k=e.dataset.pout;e.style.setProperty('--c',colorFor(k));e.style.setProperty('--ps',(3.6-cur[k]/100*2.4).toFixed(2)+'s')});
+  document.querySelectorAll('[data-tag]').forEach(e=>e.textContent=target.tags[+e.dataset.tag]);
+  const avgDuty=(cur.r+cur.c+cur.e)/3;document.querySelectorAll('.streaks i').forEach(s=>s.style.setProperty('--fs',(12-avgDuty/100*7).toFixed(1)+'s'));
+  paintRows();
+}
+function tick(){const from={...shown};
+  NUM.forEach(k=>{cur[k]=cur[k]+(target[k]-cur[k])*.3+(Math.random()-.5)*NOISE[k]*2});
+  paint();const t0=performance.now();cancelAnimationFrame(raf);
+  const step=t=>{const p=reduce?1:Math.min(1,(t-t0)/650),e=1-Math.pow(1-p,3);NUM.forEach(k=>shown[k]=from[k]+(cur[k]-from[k])*e);
+    const d={avg:(shown.r+shown.c+shown.e)/3,hot:Math.max(shown.cpu,shown.gpu),head:Math.max(0,85-Math.max(shown.cpu,shown.gpu)),hotn:shown.cpu>=shown.gpu?'CPU package':'GPU core'};
+    document.querySelectorAll('[data-k]').forEach(n=>{const k=n.dataset.k;const v=k in d?d[k]:(NUM.includes(k)?shown[k]:target[k]);n.textContent=fmt(k,v)});
+    paintRowNums();if(p<1)raf=requestAnimationFrame(step)};raf=requestAnimationFrame(step)}
+function setState(n){stateName=n;target=STATES[n];app.dataset.state=n;
+  document.getElementById('h1').innerHTML=target.h1;document.getElementById('lede').innerHTML=target.lede;
+  document.querySelectorAll('.demo [data-s]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.s===n)));
+  if(n==='hot')setPreset(2,true);else if(n==='gaming')setPreset(1,true);else setPreset(0,true);tick()}
+function setPreset(i,quiet){preset=i;document.getElementById('seg').style.setProperty('--pi',i);
+  document.querySelectorAll('.seg button').forEach(b=>b.setAttribute('aria-pressed',String(+b.dataset.p===i)));
+  document.getElementById('pdesc').textContent=PRESETS[i].d;document.getElementById('sfoot').textContent='Preset · '+PRESETS[i].n;
+  if(tab==='fans')renderTab();}
+document.querySelectorAll('.seg button').forEach(b=>b.addEventListener('click',()=>setPreset(+b.dataset.p)));
+document.querySelectorAll('.demo [data-s]').forEach(b=>b.addEventListener('click',()=>{stopCycle();setState(b.dataset.s)}));
+let cyc=null;const cb=document.getElementById('d-cycle');
+function stopCycle(){if(cyc){clearInterval(cyc);cyc=null;cb.textContent='Play cycle'}}
+cb.addEventListener('click',()=>{if(cyc){stopCycle();return}const s=['idle','gaming','hot'];let i=0;setState(s[0]);cb.textContent='Stop cycle';cyc=setInterval(()=>{i=(i+1)%3;setState(s[i])},7000)});
+document.addEventListener('visibilitychange',()=>{if(document.hidden)stopCycle()});
+setInterval(()=>{if(!document.hidden)tick()},1000);
+
+/* fit the 1440×900 window to the page */
+const vp=document.getElementById('vp');
+const fit=()=>{const r=vp.getBoundingClientRect();const s=Math.min(r.width/1440,r.height/900);app.style.setProperty('--s',s);app.style.left=((r.width-1440*s)/2)+'px';app.style.top=((r.height-900*s)/2)+'px'};
+new ResizeObserver(fit).observe(vp);fit();
+renderTab();setState('idle');
+</script>

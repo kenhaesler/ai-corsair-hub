@@ -1,40 +1,46 @@
 /*
- * Health design tokens. Source of truth: prototypes/health/DESIGN.md.
+ * "Technical luminous" tokens (approved 2026-11-07, see prototypes/spec-direction.html).
  * Dark-first. Every value here traces to the DESIGN.md tables.
  */
 :root {
   color-scheme: dark;
 
   /* ---- Canvas & materials ---- */
-  --bg-0: #06070a;
-  --mat-1: rgba(22, 24, 30, 0.55);
+  --bg-0: #08090b;
+  --mat-1: rgba(13, 14, 18, 0.74);
   --mat-1-solid: rgba(18, 20, 26, 0.92); /* fallback when backdrop-filter unsupported */
-  --mat-blur: blur(28px) saturate(170%);
-  --mat-2: rgba(255, 255, 255, 0.045);
+  --mat-blur: blur(16px) saturate(140%);
+  --mat-2: rgba(255, 255, 255, 0.032);
   --mat-2-hover: rgba(255, 255, 255, 0.065);
   --mat-raised: rgba(255, 255, 255, 0.07);
   --mat-raised-hover: rgba(255, 255, 255, 0.1);
   --mat-pressed: rgba(255, 255, 255, 0.12);
-  --mat-sheet: rgba(26, 28, 36, 0.78);
+  --mat-sheet: rgba(14, 15, 19, 0.9);
+  --panel: linear-gradient(180deg, rgba(16, 18, 22, 0.9), rgba(12, 13, 16, 0.9));
+  --panel-grid: repeating-linear-gradient(90deg, transparent 0 77px, rgba(255, 255, 255, 0.028) 77px 78px);
 
   /* ---- Hairlines ---- */
-  --hair: rgba(255, 255, 255, 0.08);
-  --hair-strong: rgba(255, 255, 255, 0.14);
+  --hair: rgba(255, 255, 255, 0.07);
+  --hair-strong: rgba(255, 255, 255, 0.12);
   --hair-inner: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 
   /* ---- Text ---- */
-  --t1: rgba(255, 255, 255, 0.95);
-  --t2: rgba(255, 255, 255, 0.64);
-  --t3: rgba(255, 255, 255, 0.48);
+  --t1: #eef0f4;
+  --t2: #a7acb6;
+  --t3: #7b808a;
   --t4: rgba(255, 255, 255, 0.3); /* disabled / decorative only, never body copy */
 
   /* ---- Accent ---- */
-  --accent: #7c9cff;
-  --accent-strong: #93adff;
-  --accent-ink: #0b1230; /* text on accent fills */
-  --accent-soft: rgba(124, 156, 255, 0.16);
-  --accent-softer: rgba(124, 156, 255, 0.09);
-  --focus-ring: 0 0 0 3px rgba(124, 156, 255, 0.45);
+  /* Controls are white-on-graphite; colour is reserved for data and the state light. */
+  --accent: #eceff4;
+  --accent-strong: #c3d1ea;
+  --accent-ink: #0b0c0f; /* text on accent fills */
+  --accent-soft: rgba(195, 209, 234, 0.14);
+  --accent-softer: rgba(195, 209, 234, 0.08);
+  --focus-ring: 0 0 0 2px #08090b, 0 0 0 3px rgba(195, 209, 234, 0.7);
+
+  /* ---- State light (set live on :root by Ambient from the thermal state) ---- */
+  --sc: #a9c1e6;
 
   /* ---- Series (Health category colours) ---- */
   --s-cpu: #5aa9ff;
@@ -110,12 +116,12 @@
   --gutter: 48px;
 
   /* ---- Type ---- */
-  --font-sans: 'Inter Variable', 'Inter', 'Segoe UI Variable Text', system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', 'Cascadia Mono', ui-monospace, monospace;
+  --font-sans: 'Inter Tight Variable', 'Inter Tight', 'Segoe UI Variable Text', system-ui, sans-serif;
+  --font-mono: 'Geist Mono Variable', 'Geist Mono', 'Cascadia Mono', ui-monospace, monospace;
 
-  --fs-large-title: 34px;
-  --lh-large-title: 41px;
-  --ls-large-title: -0.022em;
+  --fs-large-title: 40px;
+  --lh-large-title: 44px;
+  --ls-large-title: -0.035em;
   --fs-figure-xl: 64px;
   --lh-figure-xl: 64px;
   --ls-figure-xl: -0.04em;
@@ -142,7 +148,7 @@
   --lh-subhead: 16px;
   --fs-caption: 11px;
   --lh-caption: 14px;
-  --ls-caption: 0.06em;
+  --ls-caption: 0.14em;
 
   /* ---- Motion (CSS-side; springs live in lib/motion.svelte.ts) ---- */
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
