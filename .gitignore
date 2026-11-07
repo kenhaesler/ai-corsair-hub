@@ -22,3 +22,6 @@ dist/
 # Environment
 .env
 .env.*
+
+# Browser preview mode screenshots (npm run dev:preview)
+apps/gui/ui/preview-screenshots/
