@@ -15,8 +15,8 @@
       {
         "label": "main",
         "title": "Corsair Hub",
-        "width": 1320,
-        "height": 850,
+        "width": 1440,
+        "height": 900,
         "minWidth": 1000,
         "minHeight": 700,
         "center": true,

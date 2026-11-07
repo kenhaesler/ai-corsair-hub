@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import type {
   AppConfig,
   DeviceTree,
@@ -196,3 +197,17 @@ export interface LedMarkerReport {
  */
 export const rgbMarkerDiagnostic = (durationSecs: number, mode?: MarkerMode) =>
   invoke<LedMarkerReport>('rgb_marker_diagnostic', { durationSecs, mode });
+
+// ---------------------------------------------------------------------------
+// Window controls, app info and the updater. These come from other Tauri
+// modules; they are re-exported here so screens have a single import site.
+// ---------------------------------------------------------------------------
+
+/** The frameless main window (titlebar caption buttons). */
+export const appWindow = getCurrentWindow();
+
+/** App version from tauri.conf.json. */
+export { getVersion } from '@tauri-apps/api/app';
+
+/** `check()` resolves to an Update, or null when up to date; rejects on error. */
+export { check, type Update, type DownloadEvent } from '@tauri-apps/plugin-updater';

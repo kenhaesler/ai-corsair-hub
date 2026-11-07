@@ -1,116 +1,102 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, type Component } from 'svelte';
+  import Titlebar from './components/shell/Titlebar.svelte';
+  import Toolbar from './components/shell/Toolbar.svelte';
+  import StatusBar from './components/shell/StatusBar.svelte';
+  import Ambient from './components/shell/Ambient.svelte';
+  import Toasts from './components/shell/Toasts.svelte';
+  import PageHost from './components/shell/PageHost.svelte';
+  import Dashboard from './screens/dashboard/Dashboard.svelte';
   import { initSensorListener } from './lib/stores/sensors.svelte';
-  import { initRgbListener } from './lib/stores/rgb.svelte';
-  import Titlebar from './components/layout/Titlebar.svelte';
-  import TabBar from './components/layout/TabBar.svelte';
-  import Dashboard from './components/dashboard/Dashboard.svelte';
-  import FanGroups from './components/fans/FanGroups.svelte';
-  import DevicePanel from './components/devices/DevicePanel.svelte';
-  import Lighting from './components/lighting/Lighting.svelte';
-  import Settings from './components/settings/Settings.svelte';
+  import { loadConfig } from './lib/stores/config.svelte';
+  import { ui, TABS, type Tab } from './lib/stores/ui.svelte';
+  import { scrub } from './lib/stores/scrub.svelte';
   import { getStartupConfigIssue } from './lib/api';
-  import type { StartupConfigIssue } from './lib/types';
 
-  type Tab = 'dashboard' | 'fans' | 'devices' | 'lighting' | 'settings';
-  let activeTab = $state<Tab>('dashboard');
+  // Non-dashboard screens are code-split and mounted on first visit, then
+  // kept mounted so their local state survives tab switches.
+  const loaders: Record<Exclude<Tab, 'dashboard'>, () => Promise<{ default: Component }>> = {
+    fans: () => import('./screens/fans/FanControl.svelte'),
+    devices: () => import('./screens/devices/Devices.svelte'),
+    lighting: () => import('./screens/lighting/Lighting.svelte'),
+    settings: () => import('./screens/settings/Settings.svelte'),
+  };
+  const modules = $state<Partial<Record<Tab, Component>>>({});
 
-  let configIssue = $state<StartupConfigIssue | null>(null);
-  let issueDismissed = $state(false);
+  async function ensure(tab: Tab) {
+    if (tab === 'dashboard' || modules[tab]) return;
+    const m = await loaders[tab]();
+    modules[tab] = m.default;
+  }
+  $effect(() => {
+    ensure(ui.activeTab);
+  });
 
   onMount(() => {
     initSensorListener();
-    initRgbListener();
+    loadConfig();
     getStartupConfigIssue()
-      .then((issue) => { configIssue = issue; })
+      .then((issue) => (ui.configIssue = issue))
       .catch(() => {});
+
+    // Warm the other screens' chunks once idle (no mount, just fetch).
+    const idle = (cb: () => void) =>
+      'requestIdleCallback' in window ? window.requestIdleCallback(cb, { timeout: 3000 }) : setTimeout(cb, 1500);
+    idle(() => Object.values(loaders).forEach((l) => l().catch(() => {})));
   });
+
+  function onKey(e: KeyboardEvent) {
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && !e.shiftKey && !e.altKey && /^[1-5]$/.test(e.key)) {
+      e.preventDefault();
+      ui.goTab(TABS[Number(e.key) - 1]);
+      return;
+    }
+    if (e.key === 'Escape' && !e.defaultPrevented) {
+      if (scrub.active) {
+        scrub.release();
+        return;
+      }
+      const back = ui.chrome[ui.activeTab].back;
+      if (back) {
+        e.preventDefault();
+        back.onback();
+      }
+    }
+  }
 </script>
 
-<Titlebar />
-<TabBar active={activeTab} onchange={(tab) => { activeTab = tab; }} />
+<svelte:window onkeydown={onKey} />
 
-{#if configIssue && !issueDismissed}
-  <div class="banner config-issue" role="alert">
-    <div class="issue-text">
-      <strong>Your configuration file could not be loaded.</strong>
-      {#if configIssue.preserved_path}
-        It was preserved unchanged at <code>{configIssue.preserved_path}</code>.
-      {:else}
-        It could NOT be copied to a backup{configIssue.preserve_error ? `: ${configIssue.preserve_error}` : ''}.
-      {/if}
-      Error: {configIssue.error}.
-      {#if configIssue.loaded === 'last_good'}
-        Running the last known good configuration instead.
-      {:else}
-        Running default settings instead — fan groups and RGB settings are not loaded.
-      {/if}
-      Saving any change will write a new config.toml; the preserved file remains.
-    </div>
-    <button type="button" class="issue-dismiss" onclick={() => { issueDismissed = true; }}>Dismiss</button>
+<Ambient />
+<div class="app">
+  <Titlebar />
+  <div class="stage">
+    <Toolbar />
+    <PageHost tab="dashboard"><Dashboard /></PageHost>
+    {#each ['fans', 'devices', 'lighting', 'settings'] as const as tab (tab)}
+      {@const Screen = modules[tab]}
+      <PageHost {tab}>
+        {#if Screen}<Screen />{/if}
+      </PageHost>
+    {/each}
   </div>
-{/if}
-
-<main class="content">
-  {#key activeTab}
-    <div class="page-enter">
-      {#if activeTab === 'dashboard'}
-        <Dashboard />
-      {:else if activeTab === 'fans'}
-        <FanGroups />
-      {:else if activeTab === 'devices'}
-        <DevicePanel />
-      {:else if activeTab === 'lighting'}
-        <Lighting />
-      {:else if activeTab === 'settings'}
-        <Settings />
-      {/if}
-    </div>
-  {/key}
-</main>
+  <StatusBar />
+</div>
+<Toasts />
 
 <style>
-  .config-issue {
-    display: flex;
-    align-items: flex-start;
-    gap: 12px;
-    margin: 8px 16px 0;
-    flex-shrink: 0;
+  .app {
+    position: relative;
+    z-index: 1;
+    height: 100%;
+    display: grid;
+    /* status bar row collapses when the active tab hides it */
+    grid-template-rows: var(--titlebar-h) minmax(0, 1fr) auto;
   }
-  .issue-text {
-    flex: 1;
-    min-width: 0;
-    overflow-wrap: anywhere;
-    line-height: 1.4;
-  }
-  .issue-dismiss {
-    flex-shrink: 0;
-    background: transparent;
-    color: inherit;
-    border: 1px solid currentColor;
-    border-radius: var(--radius);
-    padding: 2px 10px;
-    font: inherit;
-    cursor: pointer;
-  }
-  .issue-dismiss:hover {
-    background: rgba(251, 191, 36, 0.15);
-  }
-  .issue-dismiss:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-  }
-  .content {
-    flex: 1;
+  .stage {
+    position: relative;
+    min-height: 0;
     overflow: hidden;
-    display: flex;
-    flex-direction: column;
-  }
-  .page-enter {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    animation: fadeIn 0.15s ease;
   }
 </style>

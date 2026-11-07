@@ -1,0 +1,159 @@
+/*
+ * Health design tokens. Source of truth: prototypes/health/DESIGN.md.
+ * Dark-first. Every value here traces to the DESIGN.md tables.
+ */
+:root {
+  color-scheme: dark;
+
+  /* ---- Canvas & materials ---- */
+  --bg-0: #06070a;
+  --mat-1: rgba(22, 24, 30, 0.55);
+  --mat-1-solid: rgba(18, 20, 26, 0.92); /* fallback when backdrop-filter unsupported */
+  --mat-blur: blur(28px) saturate(170%);
+  --mat-2: rgba(255, 255, 255, 0.045);
+  --mat-2-hover: rgba(255, 255, 255, 0.065);
+  --mat-raised: rgba(255, 255, 255, 0.07);
+  --mat-raised-hover: rgba(255, 255, 255, 0.1);
+  --mat-pressed: rgba(255, 255, 255, 0.12);
+  --mat-sheet: rgba(26, 28, 36, 0.78);
+
+  /* ---- Hairlines ---- */
+  --hair: rgba(255, 255, 255, 0.08);
+  --hair-strong: rgba(255, 255, 255, 0.14);
+  --hair-inner: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+
+  /* ---- Text ---- */
+  --t1: rgba(255, 255, 255, 0.95);
+  --t2: rgba(255, 255, 255, 0.64);
+  --t3: rgba(255, 255, 255, 0.48);
+  --t4: rgba(255, 255, 255, 0.3); /* disabled / decorative only, never body copy */
+
+  /* ---- Accent ---- */
+  --accent: #7c9cff;
+  --accent-strong: #93adff;
+  --accent-ink: #0b1230; /* text on accent fills */
+  --accent-soft: rgba(124, 156, 255, 0.16);
+  --accent-softer: rgba(124, 156, 255, 0.09);
+  --focus-ring: 0 0 0 3px rgba(124, 156, 255, 0.45);
+
+  /* ---- Series (Health category colours) ---- */
+  --s-cpu: #5aa9ff;
+  --s-gpu: #34d399;
+  --s-psu-vrm: #fbbf24;
+  --s-psu-case: #fb7185;
+  --s-water: #5ee1e6;
+  --s-other: #a78bfa;
+  --s-power: #ffd60a;
+  --s-group-1: #7dd3fc;
+  --s-group-2: #c4b5fd;
+  --s-group-3: #5eead4;
+  --s-group-4: #f9a8d4;
+  --s-group-5: #fde68a;
+
+  /* ---- Thermal ramp ---- */
+  --th-cold: #5aa9ff;
+  --th-warm: #f5c451;
+  --th-hot: #ff8a3d;
+  --th-crit: #ff453a;
+
+  /* ---- Status ---- */
+  --ok: #32d74b;
+  --warn: #ff9f0a;
+  --error: #ff453a;
+  --success: #30d158;
+  --close-hover: #c42b1c;
+
+  /* tinted surfaces for banners (foreground hue at low alpha) */
+  --warn-surface: rgba(255, 159, 10, 0.12);
+  --warn-hair: rgba(255, 159, 10, 0.32);
+  --warn-text: #ffd08a;
+  --error-surface: rgba(255, 69, 58, 0.13);
+  --error-hair: rgba(255, 69, 58, 0.34);
+  --error-text: #ffb3ad;
+  --success-surface: rgba(48, 209, 88, 0.12);
+  --success-hair: rgba(48, 209, 88, 0.3);
+  --success-text: #9ff0b4;
+  --info-surface: rgba(124, 156, 255, 0.12);
+  --info-hair: rgba(124, 156, 255, 0.3);
+  --info-text: #c8d5ff;
+
+  /* ---- Radii ---- */
+  --r-chip: 6px;
+  --r-control: 10px;
+  --r-row: 14px;
+  --r-sheet: 20px;
+  --r-pill: 999px;
+
+  /* ---- Shadows ---- */
+  --sh-1: 0 1px 2px rgb(0 0 0 / 0.35), 0 8px 24px -10px rgb(0 0 0 / 0.55);
+  --sh-2: 0 1px 2px rgb(0 0 0 / 0.4), 0 14px 36px -14px rgb(0 0 0 / 0.65);
+  --sh-pop: 0 30px 80px -20px rgb(0 0 0 / 0.75), 0 0 0 1px rgb(255 255 255 / 0.08);
+  --sh-knob: 0 1px 2px rgb(0 0 0 / 0.45), 0 3px 8px -2px rgb(0 0 0 / 0.5);
+
+  /* ---- Spacing (4/8 grid) ---- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+  --sp-16: 64px;
+
+  /* ---- Layout ---- */
+  --titlebar-h: 32px;
+  --toolbar-h: 52px;
+  --statusbar-h: 28px;
+  --content-max: 1120px;
+  --gutter: 48px;
+
+  /* ---- Type ---- */
+  --font-sans: 'Inter Variable', 'Inter', 'Segoe UI Variable Text', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', 'Cascadia Mono', ui-monospace, monospace;
+
+  --fs-large-title: 34px;
+  --lh-large-title: 41px;
+  --ls-large-title: -0.022em;
+  --fs-figure-xl: 64px;
+  --lh-figure-xl: 64px;
+  --ls-figure-xl: -0.04em;
+  --fs-figure-l: 40px;
+  --lh-figure-l: 44px;
+  --ls-figure-l: -0.032em;
+  --fs-figure-m: 24px;
+  --lh-figure-m: 28px;
+  --ls-figure-m: -0.02em;
+  --fs-title2: 22px;
+  --lh-title2: 28px;
+  --ls-title2: -0.017em;
+  --fs-title3: 17px;
+  --lh-title3: 22px;
+  --ls-title3: -0.01em;
+  --fs-headline: 14px;
+  --lh-headline: 20px;
+  --ls-headline: -0.006em;
+  --fs-body: 14px;
+  --lh-body: 20px;
+  --fs-callout: 13px;
+  --lh-callout: 18px;
+  --fs-subhead: 12px;
+  --lh-subhead: 16px;
+  --fs-caption: 11px;
+  --lh-caption: 14px;
+  --ls-caption: 0.06em;
+
+  /* ---- Motion (CSS-side; springs live in lib/motion.svelte.ts) ---- */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-sheet: cubic-bezier(0.32, 0.72, 0, 1);
+  --dur-press: 120ms;
+  --dur-fast: 160ms;
+  --dur-med: 240ms;
+}
+
+@media (max-width: 1180px) {
+  :root {
+    --gutter: 32px;
+  }
+}
