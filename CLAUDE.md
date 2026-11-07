@@ -4,8 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Goal
 
-**ai-corsair-hub** is a lightweight replacement for Corsair's iCUE software, focused on
-smart fan control and thermal/acoustic optimization for a high-end custom water-cooled PC.
+**ai-corsair-hub** is a lightweight, open-source replacement for Corsair's iCUE software for
+any iCUE LINK build: smart fan control, thermal/acoustic optimization, monitoring and RGB.
+Product context (users, principles, constraints): `PRODUCT.md`.
 
 ## Build & Test Commands
 
@@ -52,7 +53,7 @@ See `docs/architecture.md` for full architecture, protocol details, and roadmap.
 
 ## Hardware Context
 
-The target system has:
+Ken's rig is the development and test machine (never hard-code its layout into app logic):
 - 2x Corsair iCUE LINK System Hubs (VID 0x1B1C, PID 0x0C3F) — protocol fully implemented
 - 1x Corsair HX1500i PSU (VID 0x1B1C, PID 0x1C1F) — protocol documented via liquidctl
 - 10 fans (9x QX140 + 1x QX120) connected via iCUE LINK daisy chain (34 LEDs each)
@@ -80,6 +81,7 @@ Then: Phase 6 (Polish & Community) — installer, auto-update, documentation.
 ## Tech Stack
 
 - **Backend**: Rust (2024 edition, tokio, hidapi, serde, tracing)
-- **Frontend**: Tauri 2.0 + Svelte 5
+- **Frontend**: Tauri 2.0 + Svelte 5 — `cd apps/gui/ui && npm run dev:preview` runs the UI in a
+  browser on :5174 with a mocked backend (no Tauri/hardware); use it for screenshots
 - **Platform**: Windows 11 only
 - **License**: Apache 2.0
