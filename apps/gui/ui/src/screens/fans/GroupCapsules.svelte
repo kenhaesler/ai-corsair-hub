@@ -483,7 +483,7 @@
     transform: scale(0.95);
   }
   .new:focus-visible {
-    box-shadow: inset var(--focus-ring);
+    box-shadow: inset 0 0 0 2px #08090b, inset 0 0 0 3px rgba(195, 209, 234, 0.7);
   }
   @media (prefers-reduced-motion: reduce) {
     .fill,

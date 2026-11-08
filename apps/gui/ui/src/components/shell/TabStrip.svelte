@@ -15,7 +15,7 @@
   import { createSpring, springTo, springs } from '../../lib/motion.svelte';
 
   const tabs: { id: Tab; label: string; icon: typeof Fan; key: string }[] = [
-    { id: 'dashboard', label: 'Dashboard', icon: HeartPulse, key: '1' },
+    { id: 'dashboard', label: 'Summary', icon: HeartPulse, key: '1' },
     { id: 'fans', label: 'Fan Control', icon: Fan, key: '2' },
     { id: 'devices', label: 'Devices', icon: Microchip, key: '3' },
     { id: 'lighting', label: 'Lighting', icon: Lightbulb, key: '4' },

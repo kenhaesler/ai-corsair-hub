@@ -17,7 +17,7 @@
   import Skeleton from '../../components/ui/Skeleton.svelte';
   import Slider from '../../components/ui/Slider.svelte';
   import { getVersion } from '../../lib/api';
-  import { configStore, loadConfig, saveCurrentConfig } from '../../lib/stores/config.svelte';
+  import { configStore, loadConfig, saveGeneralSettings } from '../../lib/stores/config.svelte';
   import AppMark from './AppMark.svelte';
   import UpdatesGroup from './UpdatesGroup.svelte';
 
@@ -89,7 +89,7 @@
         </InsetRow>
         <div class="save">
           {#if generalDirty}<span class="dirty t-callout"><i aria-hidden="true"></i>Unsaved changes</span>{/if}
-          <Button variant="primary" onclick={() => saveCurrentConfig()} loading={configStore.saving}>
+          <Button variant={generalDirty ? 'primary' : 'secondary'} disabled={!generalDirty} onclick={() => saveGeneralSettings()} loading={configStore.saving}>
             {configStore.saving ? 'Saving...' : 'Save Settings'}
           </Button>
         </div>

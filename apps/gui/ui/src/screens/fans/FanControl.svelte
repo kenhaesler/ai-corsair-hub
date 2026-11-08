@@ -203,7 +203,7 @@
         disabled={configStore.saving || anyError || !configStore.config || !configStore.dirty}
         onclick={save}
       >
-        {configStore.saving ? 'Saving...' : 'Save Configuration'}
+        {#if configStore.saving}Saving...{:else}<span class="lbl-long">Save Configuration</span><span class="lbl-short">Save</span>{/if}
       </Button>
     </span>
   </div>
@@ -314,6 +314,20 @@
   }
   .save-wrap {
     display: inline-flex;
+  }
+  .lbl-short {
+    display: none;
+  }
+  @media (max-width: 1100px) {
+    .lbl-long {
+      display: none;
+    }
+    .lbl-short {
+      display: inline;
+    }
+    .unsaved {
+      display: none;
+    }
   }
   @media (max-width: 1240px) {
     .utxt {

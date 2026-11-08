@@ -25,9 +25,10 @@ export function groupColor(index: number): string {
   return GROUP_COLORS[((index % GROUP_COLORS.length) + GROUP_COLORS.length) % GROUP_COLORS.length];
 }
 
-/** Inventory 1.2: label is the source upper-cased (underscores shown as spaces). */
+const SOURCE_LABEL: Record<string, string> = { cpu: 'CPU', gpu: 'GPU', psu_vrm: 'PSU VRM', psu_case: 'PSU case', water_inline: 'Water' };
+/** Display label of a temperature source, one spelling everywhere ("PSU case", "Water"). */
 export function sourceLabel(source: string): string {
-  return source.toUpperCase().replace(/_/g, ' ');
+  return SOURCE_LABEL[source] ?? source.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
 }
 
 // ---------------------------------------------------------------------------

@@ -34,9 +34,11 @@ input,
 textarea {
   caret-color: var(--accent);
 }
-* {
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+  }
 }
 ::-webkit-scrollbar {
   width: 10px;

@@ -293,7 +293,7 @@
     {/key}
 
     {#if ticks.length}
-      <div class="axis" class:editing={ui.editingPins && canEdit} aria-hidden="true"><span></span><div class="ticks">{#each ticks as t (t)}<span>{fmtTick(t)}</span>{/each}</div><span></span></div>
+      <div class="axis" class:editing={ui.editingPins && canEdit} aria-hidden="true"><span></span><div class="ticks">{#each ticks as t, i (t)}<span style:left="{(i / (ticks.length - 1)) * 100}%" class:first={i === 0} class:last={i === ticks.length - 1}>{fmtTick(t)}</span>{/each}</div><span></span></div>
     {/if}
   </div>
 </div>
@@ -604,10 +604,22 @@
     }
   }
   .ticks {
-    display: flex;
-    justify-content: space-between;
+    position: relative;
+    height: 14px;
     font: 11px var(--font-mono);
     color: var(--t3);
+  }
+  .ticks span {
+    position: absolute;
+    top: 0;
+    transform: translateX(-50%);
+    white-space: nowrap;
+  }
+  .ticks span.first {
+    transform: none;
+  }
+  .ticks span.last {
+    transform: translateX(-100%);
   }
   @media (prefers-reduced-motion: reduce) {
     .spark {

@@ -10,7 +10,7 @@
   import { onMount } from 'svelte';
   import RotateCcw from 'lucide-svelte/icons/rotate-ccw';
   import { applyPresetToGroup, getFanPresets } from '../../lib/api';
-  import { configStore, loadConfig } from '../../lib/stores/config.svelte';
+  import { configStore, mergeGroupsFromBackend } from '../../lib/stores/config.svelte';
   import { toasts } from '../../lib/stores/toasts.svelte';
   import { computePresetState, groupMatchesPreset, type PresetState } from '../../lib/presets';
   import type { FanPresetDef } from '../../lib/types';
@@ -51,7 +51,7 @@
     applying = p.id;
     try {
       await applyPresetToGroup(p.id, selectedGroup);
-      await loadConfig();
+      await mergeGroupsFromBackend(selectedGroup ? [selectedGroup] : null);
       toasts.success(`${p.name} applied`, { detail: selectedGroup ?? 'All groups' });
     } catch (e) {
       toasts.error(`Could not apply ${p.name}`, { detail: String(e) });
@@ -152,6 +152,14 @@
     padding: 4px 4px 10px;
     margin: -4px -4px 0;
     scroll-snap-type: x proximity;
+  }
+  @media (max-width: 1180px) {
+    .rail {
+      grid-auto-flow: row;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-auto-columns: unset;
+      overflow: visible;
+    }
   }
   .slot {
     position: relative;

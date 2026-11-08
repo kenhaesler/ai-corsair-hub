@@ -77,6 +77,8 @@
   }
   .trail {
     justify-content: flex-end;
+    flex-wrap: nowrap;
+    white-space: nowrap;
   }
   .center {
     display: flex;

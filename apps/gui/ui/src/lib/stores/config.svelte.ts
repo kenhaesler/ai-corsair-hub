@@ -82,6 +82,70 @@ export async function saveCurrentConfig(opts: { successMessage?: string | null }
   }
 }
 
+/**
+ * Save only the General section. The payload is the last saved config with
+ * the current `general` on top, so unsaved Fan Control edits are neither
+ * committed nor lost. Both config and baseline receive the new `general`.
+ */
+export async function saveGeneralSettings(): Promise<boolean> {
+  if (!configStore.config) return false;
+  configStore.saving = true;
+  configStore.error = null;
+  try {
+    const general = $state.snapshot(configStore.config.general) as AppConfig['general'];
+    const base = configStore.baseline ? (JSON.parse(configStore.baseline) as AppConfig) : ($state.snapshot(configStore.config) as AppConfig);
+    const payload: AppConfig = { ...base, general };
+    await validateConfig(payload);
+    await apiSaveConfig(payload);
+    const fresh = await getConfig();
+    configStore.config.general = fresh.general;
+    configStore.baseline = JSON.stringify({ ...base, general: fresh.general });
+    toasts.success('Settings saved');
+    return true;
+  } catch (e) {
+    configStore.error = String(e);
+    toasts.error('Could not save settings', { detail: String(e) });
+    return false;
+  } finally {
+    configStore.saving = false;
+  }
+}
+
+/**
+ * After the backend changed fan groups on its own (a Quick Preset applied),
+ * pull the fresh config and merge only the affected groups (all when `names`
+ * is null) into both config and baseline. Other groups keep their unsaved
+ * edits.
+ */
+export async function mergeGroupsFromBackend(names: string[] | null) {
+  const fresh = await getConfig();
+  if (!configStore.config) {
+    configStore.config = fresh;
+    configStore.baseline = JSON.stringify(fresh);
+    return;
+  }
+  const merge = (cfg: AppConfig) => {
+    if (names === null) {
+      cfg.fan_groups = fresh.fan_groups;
+      return;
+    }
+    for (const g of fresh.fan_groups) {
+      if (!names.includes(g.name)) continue;
+      const i = cfg.fan_groups.findIndex((x) => x.name === g.name);
+      if (i >= 0) cfg.fan_groups[i] = g;
+      else cfg.fan_groups.push(g);
+    }
+  };
+  merge(configStore.config);
+  try {
+    const base = configStore.baseline ? (JSON.parse(configStore.baseline) as AppConfig) : fresh;
+    merge(base);
+    configStore.baseline = JSON.stringify(base);
+  } catch {
+    configStore.baseline = JSON.stringify(fresh);
+  }
+}
+
 /** Throw away unsaved edits. */
 export function revertConfig() {
   if (!configStore.baseline) return;

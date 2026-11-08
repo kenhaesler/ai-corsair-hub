@@ -113,7 +113,7 @@ const FRIENDLY: Record<string, string> = {
   cpu: 'CPU',
   gpu: 'GPU',
   psu_vrm: 'PSU VRM',
-  psu_case: 'PSU Case',
+  psu_case: 'PSU case',
   water_inline: 'Water',
 };
 export function sensorLabel(id: string): string {
