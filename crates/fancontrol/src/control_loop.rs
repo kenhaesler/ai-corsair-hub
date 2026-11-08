@@ -18,6 +18,7 @@ use corsair_sensors::{discover_lhm_temp_sources, LhmCache, TemperatureSource};
 
 use crate::acoustic::AcousticFilter;
 use crate::curve::FanCurve;
+use crate::feedforward::{feed_forward_offset, PowerAverage};
 use crate::pid::PidController;
 use crate::pump_watchdog::{PumpWatchdog, DEFAULT_PUMP_MIN_RPM};
 
@@ -113,6 +114,10 @@ pub struct ControlLoop {
     pump_watchdog: PumpWatchdog,
     /// Pump rpm reported by the host since the last tick (motherboard + LINK).
     pending_pump_rpms: Vec<f64>,
+    /// CPU+GPU package power reported by the host since the last tick.
+    pending_power_w: Option<f64>,
+    /// 60 s moving average of that power; feed-forward works on the rise above it.
+    power_avg: PowerAverage,
 }
 
 struct SensorState {
@@ -163,6 +168,8 @@ enum FanController {
     Curve {
         curve: FanCurve,
         source: TempSourceConfig,
+        /// Power feed-forward gain (°C per 100 W); 0 = off.
+        feed_forward: f64,
     },
     Pid {
         pid: PidController,
@@ -491,6 +498,8 @@ impl ControlLoop {
         Ok(Self {
             pump_watchdog,
             pending_pump_rpms: Vec::new(),
+            pending_power_w: None,
+            power_avg: PowerAverage::new(60.0),
             config,
             sensors,
             sensor_state,
@@ -517,6 +526,16 @@ impl ControlLoop {
             error!(threshold = self.pump_watchdog.min_rpm(), "PUMP STALL — emergency override");
         }
         let emergency = self.check_emergency(&readings) || pump_stall;
+
+        // Power feed-forward: the rise of CPU+GPU power above its 60 s average,
+        // in units of 100 W. Each curve group scales it by its own gain.
+        let ff_rise = match self.pending_power_w.take() {
+            Some(p) => {
+                let avg = self.power_avg.push(p, dt_secs);
+                ((p - avg) / 100.0).max(0.0)
+            }
+            None => 0.0,
+        };
 
         // 3. Check sensor staleness
         let any_stale = self.sensor_state.values().any(|s| s.is_stale);
@@ -556,7 +575,7 @@ impl ControlLoop {
                 FAILSAFE_DUTY
             } else {
                 // Normal operation
-                compute_group_duty(group, &readings, dt_secs)
+                compute_group_duty(group, &readings, dt_secs, ff_rise)
             };
 
             // Enforce per-channel minimums and convert to u8.
@@ -720,6 +739,12 @@ impl ControlLoop {
     /// before each `tick()`; an empty slice means "no pump visible".
     pub fn report_pumps(&mut self, rpms: &[f64]) {
         self.pending_pump_rpms = rpms.to_vec();
+    }
+
+    /// Hand the host's latest CPU+GPU package power (watts) to the feed-forward
+    /// term. Call before `tick()`; `None` leaves feed-forward idle this tick.
+    pub fn report_power(&mut self, watts: Option<f64>) {
+        self.pending_power_w = watts.filter(|w| w.is_finite() && *w >= 0.0);
     }
 
     /// Current configuration.
@@ -1373,14 +1398,18 @@ fn compute_group_duty(
     group: &mut FanGroup,
     readings: &HashMap<String, f64>,
     dt_secs: f64,
+    ff_rise: f64,
 ) -> f64 {
     match &mut group.controller {
         FanController::Fixed(duty) => *duty,
-        FanController::Curve { curve, source } => {
+        FanController::Curve { curve, source, feed_forward } => {
             let temp = compute_weighted_temp(source, readings);
             match temp {
                 Some(t) => {
-                    let raw = curve.evaluate(t);
+                    // feed-forward only ever raises the curve's input; the
+                    // acoustic filter still keys hysteresis off the real temperature
+                    let offset = feed_forward_offset(ff_rise * 100.0, 0.0, *feed_forward);
+                    let raw = curve.evaluate(t + offset);
                     apply_acoustic_filter(&mut group.acoustic, raw, t, dt_secs)
                 }
                 None => FAILSAFE_DUTY,
@@ -1457,6 +1486,7 @@ fn build_fan_group(
             hysteresis,
             ramp_rate,
             ramp_down_rate,
+            power_feed_forward,
             temp_source,
         } => {
             // Warn about missing sensors but continue — will use failsafe duty
@@ -1479,6 +1509,7 @@ fn build_fan_group(
                 FanController::Curve {
                     curve,
                     source: temp_source.clone(),
+                    feed_forward: power_feed_forward.unwrap_or(0.0).max(0.0),
                 },
                 Some(filter),
             )
@@ -2010,6 +2041,8 @@ impl ControlLoop {
             shutdown: Arc::new(AtomicBool::new(false)),
             pump_watchdog: PumpWatchdog::new(DEFAULT_PUMP_MIN_RPM),
             pending_pump_rpms: Vec::new(),
+            pending_power_w: None,
+            power_avg: PowerAverage::new(60.0),
         }
     }
 }
@@ -2102,7 +2135,8 @@ mod tests {
                 ramp_rate,
                 ramp_down_rate,
                 temp_source,
-            } => {
+                power_feed_forward: _,
+} => {
                 let curve = FanCurve::new(points).expect("test curve");
                 let ramp_down = ramp_down_rate.unwrap_or(ramp_rate * 0.4);
                 let filter = AcousticFilter::new(ramp_rate, ramp_down, hysteresis);
@@ -2110,6 +2144,7 @@ mod tests {
                     FanController::Curve {
                         curve,
                         source: temp_source,
+                        feed_forward: 0.0,
                     },
                     Some(filter),
                 )
@@ -2260,6 +2295,7 @@ mod tests {
             hysteresis: 3.0,
             ramp_rate: 5.0,
             ramp_down_rate: None,
+            power_feed_forward: None,
             temp_source: TempSourceConfig {
                 sensors: vec!["cpu".to_string()],
                 weights: vec![1.0],

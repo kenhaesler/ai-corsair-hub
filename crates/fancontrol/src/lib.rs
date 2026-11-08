@@ -1,6 +1,7 @@
 pub mod acoustic;
 pub mod control_loop;
 pub mod curve;
+pub mod feedforward;
 pub mod pid;
 pub mod pump_watchdog;
 

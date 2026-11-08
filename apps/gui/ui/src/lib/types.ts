@@ -245,6 +245,8 @@ export type FanMode =
        * `ramp_rate * 0.4` (the legacy heuristic).
        */
       ramp_down_rate?: number | null;
+      /** power feed-forward gain in °C per 100 W of CPU+GPU power above its 60 s average; null/0 = off */
+      power_feed_forward?: number | null;
       temp_source: TempSourceConfig;
     }
   | { type: 'pid'; target_temp: number; kp: number; ki: number; kd: number; min_duty: number; max_duty: number; temp_source: TempSourceConfig };

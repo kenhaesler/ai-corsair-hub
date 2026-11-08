@@ -86,6 +86,7 @@ fn curve_group(ramp_up: f64) -> FanGroupConfig {
             hysteresis: 5.0,
             ramp_rate: ramp_up,
             ramp_down_rate: Some(2.0),
+            power_feed_forward: None,
             temp_source: TempSourceConfig {
                 sensors: vec!["cpu".to_string()],
                 weights: vec![1.0],

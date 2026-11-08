@@ -62,6 +62,7 @@ pub fn validate(config: &AppConfig) -> Result<()> {
                 hysteresis,
                 ramp_rate,
                 ramp_down_rate,
+                power_feed_forward,
                 temp_source,
             } => {
                 for (j, p) in points.iter().enumerate() {
@@ -72,6 +73,14 @@ pub fn validate(config: &AppConfig) -> Result<()> {
                 finite(&p, *hysteresis)?;
                 if *hysteresis < 0.0 {
                     return err(p, format!("must be >= 0, got {hysteresis}"));
+                }
+                if let Some(k) = power_feed_forward {
+                    let k: f64 = *k;
+                    let p = format!("{base}.power_feed_forward");
+                    finite(&p, k)?;
+                    if !(0.0..=20.0).contains(&k) {
+                        return err(p, format!("must be within 0..=20 °C per 100 W, got {k}"));
+                    }
                 }
                 let p = format!("{base}.ramp_rate");
                 finite(&p, *ramp_rate)?;

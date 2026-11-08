@@ -340,9 +340,19 @@
           hysteresis={m.hysteresis}
           rampUp={m.ramp_rate}
           rampDown={m.ramp_down_rate ?? null}
+          feedForward={m.power_feed_forward ?? 0}
           onchange={(v) =>
             change(
-              { ...group, mode: { ...m, hysteresis: v.hysteresis, ramp_rate: v.rampUp, ramp_down_rate: v.rampDown } },
+              {
+                ...group,
+                mode: {
+                  ...m,
+                  hysteresis: v.hysteresis,
+                  ramp_rate: v.rampUp,
+                  ramp_down_rate: v.rampDown,
+                  power_feed_forward: v.feedForward > 0 ? v.feedForward : null,
+                },
+              },
               `noise-${Date.now()}`,
             )}
         />

@@ -150,6 +150,11 @@ pub enum FanMode {
         /// than their rise suggests.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ramp_down_rate: Option<f64>,
+        /// Power feed-forward gain in °C per 100 W of CPU+GPU power above its
+        /// 60 s average. `None`/0 = off. Lets fans start early in a loop whose
+        /// coolant lags the chips. Added in v0.5.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        power_feed_forward: Option<f64>,
         temp_source: TempSourceConfig,
     },
 

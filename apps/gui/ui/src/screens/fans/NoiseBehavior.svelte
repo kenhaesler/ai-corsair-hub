@@ -14,11 +14,17 @@
     hysteresis: number;
     rampUp: number;
     rampDown: number | null;
+    /** °C per 100 W of power rise; 0 = off */
+    feedForward?: number;
     color?: string;
     open?: boolean;
-    onchange: (v: { hysteresis: number; rampUp: number; rampDown: number | null }) => void;
+    onchange: (v: { hysteresis: number; rampUp: number; rampDown: number | null; feedForward: number }) => void;
   }
-  let { hysteresis, rampUp, rampDown, color = 'var(--accent)', open = $bindable(false), onchange }: Props = $props();
+  let { hysteresis, rampUp, rampDown, feedForward = 0, color = 'var(--accent)', open = $bindable(false), onchange }: Props = $props();
+  let draftFf = $state(0);
+  $effect(() => {
+    draftFf = feedForward;
+  });
 
   let draftHyst = $state(0);
   let draftUp = $state(5);
@@ -42,13 +48,16 @@
   });
 
   const symDown = $derived(Math.round(draftUp * 0.4 * 10) / 10);
-  const summary = $derived(`hy ${draftHyst}° · ↑${draftUp}%/s · ↓${asymmetric ? draftDown : symDown}%/s`);
+  const summary = $derived(
+    `hy ${draftHyst}° · ↑${draftUp}%/s · ↓${asymmetric ? draftDown : symDown}%/s${draftFf > 0 ? ` · power +${draftFf}°/100 W` : ''}`,
+  );
 
-  function emit(over: Partial<{ hysteresis: number; rampUp: number; rampDown: number | null }> = {}) {
+  function emit(over: Partial<{ hysteresis: number; rampUp: number; rampDown: number | null; feedForward: number }> = {}) {
     onchange({
       hysteresis: draftHyst,
       rampUp: draftUp,
       rampDown: asymmetric ? draftDown : null,
+      feedForward: draftFf,
       ...over,
     });
   }
@@ -89,6 +98,22 @@
           oncommit={(v) => emit({ rampUp: v })}
         />
         <p class="hint">How fast fans accelerate when temps climb.</p>
+      </div>
+
+      <div class="param">
+        <Slider
+          label="Power anticipation"
+          min={0}
+          max={10}
+          step={0.5}
+          {color}
+          bind:value={draftFf}
+          format={(v) => (v > 0 ? `+${v}° / 100 W` : 'Off')}
+          oncommit={(v) => emit({ feedForward: v })}
+        />
+        <p class="hint">
+          Reads the curve a few degrees higher while CPU+GPU power sits above its one-minute average, so fans start before the coolant warms. 0 = off.
+        </p>
       </div>
 
       <div class="param">
@@ -135,7 +160,7 @@
   }
   .body {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 20px 28px;
     padding: 8px 0 12px 24px;
   }

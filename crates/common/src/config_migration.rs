@@ -466,6 +466,7 @@ mod tests {
                 hysteresis: 2.0,
                 ramp_rate: 5.0,
                 ramp_down_rate: None,
+                power_feed_forward: None,
                 temp_source: TempSourceConfig {
                     sensors: vec!["cpu".into()],
                     weights: vec![1.0],

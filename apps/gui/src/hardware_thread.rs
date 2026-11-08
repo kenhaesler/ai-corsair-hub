@@ -766,6 +766,14 @@ impl Worker {
         // fallback backends (root\WMI, CIMV2) this stays `None` and
         // the dashboard hides the CPU extras strip.
         let cpu_metrics = self.env.telemetry.read_cpu_metrics();
+        // Feed-forward input for the next tick: CPU + GPU package power.
+        let power_w = match (cpu_metrics.as_ref(), gpu_metrics.as_ref()) {
+            (Some(c), Some(g)) => Some(c.power_watts + g.power_watts),
+            (Some(c), None) => Some(c.power_watts),
+            (None, Some(g)) => Some(g.power_watts),
+            (None, None) => None,
+        };
+        self.control_loop.report_power(power_w);
         // Pumps: motherboard headers via LHM, plus LINK pumps from this
         // cycle's speeds (no extra HID traffic).
         let mut pumps = mb_pumps;
@@ -1745,6 +1753,7 @@ fn apply_preset(
             hysteresis: def.hysteresis,
             ramp_rate: def.ramp_up,
             ramp_down_rate: Some(def.ramp_down),
+            power_feed_forward: None,
             temp_source: TempSourceConfig { sensors, weights },
         }
     };
@@ -2312,6 +2321,7 @@ mod tests {
             hysteresis: 5.0,
             ramp_rate: 3.0,
             ramp_down_rate: Some(1.5),
+            power_feed_forward: None,
             temp_source: TempSourceConfig {
                 sensors: vec!["cpu".into()],
                 weights: vec![1.0],
