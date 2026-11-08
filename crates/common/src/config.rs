@@ -225,6 +225,13 @@ pub struct FanPresetDef {
     /// available sensor, `apply_preset` falls back to CPU/GPU weighting.
     #[serde(default)]
     pub water_weight: f64,
+    /// Motherboard-sensor weight (`board_system`): for exhaust / case fans
+    /// that should follow case air rather than the water blocks. Added in v0.5.
+    #[serde(default)]
+    pub board_weight: f64,
+    /// Power feed-forward gain (°C per 100 W) written to the curve. Added in v0.5.
+    #[serde(default)]
+    pub power_feed_forward: Option<f64>,
 }
 
 /// Root of the shipped `fans.toml` asset: a top-level list of presets

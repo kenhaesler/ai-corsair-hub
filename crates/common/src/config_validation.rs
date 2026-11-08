@@ -536,6 +536,15 @@ duty_percent = nan
             assert!(p.hysteresis.is_finite() && p.hysteresis >= 0.0, "{}", p.id);
             assert!(p.ramp_up.is_finite() && p.ramp_up > 0.0, "{}", p.id);
             assert!(p.ramp_down.is_finite() && p.ramp_down > 0.0, "{}", p.id);
+            assert!(p.board_weight.is_finite() && p.board_weight >= 0.0, "{}", p.id);
+            assert!(
+                p.cpu_weight + p.gpu_weight + p.water_weight + p.board_weight > 0.0,
+                "{} must weight at least one sensor",
+                p.id
+            );
+            if let Some(k) = p.power_feed_forward {
+                assert!(k.is_finite() && (0.0..=20.0).contains(&k), "{}", p.id);
+            }
             for pt in &p.points {
                 assert!(pt.temp.is_finite() && (0.0..=100.0).contains(&pt.duty), "{}", p.id);
             }

@@ -1711,6 +1711,7 @@ fn apply_preset(
         ("cpu", def.cpu_weight),
         ("gpu", def.gpu_weight),
         ("water_inline", def.water_weight),
+        ("board_system", def.board_weight),
     ] {
         if weight > 0.0 && available.contains(&name.to_string()) {
             sensors.push(name.to_string());
@@ -1753,7 +1754,7 @@ fn apply_preset(
             hysteresis: def.hysteresis,
             ramp_rate: def.ramp_up,
             ramp_down_rate: Some(def.ramp_down),
-            power_feed_forward: None,
+            power_feed_forward: def.power_feed_forward.filter(|k| *k > 0.0),
             temp_source: TempSourceConfig { sensors, weights },
         }
     };

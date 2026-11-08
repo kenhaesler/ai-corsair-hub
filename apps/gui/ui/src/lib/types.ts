@@ -267,6 +267,10 @@ export interface FanPresetDef {
   cpu_weight: number;
   gpu_weight: number;
   water_weight: number;
+  /** motherboard-sensor weight (case/exhaust presets) */
+  board_weight?: number;
+  /** power feed-forward gain in °C per 100 W; null/0 = off */
+  power_feed_forward?: number | null;
 }
 
 export interface CurvePoint {

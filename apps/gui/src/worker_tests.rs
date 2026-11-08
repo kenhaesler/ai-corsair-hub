@@ -457,6 +457,48 @@ fn apply_preset_with_failing_store_still_applies() {
     );
 }
 
+/// `case_airflow` weights only the motherboard sensor. On a machine without
+/// one (this harness exposes just `cpu`) it must fall back to the CPU, never
+/// to an empty sensor list or a fixed duty.
+#[test]
+fn case_airflow_without_board_sensor_falls_back_to_cpu() {
+    let mut h = fixed_harness();
+    let (reply, _) = h.call(|reply| HwCommand::ApplyPreset {
+        preset: "case_airflow".to_string(),
+        group_name: None,
+        reply,
+    });
+    assert_eq!(reply, Ok(()));
+    let g = &h.worker.control_loop.config().fan_groups[0];
+    assert_eq!(g.preset_applied.as_deref(), Some("case_airflow"));
+    match &g.mode {
+        corsair_common::config::FanMode::Curve { temp_source, power_feed_forward, .. } => {
+            assert_eq!(temp_source.sensors, vec!["cpu".to_string()]);
+            assert_eq!(temp_source.weights, vec![1.0]);
+            assert_eq!(*power_feed_forward, None, "0.0 in the preset means off, stored as None");
+        }
+        other => panic!("expected a curve, got {other:?}"),
+    }
+}
+
+/// Presets carry their power anticipation into the curve.
+#[test]
+fn gaming_preset_writes_power_feed_forward() {
+    let mut h = fixed_harness();
+    let (reply, _) = h.call(|reply| HwCommand::ApplyPreset {
+        preset: "gaming".to_string(),
+        group_name: None,
+        reply,
+    });
+    assert_eq!(reply, Ok(()));
+    match &h.worker.control_loop.config().fan_groups[0].mode {
+        corsair_common::config::FanMode::Curve { power_feed_forward, .. } => {
+            assert_eq!(*power_feed_forward, Some(6.0));
+        }
+        other => panic!("expected a curve, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Simple command round-trips
 // ---------------------------------------------------------------------------

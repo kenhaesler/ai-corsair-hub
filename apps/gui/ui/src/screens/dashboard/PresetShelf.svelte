@@ -173,7 +173,7 @@
               {/if}
             </div>
             <span class="desc">{p.description}</span>
-            <span class="meta num">hy {p.hysteresis}° · ↑{p.ramp_up}%/s · ↓{p.ramp_down}%/s</span>
+            <span class="meta num">hy {p.hysteresis}° · ↑{p.ramp_up}%/s · ↓{p.ramp_down}%/s{(p.board_weight ?? 0) > 0 ? ' · board' : ''}{(p.power_feed_forward ?? 0) > 0 ? ` · power +${p.power_feed_forward}°` : ''}</span>
             {#if (on.length > 0 && on.length < groupNames.length) || (st === 'modified' && applying === null)}
             <div class="foot">
               {#if on.length > 0 && on.length < groupNames.length}
