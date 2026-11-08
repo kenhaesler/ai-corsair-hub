@@ -297,6 +297,7 @@
             </div>
             <div class="track">
               {#if r.env}<i class="env" style:left="{frac(r, r.env[0]) * 100}%" style:width="{(frac(r, r.env[1]) - frac(r, r.env[0])) * 100}%"></i>{/if}
+              <i class="glow" style:width="{frac(r, r.value) * 100}%"></i>
               <i class="fill" style:transform="scaleX({frac(r, r.value)})"></i>
               <i class="cap" style:left="calc({frac(r, r.value) * 100}% - 1px)"></i>
               <i class="spark" style:left="max(2px, calc({frac(r, r.value) * 100}% - 40px))" style:animation-delay="{i * 0.6}s"></i>
@@ -527,11 +528,24 @@
       color-mix(in oklab, var(--c) 75%, #1a1c22) 70%,
       color-mix(in oklab, var(--c) 40%, #fff)
     );
-    box-shadow: 0 0 22px -4px color-mix(in oklab, var(--c) 70%, transparent);
+    will-change: transform;
     transition:
       transform 1s cubic-bezier(0.2, 0.8, 0.2, 1),
-      background 0.9s,
+      background 0.9s;
+  }
+  /* The glow lives on its own element with no transform: a blurred shadow on
+     a transform-animated layer drops out for frames in WebView2. */
+  .glow {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    border-radius: 3px;
+    box-shadow: 0 0 22px -4px color-mix(in oklab, var(--c) 70%, transparent);
+    transition:
+      width 1s cubic-bezier(0.2, 0.8, 0.2, 1),
       box-shadow 0.9s;
+    pointer-events: none;
   }
   .cap {
     position: absolute;

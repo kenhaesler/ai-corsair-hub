@@ -175,6 +175,7 @@
           </span>
           <span class="bar" aria-hidden="true">
             {#if allEnv}<i class="env" style:left={pct(allEnv[0])} style:width={pct(allEnv[1] - allEnv[0])}></i>{/if}
+            <i class="glow" style:width={pct(allDuty ?? 0)}></i>
             <i class="fill" style:transform="scaleX({(allDuty ?? 0) / 100})"></i>
             {#if allDuty !== null}<i class="cap" style:left="calc({pct(allDuty)} - 1px)"></i>{/if}
           </span>
@@ -252,6 +253,7 @@
           </span>
           <span class="bar" aria-hidden="true">
             {#if env}<i class="env" style:left={pct(env[0])} style:width={pct(env[1] - env[0])}></i>{/if}
+            <i class="glow" style:width={pct(duty ?? 0)}></i>
             <i class="fill" style:transform="scaleX({(duty ?? 0) / 100})"></i>
             {#if duty !== null}<i class="cap" style:left="calc({pct(duty)} - 1px)"></i>{/if}
           </span>
@@ -529,11 +531,22 @@
       color-mix(in oklab, var(--c) 75%, #1a1c22) 70%,
       color-mix(in oklab, var(--c) 40%, #fff)
     );
-    box-shadow: 0 0 16px -3px color-mix(in oklab, var(--c) 70%, transparent);
+    will-change: transform;
     transition:
       transform 0.9s cubic-bezier(0.2, 0.8, 0.2, 1),
-      background 0.9s,
+      background 0.9s;
+  }
+  .glow {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    border-radius: 2px;
+    box-shadow: 0 0 16px -3px color-mix(in oklab, var(--c) 70%, transparent);
+    transition:
+      width 0.9s cubic-bezier(0.2, 0.8, 0.2, 1),
       box-shadow 0.9s;
+    pointer-events: none;
   }
   .cap {
     position: absolute;
