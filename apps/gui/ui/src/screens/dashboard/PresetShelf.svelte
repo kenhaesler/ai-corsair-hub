@@ -68,14 +68,36 @@
   async function applyTo(p: FanPresetDef, names: string[], detail: string) {
     if (names.length === 0) return;
     applying = p.id;
-    const before = (saved?.fan_groups ?? []).filter((g) => names.includes(g.name)).map((g) => structuredClone($state.snapshot(g)) as FanGroupConfig);
+    const savedGroups = saved?.fan_groups ?? [];
+    const draftGroups = configStore.config?.fan_groups ?? [];
+    const before = savedGroups.filter((g) => names.includes(g.name)).map((g) => structuredClone($state.snapshot(g)) as FanGroupConfig);
+    // unsaved edits on the targeted groups are replaced: say so, and let Undo bring them back
+    const drafts = names
+      .map((n) => ({ saved: savedGroups.find((g) => g.name === n), draft: draftGroups.find((g) => g.name === n) }))
+      .filter((x) => x.saved && x.draft && JSON.stringify(x.saved) !== JSON.stringify($state.snapshot(x.draft)))
+      .map((x) => structuredClone($state.snapshot(x.draft)) as FanGroupConfig);
+    const switched = savedGroups.filter((g) => names.includes(g.name) && g.mode.type !== 'curve').map((g) => `${g.name} (${g.mode.type === 'pid' ? 'PID' : 'fixed'} → curve)`);
+    const notes = [detail];
+    if (switched.length) notes.push(switched.join(', '));
+    if (drafts.length) notes.push(`Replaced unsaved edits on ${drafts.map((g) => g.name).join(', ')}`);
     try {
       for (const n of names) await applyPresetToGroup(p.id, n);
       await mergeGroupsFromBackend(names);
       toasts.success(`${p.name} applied`, {
-        detail,
+        detail: notes.join(' · '),
         timeout: 7000,
-        action: { label: 'Undo', run: () => void saveGroups(before) },
+        action: {
+          label: 'Undo',
+          run: async () => {
+            const ok = await saveGroups(before);
+            if (!ok) return;
+            // put the unsaved drafts back on top of the restored saved state
+            if (configStore.config && drafts.length) {
+              configStore.config.fan_groups = configStore.config.fan_groups.map((g) => drafts.find((d) => d.name === g.name) ?? g);
+            }
+            toasts.info('Restored previous fan settings', { detail: drafts.length ? 'Unsaved edits are back too' : undefined });
+          },
+        },
       });
     } catch (e) {
       toasts.error(`Could not apply ${p.name}`, { detail: String(e) });

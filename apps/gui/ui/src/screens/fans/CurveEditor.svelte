@@ -199,6 +199,7 @@
   let hovered = $state<number | null>(null);
   let ghost = $state<{ temp: number; duty: number } | null>(null);
   let dragMoved = false;
+  let handlePressed = false;
   let dragRef: CurvePoint | null = null;
 
   $effect(() => {
@@ -242,6 +243,7 @@
     dragging = i;
     selected = i;
     dragMoved = false;
+    handlePressed = true;
     dragRef = { ...points[i] };
     ghost = null;
     svg?.setPointerCapture(e.pointerId);
@@ -276,6 +278,13 @@
   }
 
   function onPlotClick(e: MouseEvent) {
+    // the click that follows a handle press is delivered to the svg (pointer
+    // capture), so it must never read as "add a point here"
+    if (handlePressed) {
+      handlePressed = false;
+      dragMoved = false;
+      return;
+    }
     if (dragMoved) {
       dragMoved = false;
       return;
@@ -284,6 +293,12 @@
     const { px, py } = local(e);
     if (!inPlot(px, py)) return;
     const p = toPoint(px, py);
+    const existing = points.findIndex((q) => q.temp === p.temp);
+    if (existing >= 0) {
+      selected = existing;
+      handles[existing]?.focus({ preventScroll: true });
+      return;
+    }
     oncheckpoint?.(`add-${Date.now()}`);
     const ref = { ...p };
     const idx = commit([...points.map((q) => ({ ...q })), ref], ref);
@@ -383,7 +398,10 @@
       onpointerup={onUp}
       onpointercancel={onUp}
       onpointerleave={() => (ghost = null)}
-      onpointerdown={() => (dragMoved = false)}
+      onpointerdown={(e) => {
+        if (!(e.target as Element).closest('.handle')) handlePressed = false;
+        dragMoved = false;
+      }}
       onclick={onPlotClick}
     >
       <defs>

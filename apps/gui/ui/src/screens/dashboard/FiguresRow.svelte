@@ -35,14 +35,19 @@
   const hr = $derived(s ? headroom(s) : null);
 
   const preset = $derived.by(() => {
-    const groups = configStore.saved?.fan_groups ?? [];
-    if (!groups.length) return { name: 'None', note: 'No fan groups' };
+    const all = configStore.saved?.fan_groups ?? [];
+    if (!all.length) return { name: 'None', note: 'No fan groups' };
+    // presets are curves: fixed and PID groups don't take part
+    const groups = all.filter((g) => g.mode.type === 'curve');
+    const others = all.length - groups.length;
+    if (!groups.length) return { name: 'None', note: others ? 'Only fixed and PID groups' : 'No fan groups' };
     const ids = [...new Set(groups.map((g) => g.preset_applied ?? null))];
-    if (ids.length > 1) return { name: 'Mixed', note: 'Groups use different presets' };
+    if (ids.length > 1) return { name: 'Mixed', note: 'Curve groups use different presets' };
     const p = presets.find((x) => x.id === ids[0]);
     if (!p) return { name: 'Custom', note: 'Your own curves' };
     const modified = groups.some((g) => !groupMatchesPreset(g, p));
-    return { name: p.name, note: modified ? 'Modified since applied' : p.description };
+    const scope = `${groups.length === all.length ? 'all' : groups.length} curve group${groups.length === 1 ? '' : 's'}`;
+    return { name: p.name, note: modified ? 'Modified since applied' : `On ${scope}` };
   });
 </script>
 
@@ -61,7 +66,7 @@
     <span class="k">Power draw</span>
     {#if s?.psu}
       <span class="n"><AnimatedNumber value={s.psu.total_power} decimals={0} /><small>W</small></span>
-      <span class="d">Input {s.psu.input_voltage.toFixed(0)} V · PSU fan {Math.round(s.psu.fan_rpm).toLocaleString('en-US')} rpm</span>
+      <span class="d" title="Input {s.psu.input_voltage.toFixed(0)} V · PSU fan {Math.round(s.psu.fan_rpm).toLocaleString('en-US')} rpm">{s.psu.input_voltage.toFixed(0)} V in · fan {Math.round(s.psu.fan_rpm).toLocaleString('en-US')} rpm</span>
     {:else}
       <span class="n dim">–</span><span class="d">No Corsair PSU detected</span>
     {/if}
