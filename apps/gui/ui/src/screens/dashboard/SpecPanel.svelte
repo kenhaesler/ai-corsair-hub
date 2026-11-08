@@ -496,7 +496,8 @@
     box-shadow: 0 0 22px -4px color-mix(in oklab, var(--c) 70%, transparent);
     transition:
       transform 1s cubic-bezier(0.2, 0.8, 0.2, 1),
-      background 0.9s;
+      background 0.9s,
+      box-shadow 0.9s;
   }
   .cap {
     position: absolute;
@@ -506,7 +507,9 @@
     background: #fff;
     border-radius: 2px;
     box-shadow: 0 0 10px 2px color-mix(in oklab, var(--c) 85%, #fff);
-    transition: left 1s cubic-bezier(0.2, 0.8, 0.2, 1);
+    transition:
+      left 1s cubic-bezier(0.2, 0.8, 0.2, 1),
+      box-shadow 0.9s;
   }
   .spark {
     position: absolute;
@@ -517,6 +520,7 @@
     background: #fff;
     opacity: 0;
     animation: spark 2.6s ease-in-out infinite;
+    transition: left 1s cubic-bezier(0.2, 0.8, 0.2, 1);
   }
   @keyframes spark {
     0% {
@@ -537,6 +541,7 @@
     font-weight: 400;
     letter-spacing: -0.02em;
     color: color-mix(in oklab, var(--c) 45%, #fff);
+    transition: color 0.9s;
   }
   .val small {
     font-size: 12px;

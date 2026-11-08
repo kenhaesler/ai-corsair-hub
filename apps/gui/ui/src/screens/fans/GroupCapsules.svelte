@@ -454,7 +454,9 @@
     font-variant-numeric: tabular-nums;
     color: color-mix(in oklab, var(--c) 40%, #fff);
     text-shadow: 0 0 22px color-mix(in oklab, var(--c) 45%, transparent);
-    transition: color 0.9s;
+    transition:
+      color 0.9s,
+      text-shadow 0.9s;
   }
   .duty small {
     font-size: 13px;
@@ -530,7 +532,8 @@
     box-shadow: 0 0 16px -3px color-mix(in oklab, var(--c) 70%, transparent);
     transition:
       transform 0.9s cubic-bezier(0.2, 0.8, 0.2, 1),
-      background 0.9s;
+      background 0.9s,
+      box-shadow 0.9s;
   }
   .cap {
     position: absolute;
@@ -540,7 +543,9 @@
     border-radius: 2px;
     background: #fff;
     box-shadow: 0 0 8px 1px color-mix(in oklab, var(--c) 85%, #fff);
-    transition: left 0.9s cubic-bezier(0.2, 0.8, 0.2, 1);
+    transition:
+      left 0.9s cubic-bezier(0.2, 0.8, 0.2, 1),
+      box-shadow 0.9s;
   }
   .new {
     position: sticky;

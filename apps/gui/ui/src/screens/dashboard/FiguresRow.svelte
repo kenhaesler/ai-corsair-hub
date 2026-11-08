@@ -141,6 +141,9 @@
     font-variant-numeric: tabular-nums;
     color: color-mix(in oklab, var(--c) 35%, #fff);
     text-shadow: 0 0 28px color-mix(in oklab, var(--c) 40%, transparent);
+    transition:
+      color 0.9s,
+      text-shadow 0.9s;
   }
   .n small {
     font-size: 15px;
