@@ -24,7 +24,7 @@
   import { displayName, isFanGroupV2 } from '../../lib/identity';
   import { tempOf } from '../../lib/format';
   import { computePresetState, groupMatchesPreset } from '../../lib/presets';
-  import { defaultMode, MODE_BLURB, MODE_OPTIONS, mixTemp, sensorLabel, type ModeType } from './fanModes';
+  import { defaultMode, MODE_BLURB, MODE_LABEL, MODE_OPTIONS, mixTemp, sensorLabel, type ModeType } from './fanModes';
   import { dutyColor } from '../dashboard/overview';
   import type { FanGroupConfig, FanMode, FanPresetDef, HubSnapshot, TempSourceConfig } from '../../lib/types';
 
@@ -36,13 +36,33 @@
     groupCount?: number;
     /** true when the groups currently differ, so the first group's settings are shown as the starting point */
     groupsDiffer?: boolean;
+    /** true when the groups are not all in the same mode (All scope shows no selected mode / preset) */
+    mixedModes?: boolean;
+    /** All scope: undo snapshots/restores the whole group list, supplied by the page */
+    snapshot?: () => string;
+    restore?: (s: string) => void;
     availableHubs: HubSnapshot[];
     availableSensors: string[];
     presets: FanPresetDef[];
-    onchange: (g: FanGroupConfig) => void;
+    /** `intent` 'mode' = the user switched the control mode (All scope may convert groups, after confirming) */
+    onchange: (g: FanGroupConfig, intent?: 'mode' | 'edit') => void;
     ondelete: () => void;
   }
-  let { group, color, scope = 'group', groupCount = 1, groupsDiffer = false, availableHubs, availableSensors, presets, onchange, ondelete }: Props = $props();
+  let {
+    group,
+    color,
+    scope = 'group',
+    groupCount = 1,
+    groupsDiffer = false,
+    mixedModes = false,
+    snapshot,
+    restore,
+    availableHubs,
+    availableSensors,
+    presets,
+    onchange,
+    ondelete,
+  }: Props = $props();
   const all = $derived(scope === 'all');
 
   // ------------------------------------------------------------------ undo
@@ -57,16 +77,27 @@
     }
     lastKey = key;
     lastAt = now;
-    history = [...history.slice(-49), JSON.stringify($state.snapshot(group))];
+    history = [...history.slice(-49), snapshot ? snapshot() : JSON.stringify($state.snapshot(group))];
   }
   function undo() {
     const prev = history[history.length - 1];
     if (!prev) return;
     history = history.slice(0, -1);
     lastKey = '';
+    if (restore) {
+      restore(prev);
+      return;
+    }
     const g = JSON.parse(prev) as FanGroupConfig;
     onchange({ ...g, name: group.name });
   }
+  // Save or Revert replace the baseline: the undo history would then restore
+  // states the user never saw, so it is cleared.
+  $effect(() => {
+    void configStore.baseline;
+    history = [];
+    lastKey = '';
+  });
   function onKey(e: KeyboardEvent) {
     if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.key.toLowerCase() !== 'z') return;
     const t = e.target as HTMLElement;
@@ -127,8 +158,9 @@
   // ------------------------------------------------------------------ mode
   const modeType = $derived(group.mode.type);
   function setMode(t: ModeType) {
-    if (t === group.mode.type) return;
-    change({ ...group, mode: defaultMode(t) }, `mode-${Date.now()}`);
+    if (t === group.mode.type && !mixedModes) return;
+    checkpoint(`mode-${Date.now()}`);
+    onchange({ ...group, mode: t === group.mode.type ? group.mode : defaultMode(t) }, 'mode');
   }
   function setMode2(m: FanMode, key: string) {
     change({ ...group, mode: m }, key);
@@ -170,6 +202,9 @@
       `preset-${Date.now()}`,
     );
   }
+  // In All scope with mixed modes the editor starts from a curve group, so a
+  // preset the curve groups share still lights up; nothing lights when the
+  // lead group is not a curve.
   const activePreset = $derived(presets.find((p) => groupMatchesPreset(group, p))?.id ?? null);
   const taggedPreset = $derived(group.preset_applied ? presets.find((p) => p.id === group.preset_applied) : undefined);
   const modifiedPreset = $derived(
@@ -205,7 +240,11 @@
         <span class="mlabel">Devices <span class="t3 num">{memberCount}</span></span>
         {#if all}
           <span class="allnote">
-            Every change here sets all <b class="num">{groupCount}</b> groups.{#if groupsDiffer}{' '}They differ right now; the first group's settings are the starting point.{/if}
+            {#if mixedModes}
+              The <b class="num">{groupCount}</b> groups use different modes. Edits here reach the groups already in <b>{MODE_LABEL[modeType]}</b> mode; pick a mode to convert the rest (you will be asked first).
+            {:else}
+              Every change here sets all <b class="num">{groupCount}</b> groups.{#if groupsDiffer}{' '}Their settings differ right now; the first group's are the starting point.{/if}
+            {/if}
           </span>
         {:else if members.length}
           <ul class="chips-m" aria-label={membership} title={membership}>
@@ -227,7 +266,7 @@
       </section>
       <section class="seg mode" aria-label="Mode" title={MODE_BLURB[modeType]}>
         <span class="mlabel">Mode</span>
-        <Segmented options={MODE_OPTIONS} value={modeType} label="Control mode" onchange={setMode} />
+        <Segmented options={MODE_OPTIONS} value={mixedModes ? ('' as ModeType) : modeType} label="Control mode" onchange={setMode} />
       </section>
     </div>
 

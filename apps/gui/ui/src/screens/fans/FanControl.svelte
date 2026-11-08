@@ -70,27 +70,62 @@
     if (selected < 0 && groups.length <= 1) selected = 0;
   });
 
-  // ---- "All fans": a virtual group whose mode is written to every group
+  // ---- "All fans": a virtual group whose settings are written to the groups
   const groupsDiffer = $derived(new Set(groups.map((g) => JSON.stringify(g.mode))).size > 1);
+  const mixedModes = $derived(new Set(groups.map((g) => g.mode.type)).size > 1);
+  /** The All editor starts from a curve group when there is one (presets are curves). */
+  const allLead = $derived(groups.find((g) => g.mode.type === 'curve') ?? groups[0]);
   const allGroup = $derived.by((): FanGroupConfig | null => {
-    if (!groups.length) return null;
-    const first = groups[0];
+    if (!allLead) return null;
     return {
       name: 'All fans',
       channels: [],
       hub_serial: null,
       device_ids: [...new Set(groups.flatMap((g) => g.device_ids ?? []))],
-      mode: structuredClone($state.snapshot(first.mode)),
-      preset_applied: groups.every((g) => g.preset_applied === first.preset_applied) ? first.preset_applied : null,
+      mode: structuredClone($state.snapshot(allLead.mode)),
+      preset_applied: groups.every((g) => g.preset_applied === allLead.preset_applied) ? allLead.preset_applied : null,
     };
   });
-  function updateAll(g: FanGroupConfig) {
+  const describeMode = (g: FanGroupConfig) =>
+    g.mode.type === 'fixed' ? `Fixed ${g.mode.duty_percent}%` : g.mode.type === 'pid' ? `PID · ${g.mode.target_temp}°` : 'Curve';
+  /** Write `g.mode` to the groups in `names`, keeping everything else about them. */
+  function writeAll(g: FanGroupConfig, names: string[]) {
     if (!configStore.config) return;
-    configStore.config.fan_groups = configStore.config.fan_groups.map((x) => ({
-      ...x,
-      mode: structuredClone($state.snapshot(g.mode)),
-      preset_applied: g.preset_applied ?? null,
-    }));
+    configStore.config.fan_groups = configStore.config.fan_groups.map((x) =>
+      names.includes(x.name)
+        ? { ...x, mode: structuredClone($state.snapshot(g.mode)), preset_applied: g.preset_applied ?? null }
+        : x,
+    );
+  }
+  let convertOpen = $state(false);
+  let convertPending = $state<FanGroupConfig | null>(null);
+  let convertList = $state('');
+  /**
+   * Edits (curve points, presets, PID fields, noise, sensors) reach only the
+   * groups already in that mode. A deliberate mode switch converts the rest
+   * too, after naming them (the pump is the one that matters).
+   */
+  function updateAll(g: FanGroupConfig, intent: 'mode' | 'edit' = 'edit') {
+    const same = groups.filter((x) => x.mode.type === g.mode.type).map((x) => x.name);
+    const others = groups.filter((x) => x.mode.type !== g.mode.type);
+    if (intent === 'mode' && others.length) {
+      convertPending = g;
+      convertList = others.map((x) => `${x.name} (${describeMode(x)})`).join(', ');
+      convertOpen = true;
+      return;
+    }
+    writeAll(g, same);
+  }
+  function confirmConvert() {
+    const g = convertPending;
+    convertOpen = false;
+    convertPending = null;
+    if (g) writeAll(g, groups.map((x) => x.name));
+  }
+  const snapshotAll = () => JSON.stringify($state.snapshot(configStore.config?.fan_groups ?? []));
+  function restoreAll(s: string) {
+    if (!configStore.config) return;
+    configStore.config.fan_groups = JSON.parse(s) as FanGroupConfig[];
   }
 
   // Dashboard "Edit curve" → select that group, then clear the request.
@@ -181,10 +216,10 @@
 
   // ------------------------------------------------------------ editor entrance spring
   const enter = createSpring(1, springs.sheet);
-  let lastSel = -1;
+  let lastSel: number | null = null;
   $effect(() => {
     const s = selected;
-    if (lastSel !== -1 && s !== lastSel) {
+    if (lastSel !== null && s !== lastSel) {
       enter.set(0, { instant: true });
       springTo(enter, 1);
     }
@@ -292,6 +327,9 @@
             scope="all"
             groupCount={groups.length}
             {groupsDiffer}
+            {mixedModes}
+            snapshot={snapshotAll}
+            restore={restoreAll}
             {availableHubs}
             {availableSensors}
             {presets}
@@ -331,6 +369,18 @@
   {availableHubs}
   onsave={addGroup}
   oncancel={() => (newOpen = false)}
+/>
+
+<ConfirmDialog
+  bind:open={convertOpen}
+  title="Switch every group to {convertPending ? ({ fixed: 'Fixed', curve: 'Curve', pid: 'PID' } as const)[convertPending.mode.type] : ''} mode?"
+  message={`These groups use a different mode and will be converted: ${convertList}. A pump group would then follow this setting instead of its own.`}
+  confirmLabel="Convert all"
+  onconfirm={confirmConvert}
+  oncancel={() => {
+    convertOpen = false;
+    convertPending = null;
+  }}
 />
 
 <ConfirmDialog

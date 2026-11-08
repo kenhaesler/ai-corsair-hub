@@ -43,7 +43,7 @@
   let draft = $state('');
   let input = $state<HTMLInputElement>();
   async function startRename(i: number) {
-    if (i !== selected) return;
+    if (i < 0 || i !== selected || !groups[i]) return;
     draft = groups[i].name;
     renaming = i;
     await tick();
@@ -146,7 +146,7 @@
           class:sel
           aria-selected={sel}
           aria-controls={panelId}
-          aria-label="All fans, {groups.length} groups{allDuty !== null ? `, ${Math.round(allDuty)}% average duty` : ''}. Changes here apply to every group"
+          aria-label="All fans, {groups.length} groups, {allMode === 'Mixed' ? 'mixed modes' : `${allMode} mode`}{allDuty !== null ? `, ${Math.round(allDuty)}% average duty` : ''}. Changes here apply to every group"
           tabindex={sel ? 0 : -1}
           bind:this={allEl}
           onclick={() => onselect(-1)}
@@ -171,7 +171,7 @@
             <span class="duty">
               {#if allDuty !== null}<AnimatedNumber value={allDuty} /><small>%</small>{:else}<span class="nd">–</span>{/if}
             </span>
-            <span class="mode">{allMode}</span>
+            {#if !sel}<span class="mode">{allMode}</span>{/if}
           </span>
           <span class="bar" aria-hidden="true">
             {#if allEnv}<i class="env" style:left={pct(allEnv[0])} style:width={pct(allEnv[1] - allEnv[0])}></i>{/if}
@@ -313,7 +313,7 @@
   .cell {
     position: relative;
     flex: 1 1 200px;
-    min-width: 140px;
+    min-width: 138px;
     container-type: inline-size;
     display: grid;
     gap: 10px;
@@ -328,8 +328,8 @@
     border-left: 0;
   }
   .cell.all {
-    flex: 0 1 220px;
-    min-width: 132px;
+    flex: 0 1 196px;
+    min-width: 124px;
     background: rgba(255, 255, 255, 0.015);
     border-right: 1px solid var(--hair-strong);
   }
@@ -458,7 +458,7 @@
     text-transform: uppercase;
     color: var(--t3);
   }
-  @container (max-width: 168px) {
+  @container (max-width: 158px) {
     .mode {
       display: none;
     }
