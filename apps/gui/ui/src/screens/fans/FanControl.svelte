@@ -5,7 +5,7 @@
   Create / rename / delete auto-save; other edits mark dirty until Save.
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import Fan from 'lucide-svelte/icons/fan';
   import LargeTitlePage from '../../components/shell/LargeTitlePage.svelte';
   import ToolbarActions from '../../components/shell/ToolbarActions.svelte';
@@ -110,12 +110,18 @@
    * to the groups in `names`, so groups with their own curve keep what the
    * user did not touch. A points change carries the preset tag with it.
    */
-  function writeChanged(g: FanGroupConfig, names: string[]) {
+  const PRESET_FIELDS = ['points', 'hysteresis', 'ramp_rate', 'ramp_down_rate', 'temp_source'];
+  function writeChanged(g: FanGroupConfig, names: string[], force: string[] = []) {
     if (!configStore.config || !allGroup) return;
     const before = allGroup.mode as unknown as Record<string, unknown>;
     const after = $state.snapshot(g.mode) as unknown as Record<string, unknown>;
-    const changed = Object.keys(after).filter((k) => k !== 'type' && JSON.stringify(after[k]) !== JSON.stringify(before[k]));
-    const tagChanged = g.preset_applied !== allGroup.preset_applied;
+    const changed = [
+      ...new Set([
+        ...force.filter((k) => k in after),
+        ...Object.keys(after).filter((k) => k !== 'type' && JSON.stringify(after[k]) !== JSON.stringify(before[k])),
+      ]),
+    ];
+    const tagChanged = force.length > 0 || g.preset_applied !== allGroup.preset_applied;
     if (!changed.length && !tagChanged) return;
     configStore.config.fan_groups = configStore.config.fan_groups.map((x) => {
       if (!names.includes(x.name)) return x;
@@ -138,7 +144,7 @@
    * groups already in that mode. A deliberate mode switch converts the rest
    * too, after naming them (the pump is the one that matters).
    */
-  function updateAll(g: FanGroupConfig, intent: 'mode' | 'edit' = 'edit') {
+  function updateAll(g: FanGroupConfig, intent: 'mode' | 'edit' | 'preset' = 'edit') {
     const same = groups.filter((x) => x.mode.type === g.mode.type).map((x) => x.name);
     const others = groups.filter((x) => x.mode.type !== g.mode.type);
     if (intent === 'mode') {
@@ -148,7 +154,8 @@
       convertOpen = true;
       return;
     }
-    writeChanged(g, same);
+    // a preset is the whole curve recipe: every curve group gets all of it, not just the fields that differ
+    writeChanged(g, same, intent === 'preset' ? PRESET_FIELDS : []);
   }
   function confirmConvert() {
     const g = convertPending;
@@ -163,6 +170,8 @@
     convertOpen = false;
     convertPending = null;
     controlKey++;
+    // the Mode control was rebuilt; give focus back to it
+    tick().then(() => document.querySelector<HTMLElement>('#fan-group-editor .mode [role=radio]')?.focus({ preventScroll: true }));
   }
   const snapshotAll = () => JSON.stringify($state.snapshot(configStore.config?.fan_groups ?? []));
   function restoreAll(s: string) {

@@ -33,7 +33,8 @@
   }: Props = $props();
 
   function onKey(e: KeyboardEvent) {
-    if (e.key === 'Enter') {
+    // Enter confirms, except when a button has focus: then that button acts (Cancel stays Cancel).
+    if (e.key === 'Enter' && !(e.target instanceof HTMLButtonElement)) {
       e.preventDefault();
       onconfirm();
     }

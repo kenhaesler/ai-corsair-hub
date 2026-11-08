@@ -53,7 +53,7 @@
     availableSensors: string[];
     presets: FanPresetDef[];
     /** `intent` 'mode' = the user switched the control mode (All scope may convert groups, after confirming) */
-    onchange: (g: FanGroupConfig, intent?: 'mode' | 'edit') => void;
+    onchange: (g: FanGroupConfig, intent?: 'mode' | 'edit' | 'preset') => void;
     ondelete: () => void;
   }
   let {
@@ -120,9 +120,9 @@
     e.preventDefault();
     undo();
   }
-  function change(next: FanGroupConfig, key: string) {
+  function change(next: FanGroupConfig, key: string, intent: 'edit' | 'preset' = 'edit') {
     checkpoint(key);
-    onchange(next);
+    onchange(next, intent);
   }
 
   // ------------------------------------------------------------- membership
@@ -216,6 +216,7 @@
         preset_applied: p.id,
       },
       `preset-${Date.now()}`,
+      'preset',
     );
   }
   // In All scope with mixed modes the editor starts from a curve group, so a
@@ -261,7 +262,7 @@
             {:else}
               Every change here sets all <b class="num">{groupCount}</b> groups.
             {/if}
-            {#if groupsDiffer && leadName}{' '}Their settings differ; <b>{leadName}</b>'s are shown as the starting point, and only what you change is written to the others.{/if}
+            {#if groupsDiffer && leadName}{' '}Their settings differ; <b>{leadName}</b>'s are shown as the starting point. Whatever you change (the curve, noise behaviour or sensor mix) replaces theirs; everything else stays as each group has it.{/if}
           </span>
         {:else if members.length}
           <ul class="chips-m" aria-label={membership} title={membership}>
