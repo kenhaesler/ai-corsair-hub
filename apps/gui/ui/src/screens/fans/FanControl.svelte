@@ -61,6 +61,9 @@
   const groups = $derived(configStore.config?.fan_groups ?? []);
   let selected = $state(0);
   $effect(() => {
+    ui.fanSelectedGroup = groups[selected]?.name ?? null;
+  });
+  $effect(() => {
     if (selected >= groups.length) selected = Math.max(0, groups.length - 1);
   });
 

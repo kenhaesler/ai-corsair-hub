@@ -34,7 +34,10 @@
     { id: 'power', label: 'Power', icon: Zap },
     { id: 'speeds', label: 'Speeds', icon: Activity },
   ];
-  let tab = $state<TabId>('temps');
+  let tab = $state<TabId>(ui.specTab);
+  $effect(() => {
+    ui.specTab = tab;
+  });
   const ti = $derived(TABS.findIndex((t) => t.id === tab));
 
   interface Row {
@@ -262,7 +265,11 @@
               disabled={!r.hl || ui.editingPins}
               aria-label={r.hl ? `${r.name}: ${fmtV(r)} ${r.unit}. Open details` : undefined}
               tabindex={r.hl && !ui.editingPins ? 0 : -1}
-              onclick={() => r.hl && ui.openDetail(r.hl)}
+              onclick={(e) => {
+                if (!r.hl) return;
+                ui.detailOpener = e.currentTarget as HTMLElement;
+                ui.openDetail(r.hl);
+              }}
             ></button>
             <div class="nm">
               <b><Icon size={14} strokeWidth={1.75} />{r.name}</b>
@@ -272,8 +279,8 @@
               {#if r.env}<i class="env" style:left="{frac(r, r.env[0]) * 100}%" style:width="{(frac(r, r.env[1]) - frac(r, r.env[0])) * 100}%"></i>{/if}
               <i class="fill" style:transform="scaleX({frac(r, r.value)})"></i>
               <i class="cap" style:left="calc({frac(r, r.value) * 100}% - 1px)"></i>
-              <i class="spark" style:left="calc({frac(r, r.value) * 100}% - 40px)" style:animation-delay="{i * 0.6}s"></i>
-              <i class="spark" style:left="calc({frac(r, r.value) * 100}% - 40px)" style:animation-delay="{i * 0.6 + 1.3}s"></i>
+              <i class="spark" style:left="max(2px, calc({frac(r, r.value) * 100}% - 40px))" style:animation-delay="{i * 0.6}s"></i>
+              <i class="spark" style:left="max(2px, calc({frac(r, r.value) * 100}% - 40px))" style:animation-delay="{i * 0.6 + 1.3}s"></i>
             </div>
             <div class="val num">{fmtV(r)}<small>{r.unit}</small></div>
             {#if ui.editingPins && r.hl}

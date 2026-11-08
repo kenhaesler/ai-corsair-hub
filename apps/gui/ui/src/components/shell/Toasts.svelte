@@ -55,6 +55,16 @@
         <p class="title">{t.title}</p>
         {#if t.detail}<p class="detail">{t.detail}</p>{/if}
       </div>
+      {#if t.action}
+        <button
+          type="button"
+          class="act"
+          onclick={() => {
+            t.action?.run();
+            toasts.dismiss(t.id);
+          }}>{t.action.label}</button
+        >
+      {/if}
       <button type="button" class="x" aria-label="Dismiss notification" onclick={() => toasts.dismiss(t.id)}>
         <X size={13} strokeWidth={2.5} />
       </button>
@@ -122,6 +132,22 @@
     color: var(--t2);
     margin-top: 1px;
     overflow-wrap: anywhere;
+  }
+  .act {
+    flex: none;
+    align-self: center;
+    height: 26px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 8px;
+    background: var(--accent);
+    color: var(--accent-ink);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .act:hover {
+    background: var(--accent-strong);
   }
   .x {
     flex: none;

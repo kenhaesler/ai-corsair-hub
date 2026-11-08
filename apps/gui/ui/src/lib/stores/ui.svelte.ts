@@ -53,6 +53,12 @@ class UiStore {
   pins = $state<PinState>(loadPins());
   /** Fan Control should select this group when it next renders. */
   fanFocusGroup = $state<string | null>(null);
+  /** Name of the group selected in Fan Control (the status bar hides what its editor already shows). */
+  fanSelectedGroup = $state<string | null>(null);
+  /** Which readings tab the Summary's spec panel shows (the Control path hides values that tab already shows). */
+  specTab = $state<'temps' | 'groups' | 'power' | 'speeds'>('temps');
+  /** Element that opened the current Detail page; focus returns to it on close. */
+  detailOpener: HTMLElement | null = null;
 
   chrome = $state<Record<Tab, PageChrome>>({
     dashboard: { title: 'Summary', collapse: 0, back: null },

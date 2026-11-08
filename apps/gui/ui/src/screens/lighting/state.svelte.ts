@@ -182,6 +182,8 @@ export function applyPreset(p: RgbPreset) {
   if (!cfg) return;
   const current = cfg.zones;
   const prev = current.length;
+  const before = structuredClone($state.snapshot(current)) as RgbZoneConfig[];
+  const beforeSel = rgb.selectedZone;
   cfg.zones = (structuredClone($state.snapshot(p.zones)) as RgbZoneConfig[]).map((pz, i) => {
     const existing = current[i]?.devices ?? [];
     return { ...pz, devices: existing.length > 0 ? ($state.snapshot(existing) as typeof existing) : pz.devices };
@@ -193,6 +195,16 @@ export function applyPreset(p: RgbPreset) {
       ok &&
       toasts.success(`${p.name} applied`, {
         detail: `${prev} ${prev === 1 ? 'zone' : 'zones'} replaced by ${n}. Device assignments kept.`,
+        timeout: 7000,
+        action: {
+          label: 'Undo',
+          run: () => {
+            if (!rgb.config) return;
+            rgb.config.zones = before;
+            rgb.selectedZone = Math.min(beforeSel, before.length - 1);
+            persist();
+          },
+        },
       }),
   );
 }

@@ -168,11 +168,13 @@
   .sw {
     transition:
       opacity var(--dur-med) var(--ease-out-expo),
-      transform var(--dur-med) var(--ease-out-expo);
+      width var(--dur-med) var(--ease-out-expo),
+      margin var(--dur-med) var(--ease-out-expo);
   }
   .sw.hide {
     opacity: 0;
-    transform: scaleX(0.4);
+    width: 0;
+    margin-right: -10px;
   }
   .nm {
     font-size: 14px;

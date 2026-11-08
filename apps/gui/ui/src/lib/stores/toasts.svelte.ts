@@ -14,11 +14,14 @@ export interface Toast {
   detail?: string;
   /** ms before auto-dismiss; 0 = sticky */
   timeout: number;
+  /** optional single action (e.g. Undo); dismisses the toast when run */
+  action?: { label: string; run: () => void };
 }
 
 export interface ToastOptions {
   detail?: string;
   timeout?: number;
+  action?: { label: string; run: () => void };
 }
 
 let nextId = 1;
@@ -31,7 +34,7 @@ class ToastStore {
   push(kind: ToastKind, title: string, opts: ToastOptions = {}): number {
     const id = nextId++;
     const timeout = opts.timeout ?? (kind === 'error' ? 6500 : 3800);
-    const toast: Toast = { id, kind, title, detail: opts.detail, timeout };
+    const toast: Toast = { id, kind, title, detail: opts.detail, timeout, action: opts.action };
     this.items = [...this.items, toast].slice(-MAX);
     if (timeout > 0) this.timers.set(id, setTimeout(() => this.dismiss(id), timeout));
     return id;

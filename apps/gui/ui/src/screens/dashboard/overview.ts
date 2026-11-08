@@ -96,7 +96,7 @@ export function groupWhy(g: FanGroupConfig | undefined, snap: SystemSnapshot, em
     return `Holding ${src} at ${m.target_temp}° · PID`;
   }
   const t = mixTemp(snap, m.temp_source);
-  return `${mixText(m.temp_source)} → ${t === null ? '–' : t.toFixed(1)}° · on its curve`;
+  return `${mixText(m.temp_source)} → ${t === null ? '–' : t.toFixed(1)}°`;
 }
 
 /** Short status tag for the control path. */

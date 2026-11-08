@@ -11,6 +11,7 @@
 <script lang="ts">
   import { display } from '../../lib/stores/scrub.svelte';
   import { ui, type Tab } from '../../lib/stores/ui.svelte';
+  import { configStore } from '../../lib/stores/config.svelte';
   import { meanDuty, sourceLabel, statusLevel } from '../../lib/format';
 
   interface Hide {
@@ -21,13 +22,23 @@
   }
   const HIDE: Record<Tab, Hide> = {
     dashboard: { all: true },
-    fans: { temps: ['cpu'], groups: true },
+    fans: { groups: true },
     devices: { psu: true },
     lighting: {},
     settings: {},
   };
 
-  const hide = $derived(HIDE[ui.activeTab]);
+  // On Fan Control the selected group's editor shows the sensors it listens
+  // to (curve marker / PID track), so those are hidden here. A fixed group
+  // shows none, so nothing is hidden.
+  const fanHidden = $derived.by((): string[] => {
+    const g = configStore.config?.fan_groups.find((x) => x.name === ui.fanSelectedGroup);
+    if (!g || g.mode.type === 'fixed') return [];
+    const src = g.mode.temp_source.sensors;
+    // the curve editor's secondary marker is the raw CPU reading
+    return g.mode.type === 'curve' ? [...new Set([...src, 'cpu'])] : [...src];
+  });
+  const hide = $derived<Hide>(ui.activeTab === 'fans' ? { ...HIDE.fans, temps: fanHidden } : HIDE[ui.activeTab]);
   const s = $derived(display.snapshot);
   const level = $derived(statusLevel(display.maxTemp));
   const levelText = $derived(level === 'error' ? 'Critical temperature' : level === 'warn' ? 'Running warm' : 'Normal');

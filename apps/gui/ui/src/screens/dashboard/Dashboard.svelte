@@ -46,6 +46,17 @@
   $effect(() => {
     if (ui.detail && display.live && !detailH) ui.detail = null;
   });
+  // Back from Detail: focus returns to the row that opened it.
+  let wasDetail = false;
+  $effect(() => {
+    const now = !!detailH;
+    if (wasDetail && !now) {
+      const el = ui.detailOpener;
+      ui.detailOpener = null;
+      if (el && document.contains(el)) queueMicrotask(() => el.focus({ preventScroll: true }));
+    }
+    wasDetail = now;
+  });
 </script>
 
 <ToolbarActions active={!detailH}>

@@ -66,8 +66,8 @@
       {range}
       height={300}
       endLabels="interactive"
-      left={{ min: 20, max: 100, ticks: [30, 40, 50, 60, 70, 80, 90], format: (v) => `${v}°` }}
-      right={{ min: 0, max: 100, ticks: [20, 40, 60, 80, 100], format: (v) => `${v}%` }}
+      left={{ min: 20, max: 100, ticks: [40, 60, 80, 100], format: (v) => `${v}°` }}
+      right={{ min: 0, max: 100, ticks: [25, 50, 75, 100], format: (v) => `${v}%` }}
     />
     <div class="legend" aria-label="Legend">
       {#each sources as src (src)}

@@ -73,7 +73,7 @@
     <span class="k">Headroom</span>
     {#if hr}
       <span class="n"><AnimatedNumber value={Math.max(0, hr.value)} decimals={1} /><small>°C</small></span>
-      <span class="d">{hr.part} to its {hr.part === 'CPU' ? CRITICAL_CPU : CRITICAL_GPU} °C override</span>
+      <span class="d">{hr.part} to its {hr.part === 'CPU' ? CRITICAL_CPU : CRITICAL_GPU} °C limit</span>
     {:else}
       <span class="n dim">–</span><span class="d">No CPU or GPU sensor</span>
     {/if}

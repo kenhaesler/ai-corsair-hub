@@ -83,7 +83,7 @@
         onclick={() => ui.openDetail(`temp:${src}`)}
       >
         <span class="ic"><Icon size={14} strokeWidth={1.8} /></span>{srcShort(src)}
-        <span class="v num">{t === null ? '–' : t.toFixed(1)}°</span>
+        {#if ui.specTab !== 'temps'}<span class="v num">{t === null ? '–' : t.toFixed(1)}°</span>{/if}
       </button>
       <i class="port" style:left="{inR}px" style:top="{inY[i]}px"></i>
       <i
@@ -100,7 +100,7 @@
         <circle cx="12" cy="12" r="8.5" /><path d="M12 3.5v4M12 16.5v4M3.5 12h4M16.5 12h4" /><circle cx="12" cy="12" r="2.6" fill="currentColor" />
       </svg>
     </div>
-    <span class="hublab" style:left="{hubX + HUB / 2}px" style:top="{cy + HUB / 2 + 16}px">Control loop</span>
+    <span class="hublab" style:left="{hubX + HUB / 2}px" style:top="{cy + HUB / 2 + 14}px">Control loop</span>
 
     {#each groups as g, i (g.name)}
       {@const grp = findGroup(cfg, g.name)}
@@ -116,7 +116,7 @@
         onclick={() => ui.openDetail(`group:${g.name}`)}
       >
         <span class="ic"><Fan size={14} strokeWidth={1.8} /></span><span class="gn">{g.name}</span>
-        <span class="v num">{Math.round(g.duty_percent)}%</span>
+        {#if ui.specTab !== 'groups'}<span class="v num">{Math.round(g.duty_percent)}%</span>{/if}
         <span class="tag">{tag}</span>
       </button>
       <i class="port" style:left="{outL}px" style:top="{outY[i]}px"></i>
@@ -293,6 +293,9 @@
   .hublab {
     position: absolute;
     translate: -50% 0;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--bg-0);
     white-space: nowrap;
     font: 500 10.5px var(--font-mono);
     letter-spacing: 0.12em;
