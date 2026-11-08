@@ -15,6 +15,8 @@
     confirmLabel?: string;
     cancelLabel?: string;
     destructive?: boolean;
+    /** focus Cancel instead of the confirm button (for far-reaching actions) */
+    focusCancel?: boolean;
     onconfirm: () => void;
     oncancel: () => void;
   }
@@ -25,6 +27,7 @@
     confirmLabel = 'Confirm',
     cancelLabel = 'Cancel',
     destructive = false,
+    focusCancel = false,
     onconfirm,
     oncancel,
   }: Props = $props();
@@ -49,8 +52,8 @@
   {/snippet}
   <p class="msg t-body" id="{tid}-msg">{message}</p>
   {#snippet footer()}
-    <Button variant="secondary" onclick={oncancel}>{cancelLabel}</Button>
-    <Button variant={destructive ? 'destructive' : 'primary'} onclick={onconfirm} data-autofocus>
+    <Button variant="secondary" onclick={oncancel} data-autofocus={focusCancel ? true : undefined}>{cancelLabel}</Button>
+    <Button variant={destructive ? 'destructive' : 'primary'} onclick={onconfirm} data-autofocus={focusCancel ? undefined : true}>
       {confirmLabel}
     </Button>
   {/snippet}

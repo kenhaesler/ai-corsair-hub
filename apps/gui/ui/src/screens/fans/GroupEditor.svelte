@@ -41,6 +41,14 @@
     /** All scope: undo snapshots/restores the whole group list, supplied by the page */
     snapshot?: () => string;
     restore?: (s: string) => void;
+    /** All scope: the preset every curve group shares (null when they differ) */
+    sharedPreset?: string | null;
+    /** All scope: name of the group whose settings the editor started from */
+    leadName?: string;
+    /** All scope: bumping this remounts the Mode control (after a cancelled conversion) */
+    controlKey?: number;
+    /** lets the page push an undo checkpoint (after a confirmed conversion) */
+    onready?: (api: { checkpoint: (key: string) => void }) => void;
     availableHubs: HubSnapshot[];
     availableSensors: string[];
     presets: FanPresetDef[];
@@ -57,6 +65,10 @@
     mixedModes = false,
     snapshot,
     restore,
+    sharedPreset = null,
+    leadName,
+    controlKey = 0,
+    onready,
     availableHubs,
     availableSensors,
     presets,
@@ -91,12 +103,15 @@
     const g = JSON.parse(prev) as FanGroupConfig;
     onchange({ ...g, name: group.name });
   }
-  // Save or Revert replace the baseline: the undo history would then restore
-  // states the user never saw, so it is cleared.
+  // Load, Save and Revert start a new editing session: the undo history would
+  // otherwise restore states the user never saw, so it is cleared.
   $effect(() => {
-    void configStore.baseline;
+    void configStore.epoch;
     history = [];
     lastKey = '';
+  });
+  $effect(() => {
+    onready?.({ checkpoint });
   });
   function onKey(e: KeyboardEvent) {
     if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.key.toLowerCase() !== 'z') return;
@@ -159,7 +174,8 @@
   const modeType = $derived(group.mode.type);
   function setMode(t: ModeType) {
     if (t === group.mode.type && !mixedModes) return;
-    checkpoint(`mode-${Date.now()}`);
+    // In All scope the page confirms first and takes the checkpoint itself.
+    if (!all) checkpoint(`mode-${Date.now()}`);
     onchange({ ...group, mode: t === group.mode.type ? group.mode : defaultMode(t) }, 'mode');
   }
   function setMode2(m: FanMode, key: string) {
@@ -205,7 +221,7 @@
   // In All scope with mixed modes the editor starts from a curve group, so a
   // preset the curve groups share still lights up; nothing lights when the
   // lead group is not a curve.
-  const activePreset = $derived(presets.find((p) => groupMatchesPreset(group, p))?.id ?? null);
+  const activePreset = $derived(all ? sharedPreset : (presets.find((p) => groupMatchesPreset(group, p))?.id ?? null));
   const taggedPreset = $derived(group.preset_applied ? presets.find((p) => p.id === group.preset_applied) : undefined);
   const modifiedPreset = $derived(
     taggedPreset && computePresetState(configStore.config, taggedPreset, group.name) === 'modified' ? taggedPreset.id : null,
@@ -243,8 +259,9 @@
             {#if mixedModes}
               The <b class="num">{groupCount}</b> groups use different modes. Edits here reach the groups already in <b>{MODE_LABEL[modeType]}</b> mode; pick a mode to convert the rest (you will be asked first).
             {:else}
-              Every change here sets all <b class="num">{groupCount}</b> groups.{#if groupsDiffer}{' '}Their settings differ right now; the first group's are the starting point.{/if}
+              Every change here sets all <b class="num">{groupCount}</b> groups.
             {/if}
+            {#if groupsDiffer && leadName}{' '}Their settings differ; <b>{leadName}</b>'s are shown as the starting point, and only what you change is written to the others.{/if}
           </span>
         {:else if members.length}
           <ul class="chips-m" aria-label={membership} title={membership}>
@@ -266,7 +283,9 @@
       </section>
       <section class="seg mode" aria-label="Mode" title={MODE_BLURB[modeType]}>
         <span class="mlabel">Mode</span>
-        <Segmented options={MODE_OPTIONS} value={mixedModes ? ('' as ModeType) : modeType} label="Control mode" onchange={setMode} />
+        {#key controlKey}
+          <Segmented options={MODE_OPTIONS} value={mixedModes ? ('' as ModeType) : modeType} label="Control mode" onchange={setMode} />
+        {/key}
       </section>
     </div>
 

@@ -12,6 +12,8 @@ class ConfigStore {
   saving = $state(false);
   /** JSON of the last loaded/saved config. */
   baseline = $state<string>('');
+  /** Bumps whenever the editing session restarts (load, save, revert): editors drop their undo history. */
+  epoch = $state(0);
   /** Unsaved edits present. */
   dirty = $derived(this.config !== null && JSON.stringify(this.config) !== this.baseline);
   /** The last saved config: what the control loop is actually running (never the unsaved draft). */
@@ -58,6 +60,7 @@ export async function loadConfig() {
     configStore.config = cfg;
     configStore.baseline = JSON.stringify(cfg);
     configStore.error = null;
+    configStore.epoch++;
   } catch (e) {
     configStore.error = String(e);
   }
@@ -79,6 +82,7 @@ export async function saveCurrentConfig(opts: { successMessage?: string | null }
     const fresh = await getConfig();
     configStore.config = fresh;
     configStore.baseline = JSON.stringify(fresh);
+    configStore.epoch++;
     const msg = opts.successMessage === undefined ? 'Configuration saved' : opts.successMessage;
     if (msg) toasts.success(msg);
     return true;
@@ -187,4 +191,5 @@ export function revertConfig() {
   if (!configStore.baseline) return;
   configStore.config = JSON.parse(configStore.baseline);
   configStore.error = null;
+  configStore.epoch++;
 }

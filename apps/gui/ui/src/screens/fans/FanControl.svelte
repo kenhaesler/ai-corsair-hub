@@ -26,6 +26,7 @@
   import { groupColor } from '../../lib/format';
   import { createSpring, springTo, springs } from '../../lib/motion.svelte';
   import { modeHasCurveError } from './fanModes';
+  import { groupMatchesPreset } from '../../lib/presets';
   import type { FanGroupConfig, FanPresetDef, HubSnapshot } from '../../lib/types';
 
   let availableHubs = $state<HubSnapshot[]>([]);
@@ -88,7 +89,14 @@
   });
   const describeMode = (g: FanGroupConfig) =>
     g.mode.type === 'fixed' ? `Fixed ${g.mode.duty_percent}%` : g.mode.type === 'pid' ? `PID · ${g.mode.target_temp}°` : 'Curve';
-  /** Write `g.mode` to the groups in `names`, keeping everything else about them. */
+  /** The preset every curve group shares, or null. */
+  const sharedPreset = $derived.by(() => {
+    const curves = groups.filter((g) => g.mode.type === 'curve');
+    if (!curves.length) return null;
+    const p = presets.find((p) => curves.every((g) => groupMatchesPreset(g, p)));
+    return p?.id ?? null;
+  });
+  /** Write the whole mode (a conversion) to the groups in `names`. */
   function writeAll(g: FanGroupConfig, names: string[]) {
     if (!configStore.config) return;
     configStore.config.fan_groups = configStore.config.fan_groups.map((x) =>
@@ -97,9 +105,34 @@
         : x,
     );
   }
+  /**
+   * Write only the fields that changed (relative to what the editor showed)
+   * to the groups in `names`, so groups with their own curve keep what the
+   * user did not touch. A points change carries the preset tag with it.
+   */
+  function writeChanged(g: FanGroupConfig, names: string[]) {
+    if (!configStore.config || !allGroup) return;
+    const before = allGroup.mode as unknown as Record<string, unknown>;
+    const after = $state.snapshot(g.mode) as unknown as Record<string, unknown>;
+    const changed = Object.keys(after).filter((k) => k !== 'type' && JSON.stringify(after[k]) !== JSON.stringify(before[k]));
+    const tagChanged = g.preset_applied !== allGroup.preset_applied;
+    if (!changed.length && !tagChanged) return;
+    configStore.config.fan_groups = configStore.config.fan_groups.map((x) => {
+      if (!names.includes(x.name)) return x;
+      const mode = { ...x.mode } as unknown as Record<string, unknown>;
+      for (const k of changed) mode[k] = structuredClone(after[k]);
+      return {
+        ...x,
+        mode: mode as unknown as FanGroupConfig['mode'],
+        preset_applied: tagChanged || changed.includes('points') ? (g.preset_applied ?? null) : x.preset_applied,
+      };
+    });
+  }
   let convertOpen = $state(false);
   let convertPending = $state<FanGroupConfig | null>(null);
   let convertList = $state('');
+  let controlKey = $state(0);
+  let editorApi: { checkpoint: (key: string) => void } | null = null;
   /**
    * Edits (curve points, presets, PID fields, noise, sensors) reach only the
    * groups already in that mode. A deliberate mode switch converts the rest
@@ -108,19 +141,28 @@
   function updateAll(g: FanGroupConfig, intent: 'mode' | 'edit' = 'edit') {
     const same = groups.filter((x) => x.mode.type === g.mode.type).map((x) => x.name);
     const others = groups.filter((x) => x.mode.type !== g.mode.type);
-    if (intent === 'mode' && others.length) {
+    if (intent === 'mode') {
+      if (!others.length) return;
       convertPending = g;
       convertList = others.map((x) => `${x.name} (${describeMode(x)})`).join(', ');
       convertOpen = true;
       return;
     }
-    writeAll(g, same);
+    writeChanged(g, same);
   }
   function confirmConvert() {
     const g = convertPending;
     convertOpen = false;
     convertPending = null;
-    if (g) writeAll(g, groups.map((x) => x.name));
+    if (!g) return;
+    editorApi?.checkpoint(`convert-${Date.now()}`);
+    // only the groups in another mode are converted; groups already in this mode keep their settings
+    writeAll(g, groups.filter((x) => x.mode.type !== g.mode.type).map((x) => x.name));
+  }
+  function cancelConvert() {
+    convertOpen = false;
+    convertPending = null;
+    controlKey++;
   }
   const snapshotAll = () => JSON.stringify($state.snapshot(configStore.config?.fan_groups ?? []));
   function restoreAll(s: string) {
@@ -328,6 +370,10 @@
             groupCount={groups.length}
             {groupsDiffer}
             {mixedModes}
+            {sharedPreset}
+            leadName={allLead?.name}
+            {controlKey}
+            onready={(api) => (editorApi = api)}
             snapshot={snapshotAll}
             restore={restoreAll}
             {availableHubs}
@@ -375,12 +421,10 @@
   bind:open={convertOpen}
   title="Switch every group to {convertPending ? ({ fixed: 'Fixed', curve: 'Curve', pid: 'PID' } as const)[convertPending.mode.type] : ''} mode?"
   message={`These groups use a different mode and will be converted: ${convertList}. A pump group would then follow this setting instead of its own.`}
-  confirmLabel="Convert all"
+  confirmLabel="Convert"
+  focusCancel
   onconfirm={confirmConvert}
-  oncancel={() => {
-    convertOpen = false;
-    convertPending = null;
-  }}
+  oncancel={cancelConvert}
 />
 
 <ConfirmDialog
