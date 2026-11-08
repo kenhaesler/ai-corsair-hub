@@ -97,6 +97,10 @@ pub struct GeneralConfig {
     /// If `None`, auto-detects at the standard Program Files location.
     #[serde(default)]
     pub lhm_exe_path: Option<String>,
+    /// Pump stall alarm: every visible pump below this rpm for 5 s raises the
+    /// emergency override. `None` = default (800 rpm); `Some(0)` disables.
+    #[serde(default)]
+    pub pump_min_rpm: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,6 +254,7 @@ impl Default for AppConfig {
                 poll_interval_ms: 1000,
                 log_level: "info".to_string(),
                 lhm_exe_path: None,
+                pump_min_rpm: None,
             },
             fan_groups: vec![],
             rgb: RgbConfig::default(),
@@ -558,6 +563,7 @@ led_count = 30
                 poll_interval_ms: 1000,
                 log_level: "info".to_string(),
                 lhm_exe_path: None,
+                pump_min_rpm: None,
             },
             fan_groups: vec![FanGroupConfig {
                 name: "g1".to_string(),

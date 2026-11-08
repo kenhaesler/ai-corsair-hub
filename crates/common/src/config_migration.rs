@@ -289,6 +289,7 @@ mod tests {
                 poll_interval_ms: 1000,
                 log_level: "info".to_string(),
                 lhm_exe_path: None,
+                pump_min_rpm: None,
             },
             fan_groups: Vec::new(),
             rgb: RgbConfig::default(),

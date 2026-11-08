@@ -247,6 +247,8 @@ fn run_loop(
         last_temp,
         last_temp_time,
         last_good_psu,
+        last_link_pump_rpms: Vec::new(),
+        pump_stall_active: false,
         psu_fail_count,
         rgb_identify,
         rgb_marker,
@@ -289,6 +291,10 @@ pub(crate) struct Worker {
     pub(crate) last_temp_time: Option<Instant>,
     /// Cache last good PSU reading so transient failures don't flicker the UI
     pub(crate) last_good_psu: Option<corsair_hid::PsuStatus>,
+    /// LINK pump rpm from the previous cycle, fed to the stall watchdog.
+    pub(crate) last_link_pump_rpms: Vec<f64>,
+    /// Edge detection for the pump-stall / pump-recovered events.
+    pub(crate) pump_stall_active: bool,
     pub(crate) psu_fail_count: u32,
     /// Channel-identify diagnostic state. When `Some((deadline, map))`,
     /// the RGB tick overrides normal rendering with per-device distinct
@@ -663,7 +669,25 @@ impl Worker {
         }
 
         // Run one control cycle
+        // Pumps first: the watchdog needs this tick's motherboard readings and
+        // the LINK pump speeds from the previous cycle.
+        let mb_pumps = self.env.telemetry.read_motherboard_pumps();
+        let mut pump_rpms: Vec<f64> = mb_pumps.iter().map(|p| p.rpm).collect();
+        pump_rpms.extend(self.last_link_pump_rpms.iter().copied());
+        self.control_loop.report_pumps(&pump_rpms);
         let cycle_result = self.control_loop.tick();
+        if cycle_result.pump_stall != self.pump_stall_active {
+            self.pump_stall_active = cycle_result.pump_stall;
+            let names: Vec<String> = mb_pumps.iter().map(|p| p.name.clone()).collect();
+            let msg = names.join(", ");
+            if cycle_result.pump_stall {
+                error!(pumps = %msg, "Pump stall detected");
+                emit(&*self.env.events, "pump-stall", &msg);
+            } else {
+                info!(pumps = %msg, "Pump stall cleared");
+                emit(&*self.env.events, "pump-recovered", &msg);
+            }
+        }
 
         // Emit hub-lost for any hub that just became unhealthy (first failure)
         for report in &cycle_result.hub_health {
@@ -744,7 +768,7 @@ impl Worker {
         let cpu_metrics = self.env.telemetry.read_cpu_metrics();
         // Pumps: motherboard headers via LHM, plus LINK pumps from this
         // cycle's speeds (no extra HID traffic).
-        let mut pumps = self.env.telemetry.read_motherboard_pumps();
+        let mut pumps = mb_pumps;
         let types = self.control_loop.device_type_map();
         for (serial, speeds) in &cycle_result.fan_speeds {
             for sp in speeds {
@@ -761,6 +785,7 @@ impl Worker {
                 }
             }
         }
+        self.last_link_pump_rpms = pumps.iter().filter(|p| p.source == "link").map(|p| p.rpm).collect();
         let snapshot = SystemSnapshot::from_cycle(
             &cycle_result,
             &cycle_result.fan_speeds,
@@ -2180,6 +2205,7 @@ mod tests {
                 poll_interval_ms: 1000,
                 log_level: "info".to_string(),
                 lhm_exe_path: None,
+                pump_min_rpm: None,
             },
             fan_groups: Vec::new(),
             rgb: Default::default(),

@@ -14,9 +14,12 @@
     /** preset applied to this group but edited since (inventory 0.7 "modified") */
     modified?: string | null;
     color: string;
+    /** sensor ids available right now; a coolant preset says so when the sensor is missing */
+    availableSensors?: string[];
     onapply: (p: FanPresetDef) => void;
   }
-  let { presets, active, modified = null, color, onapply }: Props = $props();
+  let { presets, active, modified = null, color, availableSensors = [], onapply }: Props = $props();
+  const needsCoolant = (p: FanPresetDef) => p.water_weight > 0 && !availableSensors.includes('water_inline');
 
   function thumb(p: FanPresetDef): string {
     const ts = p.points.map((q) => q.temp);
@@ -39,7 +42,7 @@
       aria-pressed={active === p.id}
       title="{p.description}. Applies the curve, hysteresis, ramp rates and sensor weights.{modified === p.id
         ? ' Applied to this group, then modified.'
-        : ''}"
+        : ''}{needsCoolant(p) ? ' No coolant sensor is connected, so it would follow CPU and GPU instead.' : ''}"
       onclick={() => onapply(p)}
     >
       <svg width="24" height="14" viewBox="0 0 24 14" aria-hidden="true"><path d={thumb(p)} /></svg>

@@ -317,7 +317,7 @@
       <InsetGroup title="Curve">
         {#snippet action()}
           {#if presets.length}
-            <PresetChips {presets} active={activePreset} modified={modifiedPreset} {color} onapply={applyPreset} />
+            <PresetChips {presets} active={activePreset} modified={modifiedPreset} {color} {availableSensors} onapply={applyPreset} />
           {/if}
         {/snippet}
         <CurveEditor

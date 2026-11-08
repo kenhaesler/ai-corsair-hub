@@ -19,6 +19,7 @@ use corsair_sensors::{discover_lhm_temp_sources, LhmCache, TemperatureSource};
 use crate::acoustic::AcousticFilter;
 use crate::curve::FanCurve;
 use crate::pid::PidController;
+use crate::pump_watchdog::{PumpWatchdog, DEFAULT_PUMP_MIN_RPM};
 
 const FAILSAFE_DUTY: f64 = 70.0;
 const EMERGENCY_DUTY: f64 = 100.0;
@@ -31,6 +32,11 @@ const CRITICAL_GPU_TEMP: f64 = 90.0;
 const SENSOR_STALE_TIMEOUT: Duration = Duration::from_secs(5);
 const MIN_FAN_DUTY: f64 = 20.0;
 const MIN_PUMP_DUTY: f64 = 50.0;
+
+/// Pump alarm threshold from the config (`None` = default, `Some(0)` = off).
+fn pump_min_rpm_of(config: &AppConfig) -> f64 {
+    config.general.pump_min_rpm.map_or(DEFAULT_PUMP_MIN_RPM, f64::from)
+}
 /// B5: bounded wall-clock timeout for `enter_hardware_mode()` during shutdown.
 /// If a hub is wedged (unplugged mid-operation, firmware hang) we abandon the
 /// call rather than blocking the UI thread forever. 5s is well above the
@@ -60,6 +66,8 @@ pub struct CycleResult {
     pub readings: HashMap<String, f64>,
     pub group_duties: Vec<GroupDutyReport>,
     pub emergency: bool,
+    /// The emergency was raised (or is held) by the pump watchdog.
+    pub pump_stall: bool,
     pub any_stale: bool,
     pub fan_speeds: Vec<(String, Vec<FanSpeed>)>,
     pub hub_health: Vec<HubHealthReport>,
@@ -101,6 +109,10 @@ pub struct ControlLoop {
     /// if it disappears again later.
     logged_orphan_rgb_ids: HashSet<String>,
     shutdown: Arc<AtomicBool>,
+    /// Trips the emergency override when every visible pump stops.
+    pump_watchdog: PumpWatchdog,
+    /// Pump rpm reported by the host since the last tick (motherboard + LINK).
+    pending_pump_rpms: Vec<f64>,
 }
 
 struct SensorState {
@@ -475,7 +487,10 @@ impl ControlLoop {
             })
             .collect();
 
+        let pump_watchdog = PumpWatchdog::new(pump_min_rpm_of(&config));
         Ok(Self {
+            pump_watchdog,
+            pending_pump_rpms: Vec::new(),
             config,
             sensors,
             sensor_state,
@@ -495,8 +510,13 @@ impl ControlLoop {
         // 1. Poll all sensors
         let readings = self.poll_sensors();
 
-        // 2. Check emergency override
-        let emergency = self.check_emergency(&readings);
+        // 2. Check emergency override (critical temperatures, or a stalled pump)
+        let pumps = std::mem::take(&mut self.pending_pump_rpms);
+        let pump_stall = self.pump_watchdog.tick(&pumps);
+        if pump_stall {
+            error!(threshold = self.pump_watchdog.min_rpm(), "PUMP STALL — emergency override");
+        }
+        let emergency = self.check_emergency(&readings) || pump_stall;
 
         // 3. Check sensor staleness
         let any_stale = self.sensor_state.values().any(|s| s.is_stale);
@@ -688,10 +708,18 @@ impl ControlLoop {
             readings,
             group_duties,
             emergency,
+            pump_stall,
             any_stale,
             fan_speeds,
             hub_health,
         }
+    }
+
+    /// Hand the host's latest pump readings (rpm of every pump it can see,
+    /// motherboard headers and LINK pumps) to the stall watchdog. Call once
+    /// before each `tick()`; an empty slice means "no pump visible".
+    pub fn report_pumps(&mut self, rpms: &[f64]) {
+        self.pending_pump_rpms = rpms.to_vec();
     }
 
     /// Current configuration.
@@ -735,6 +763,7 @@ impl ControlLoop {
                 hub_conn.info.led_counts.insert(loc.channel, override_leds);
             }
         }
+        self.pump_watchdog.set_min_rpm(pump_min_rpm_of(&config));
         self.config = config;
         self.groups = groups;
         // A new config may reference a different set of device_ids —
@@ -1979,6 +2008,8 @@ impl ControlLoop {
             registry,
             logged_orphan_rgb_ids: HashSet::new(),
             shutdown: Arc::new(AtomicBool::new(false)),
+            pump_watchdog: PumpWatchdog::new(DEFAULT_PUMP_MIN_RPM),
+            pending_pump_rpms: Vec::new(),
         }
     }
 }
@@ -2121,6 +2152,7 @@ mod tests {
                 poll_interval_ms: 1000,
                 log_level: "info".to_string(),
                 lhm_exe_path: None,
+                pump_min_rpm: None,
             },
             fan_groups: Vec::new(), // groups supplied separately
             rgb: Default::default(),
@@ -2139,6 +2171,7 @@ mod tests {
                 poll_interval_ms: 1000,
                 log_level: "info".to_string(),
                 lhm_exe_path: None,
+                pump_min_rpm: None,
             },
             fan_groups: vec![FanGroupConfig {
                 name: "test".to_string(),
@@ -2502,6 +2535,7 @@ mod tests {
                 poll_interval_ms: 1000,
                 log_level: "info".to_string(),
                 lhm_exe_path: None,
+                pump_min_rpm: None,
             },
             fan_groups: Vec::new(),
             rgb: Default::default(),
@@ -2791,6 +2825,7 @@ mod tests {
                 poll_interval_ms: 1000,
                 log_level: "info".to_string(),
                 lhm_exe_path: None,
+                pump_min_rpm: None,
             },
             fan_groups: Vec::new(),
             rgb: Default::default(),
@@ -3155,6 +3190,7 @@ mod tests {
                 poll_interval_ms: 1000,
                 log_level: "info".to_string(),
                 lhm_exe_path: None,
+                pump_min_rpm: None,
             },
             fan_groups: Vec::new(),
             rgb: Default::default(),
@@ -3292,6 +3328,7 @@ mod tests {
                 poll_interval_ms: 1000,
                 log_level: "info".to_string(),
                 lhm_exe_path: None,
+                pump_min_rpm: None,
             },
             fan_groups: Vec::new(),
             rgb: Default::default(),

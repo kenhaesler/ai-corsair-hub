@@ -22,8 +22,12 @@
   const rows = $derived.by(() => {
     const out: Row[] = [];
     if (sensors.hwError) out.push({ key: 'hw', tone: 'error', text: sensors.hwError });
-    if (live?.emergency)
+    if (live?.pump_stall) {
+      const names = (live.pumps ?? []).map((p) => p.name).join(', ');
+      out.push({ key: 'pump', tone: 'error', text: `PUMP STALL: ${names || 'the pump'} has stopped — all fans at 100%. Check the loop now.` });
+    } else if (live?.emergency) {
       out.push({ key: 'emergency', tone: 'error', text: 'EMERGENCY: Critical temperature detected — all fans at 100%' });
+    }
     if (live?.any_stale) out.push({ key: 'stale', tone: 'warning', text: 'Sensor data stale — failsafe mode active (70%)' });
     for (const hub of sensors.hubStatus) {
       if (hub.state === 'lost')

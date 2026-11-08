@@ -19,6 +19,9 @@ pub struct SystemSnapshot {
     pub psu: Option<PsuSnapshot>,
     pub group_duties: Vec<GroupDuty>,
     pub emergency: bool,
+    /// The emergency is caused by a pump stall (see `pumps`). Added in v0.5.
+    #[serde(default)]
+    pub pump_stall: bool,
     pub any_stale: bool,
     pub hub_health: Vec<HubHealth>,
     /// Extended GPU telemetry (util %, power W, clock MHz, VRAM). Present
@@ -605,6 +608,7 @@ impl SystemSnapshot {
             psu,
             group_duties,
             emergency: result.emergency,
+            pump_stall: result.pump_stall,
             any_stale: result.any_stale,
             hub_health,
             gpu_metrics,

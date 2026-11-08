@@ -149,7 +149,7 @@ points = [
 [[preset]]
 id = "water_priority"
 name = "Water Priority"
-description = "Preview — targets coolant temp; falls back to CPU/GPU without a water sensor"
+description = "Targets coolant temperature — the right control variable for a custom loop; falls back to CPU/GPU without a coolant sensor"
 hysteresis = 2.0
 ramp_up = 6.0
 ramp_down = 3.0

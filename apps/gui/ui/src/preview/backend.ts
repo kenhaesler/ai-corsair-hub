@@ -285,6 +285,7 @@ function step(dt: number): SystemSnapshot {
     psu,
     group_duties: groupDuties,
     emergency: false,
+    pump_stall: false,
     any_stale: false,
     hub_health: hubs.map((h) => ({ serial: h.serial, healthy: true, consecutive_failures: 0 })),
     gpu_metrics,

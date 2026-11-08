@@ -7,6 +7,8 @@ export interface SystemSnapshot {
   psu: PsuSnapshot | null;
   group_duties: GroupDuty[];
   emergency: boolean;
+  /** the emergency is a pump stall (see `pumps`) */
+  pump_stall: boolean;
   any_stale: boolean;
   hub_health: HubHealth[];
   /**
@@ -204,6 +206,8 @@ export interface GeneralConfig {
   poll_interval_ms: number;
   log_level: string;
   lhm_exe_path: string | null;
+  /** pump stall alarm threshold in rpm; null = default 800, 0 = off */
+  pump_min_rpm?: number | null;
 }
 
 export interface FanGroupConfig {

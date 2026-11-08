@@ -8,6 +8,8 @@
   import Gauge from 'lucide-svelte/icons/gauge';
   import ScrollText from 'lucide-svelte/icons/scroll-text';
   import Cpu from 'lucide-svelte/icons/cpu';
+  import Droplet from 'lucide-svelte/icons/droplet';
+  import NumberField from '../../components/ui/NumberField.svelte';
   import LargeTitlePage from '../../components/shell/LargeTitlePage.svelte';
   import Banner from '../../components/ui/Banner.svelte';
   import Button from '../../components/ui/Button.svelte';
@@ -86,6 +88,19 @@
         </InsetRow>
         <InsetRow icon={Cpu} label="LibreHardwareMonitor" sublabel="Executable used for CPU sensors; edit config.toml to change">
           <span class="path mono" class:unset={!general.lhm_exe_path}>{general.lhm_exe_path ?? 'Not set'}</span>
+        </InsetRow>
+        <InsetRow icon={Droplet} label="Pump alarm" sublabel="Below this speed for 5 s, every fan goes to 100% and a warning shows. 0 turns it off" for="pump-min-rpm">
+          <NumberField
+            id="pump-min-rpm"
+            label="Pump alarm threshold"
+            value={general.pump_min_rpm ?? 800}
+            min={0}
+            max={6000}
+            step={50}
+            unit="rpm"
+            width={72}
+            onchange={(v) => (general.pump_min_rpm = v)}
+          />
         </InsetRow>
         <div class="save">
           {#if generalDirty}<span class="dirty t-callout"><i aria-hidden="true"></i>Unsaved changes</span>{/if}
