@@ -89,3 +89,7 @@ export async function initSensorListener() {
     }, RECOVERED_DISMISS_MS);
   });
 }
+
+// Stores hold live listeners and buffers; a hot swap of this module would
+// leave the app wired to the old instance. Reload the page instead.
+if (import.meta.hot) import.meta.hot.accept(() => window.location.reload());
