@@ -42,7 +42,7 @@
     const others = all.length - groups.length;
     if (!groups.length) return { name: 'None', note: others ? 'Only fixed and PID groups' : 'No fan groups' };
     const ids = [...new Set(groups.map((g) => g.preset_applied ?? null))];
-    if (ids.length > 1) return { name: 'Mixed', note: 'Curve groups use different presets' };
+    if (ids.length > 1) return { name: 'Mixed', note: 'Differs by group' };
     const p = presets.find((x) => x.id === ids[0]);
     if (!p) return { name: 'Custom', note: 'Your own curves' };
     const modified = groups.some((g) => !groupMatchesPreset(g, p));

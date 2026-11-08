@@ -239,7 +239,6 @@
     if (e.button !== 0) return;
     e.stopPropagation();
     e.preventDefault();
-    oncheckpoint?.(`drag-${Date.now()}`);
     dragging = i;
     selected = i;
     dragMoved = false;
@@ -259,6 +258,8 @@
     }
     const p = toPoint(px, py);
     if (dragRef && p.temp === dragRef.temp && p.duty === dragRef.duty) return;
+    // the undo checkpoint is taken on the first real move, never on a bare press
+    if (!dragMoved) oncheckpoint?.(`drag-${Date.now()}`);
     dragMoved = true;
     const ref = { ...p };
     const next = points.map((q, j) => (j === dragging ? ref : { temp: q.temp, duty: q.duty }));
@@ -304,6 +305,7 @@
     const idx = commit([...points.map((q) => ({ ...q })), ref], ref);
     selected = idx;
     ghost = null;
+    tick().then(() => handles[idx]?.focus({ preventScroll: true }));
   }
 
   function remove(i: number) {

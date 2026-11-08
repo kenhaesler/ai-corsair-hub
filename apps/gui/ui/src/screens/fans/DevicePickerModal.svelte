@@ -22,13 +22,16 @@
   interface Props {
     open: boolean;
     title: string;
+    /** the group being edited (its own membership is not "owned by another group") */
+    groupName?: string;
     selected: string[];
     availableHubs: HubSnapshot[];
     config: AppConfig | null;
     onsave: (deviceIds: string[]) => void;
     oncancel: () => void;
   }
-  let { open = $bindable(), title, selected, availableHubs, config, onsave, oncancel }: Props = $props();
+  let { open = $bindable(), title, groupName, selected, availableHubs, config, onsave, oncancel }: Props = $props();
+  const ownerOf = (id: string) => config?.fan_groups.find((g) => g.name !== groupName && (g.device_ids ?? []).includes(id))?.name ?? null;
 
   let draft = $state<string[]>([]);
   $effect(() => {
@@ -41,6 +44,8 @@
     label: string;
     device_type: string;
     enumerated: boolean;
+    /** another fan group that already lists this device */
+    ownedBy: string | null;
   }
   interface Group {
     key: string;
@@ -64,6 +69,7 @@
           device_type: d.device_type,
           label: `${d.device_type} · ${displayNameFromTree(d.device_id, { config, hubs: availableHubs })}`,
           enumerated: true,
+          ownedBy: ownerOf(d.device_id),
         }));
       if (rows.length) out.push({ key: hub.serial, label: `Hub ${i + 1} · ${shortHubSerial(hub.serial)}`, serial: hub.serial, rows });
     });
@@ -88,6 +94,7 @@
           channel: 0,
           device_type: 'unknown',
           label: `Device ${shortDeviceId(id)} (offline)`,
+          ownedBy: ownerOf(id),
           enumerated: false,
         })),
       });
@@ -161,6 +168,7 @@
                       {/if}
                     </span>
                     <span class="lbl">{r.label}</span>
+                    {#if r.ownedBy}<span class="owner" title="Already in {r.ownedBy}; a device follows the first group that lists it">in {r.ownedBy}</span>{/if}
                     {#if r.enumerated}<span class="ch num">Ch {r.channel}</span>{/if}
                   </span>
                 </Checkbox>
@@ -266,6 +274,16 @@
     place-items: center;
     background: rgba(255, 255, 255, 0.06);
     color: var(--t2);
+  }
+  .owner {
+    flex: none;
+    font: 500 10.5px var(--font-mono);
+    letter-spacing: 0.04em;
+    color: var(--t3);
+    padding: 2px 6px;
+    border-radius: 5px;
+    box-shadow: inset 0 0 0 1px var(--hair);
+    white-space: nowrap;
   }
   .offline .dev-ic {
     background: var(--warn-surface);

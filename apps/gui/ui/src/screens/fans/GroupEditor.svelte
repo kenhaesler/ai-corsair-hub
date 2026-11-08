@@ -322,6 +322,7 @@
 <DevicePickerModal
   bind:open={pickerOpen}
   title="Devices in {group.name}"
+  groupName={group.name}
   selected={seeded}
   {availableHubs}
   config={configStore.config}

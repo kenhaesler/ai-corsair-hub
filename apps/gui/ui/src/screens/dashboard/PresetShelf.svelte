@@ -76,7 +76,9 @@
       .map((n) => ({ saved: savedGroups.find((g) => g.name === n), draft: draftGroups.find((g) => g.name === n) }))
       .filter((x) => x.saved && x.draft && JSON.stringify(x.saved) !== JSON.stringify($state.snapshot(x.draft)))
       .map((x) => structuredClone($state.snapshot(x.draft)) as FanGroupConfig);
-    const switched = savedGroups.filter((g) => names.includes(g.name) && g.mode.type !== 'curve').map((g) => `${g.name} (${g.mode.type === 'pid' ? 'PID' : 'fixed'} → curve)`);
+    const switched = savedGroups
+      .filter((g) => names.includes(g.name) && g.mode.type !== 'curve')
+      .map((g) => (names.length === 1 ? `switched from ${g.mode.type === 'pid' ? 'PID' : 'fixed'} to curve` : `${g.name} (${g.mode.type === 'pid' ? 'PID' : 'fixed'} → curve)`));
     const notes = [detail];
     if (switched.length) notes.push(switched.join(', '));
     if (drafts.length) notes.push(`Replaced unsaved edits on ${drafts.map((g) => g.name).join(', ')}`);
