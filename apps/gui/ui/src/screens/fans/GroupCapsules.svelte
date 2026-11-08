@@ -19,7 +19,7 @@
   import AnimatedNumber from '../../components/ui/AnimatedNumber.svelte';
   import { createSpring, springTo, springs } from '../../lib/motion.svelte';
   import { display } from '../../lib/stores/scrub.svelte';
-  import { dutyOf } from '../../lib/format';
+  import { dutyOf, meanDuty } from '../../lib/format';
   import { dutyColor, groupEnvelope } from '../dashboard/overview';
   import type { FanGroupConfig } from '../../lib/types';
   import { MODE_LABEL } from './fanModes';
@@ -71,12 +71,27 @@
   let row: HTMLDivElement;
   let overflowing = $state(false);
   const tabs: HTMLDivElement[] = $state([]);
+  let allEl = $state<HTMLDivElement>();
+
+  // ---- "All fans": every group at once
+  const allDuty = $derived(display.snapshot ? meanDuty(display.snapshot) : null);
+  const allEnv = $derived.by((): [number, number] | null => {
+    const envs = groups.map((g) => groupEnvelope(g)).filter((e): e is [number, number] => !!e);
+    if (!envs.length) return null;
+    return [Math.min(...envs.map((e) => e[0])), Math.max(...envs.map((e) => e[1]))];
+  });
+  const allMode = $derived.by(() => {
+    const types = new Set(groups.map((g) => g.mode.type));
+    return types.size === 1 ? MODE_LABEL[groups[0].mode.type] : 'Mixed';
+  });
+  const anyEdited = $derived(groups.some((g) => edited.has(g.name)));
+  const anyInvalid = $derived(groups.some((g) => invalid.has(g.name)));
   const line = createSpring({ x: 0, w: 0 }, springs.tab);
   let ready = $state(false);
 
   function measure(instant = false) {
     if (row) overflowing = row.scrollWidth > row.clientWidth + 1;
-    const b = tabs[selected];
+    const b = selected < 0 ? allEl : tabs[selected];
     if (!b) return;
     springTo(line, { x: b.offsetLeft, w: b.offsetWidth }, instant || !ready);
     ready = true;
@@ -107,13 +122,13 @@
     }
     let j = selected;
     if (e.key === 'ArrowRight') j = Math.min(groups.length - 1, selected + 1);
-    else if (e.key === 'ArrowLeft') j = Math.max(0, selected - 1);
-    else if (e.key === 'Home') j = 0;
+    else if (e.key === 'ArrowLeft') j = Math.max(-1, selected - 1);
+    else if (e.key === 'Home') j = -1;
     else if (e.key === 'End') j = groups.length - 1;
     else return;
     e.preventDefault();
     onselect(j);
-    tabs[j]?.focus();
+    (j < 0 ? allEl : tabs[j])?.focus();
   }
   const pct = (v: number) => `${Math.max(0, Math.min(100, v))}%`;
 </script>
@@ -122,6 +137,49 @@
   <div class="row" bind:this={row} onscroll={() => measure(true)}>
     <div class="track" role="tablist" aria-label="Fan groups" tabindex="-1" onkeydown={onKey}>
       <i class="uline" class:ready style:transform="translateX({line.current.x}px)" style:width="{line.current.w}px" aria-hidden="true"></i>
+      {#if groups.length > 1}
+        {@const sel = selected < 0}
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <div
+          role="tab"
+          class="cell all"
+          class:sel
+          aria-selected={sel}
+          aria-controls={panelId}
+          aria-label="All fans, {groups.length} groups{allDuty !== null ? `, ${Math.round(allDuty)}% average duty` : ''}. Changes here apply to every group"
+          tabindex={sel ? 0 : -1}
+          bind:this={allEl}
+          onclick={() => onselect(-1)}
+          onkeydown={(e) => {
+            if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget) {
+              e.preventDefault();
+              onselect(-1);
+            }
+          }}
+          style:--c={dutyColor(allDuty ?? 0)}
+        >
+          <span class="top">
+            <span class="dot" class:live={allDuty !== null} aria-hidden="true"></span>
+            <span class="name"><span class="name-t">All fans</span></span>
+            {#if anyInvalid}
+              <span class="bad" title="A curve has an error"><CircleAlert size={13} strokeWidth={2.5} /></span>
+            {:else if anyEdited}
+              <span class="edited" title="Unsaved changes"></span>
+            {/if}
+          </span>
+          <span class="mid" aria-hidden="true">
+            <span class="duty">
+              {#if allDuty !== null}<AnimatedNumber value={allDuty} /><small>%</small>{:else}<span class="nd">–</span>{/if}
+            </span>
+            <span class="mode">{allMode}</span>
+          </span>
+          <span class="bar" aria-hidden="true">
+            {#if allEnv}<i class="env" style:left={pct(allEnv[0])} style:width={pct(allEnv[1] - allEnv[0])}></i>{/if}
+            <i class="fill" style:transform="scaleX({(allDuty ?? 0) / 100})"></i>
+            {#if allDuty !== null}<i class="cap" style:left="calc({pct(allDuty)} - 1px)"></i>{/if}
+          </span>
+        </div>
+      {/if}
       {#each groups as g, i (i)}
         {@const duty = dutyOf(display.snapshot, g.name)}
         {@const c = dutyColor(duty ?? 0)}
@@ -255,7 +313,7 @@
   .cell {
     position: relative;
     flex: 1 1 200px;
-    min-width: 148px;
+    min-width: 140px;
     container-type: inline-size;
     display: grid;
     gap: 10px;
@@ -268,6 +326,18 @@
   }
   .cell:first-child {
     border-left: 0;
+  }
+  .cell.all {
+    flex: 0 1 220px;
+    min-width: 132px;
+    background: rgba(255, 255, 255, 0.015);
+    border-right: 1px solid var(--hair-strong);
+  }
+  .cell.all .name-t {
+    font-weight: 600;
+  }
+  .cell.all.sel {
+    background: rgba(255, 255, 255, 0.045);
   }
   .cell:hover:not(.sel) {
     background: rgba(255, 255, 255, 0.025);

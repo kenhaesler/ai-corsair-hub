@@ -59,13 +59,39 @@
   });
 
   const groups = $derived(configStore.config?.fan_groups ?? []);
+  /** index of the selected group; -1 = "All fans" (every group at once) */
   let selected = $state(0);
+  const allMode = $derived(selected < 0 && groups.length > 1);
   $effect(() => {
-    ui.fanSelectedGroup = groups[selected]?.name ?? null;
+    ui.fanSelectedGroup = allMode ? null : (groups[selected]?.name ?? null);
   });
   $effect(() => {
     if (selected >= groups.length) selected = Math.max(0, groups.length - 1);
+    if (selected < 0 && groups.length <= 1) selected = 0;
   });
+
+  // ---- "All fans": a virtual group whose mode is written to every group
+  const groupsDiffer = $derived(new Set(groups.map((g) => JSON.stringify(g.mode))).size > 1);
+  const allGroup = $derived.by((): FanGroupConfig | null => {
+    if (!groups.length) return null;
+    const first = groups[0];
+    return {
+      name: 'All fans',
+      channels: [],
+      hub_serial: null,
+      device_ids: [...new Set(groups.flatMap((g) => g.device_ids ?? []))],
+      mode: structuredClone($state.snapshot(first.mode)),
+      preset_applied: groups.every((g) => g.preset_applied === first.preset_applied) ? first.preset_applied : null,
+    };
+  });
+  function updateAll(g: FanGroupConfig) {
+    if (!configStore.config) return;
+    configStore.config.fan_groups = configStore.config.fan_groups.map((x) => ({
+      ...x,
+      mode: structuredClone($state.snapshot(g.mode)),
+      preset_applied: g.preset_applied ?? null,
+    }));
+  }
 
   // Dashboard "Edit curve" → select that group, then clear the request.
   $effect(() => {
@@ -250,7 +276,31 @@
       onnew={() => (newOpen = true)}
       onrename={renameGroup}
     />
-    {#if groups[selected]}
+    {#if allMode && allGroup}
+      <div
+        id={panelId}
+        role="tabpanel"
+        aria-label="All fans"
+        class="panel"
+        style:opacity={0.4 + 0.6 * enter.current}
+        style:transform="translateY({(1 - enter.current) * 10}px)"
+      >
+        {#key 'all'}
+          <GroupEditor
+            group={allGroup}
+            color="var(--accent-strong)"
+            scope="all"
+            groupCount={groups.length}
+            {groupsDiffer}
+            {availableHubs}
+            {availableSensors}
+            {presets}
+            onchange={updateAll}
+            ondelete={() => {}}
+          />
+        {/key}
+      </div>
+    {:else if groups[selected]}
       <div
         id={panelId}
         role="tabpanel"

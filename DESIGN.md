@@ -206,9 +206,10 @@ warms.
   status tag (On curve / Climbing / Easing / Holding / Fixed / Override).
 - **Figures row**: five cells separated by hairlines; mono label, 40px light figure glowing in its value
   colour, one line of context. The last cell is the active fan preset with a jump button.
-- **Group strip** (`GroupCapsules`): cells with live dot + name (pencil to rename, F2), 30px light duty
-  figure, mono mode label, 8px luminous bar over the group's envelope; sliding lit underline; sticky
-  "New group".
+- **Group strip** (`GroupCapsules`): a leading **All fans** cell (average duty, combined envelope,
+  "Mixed" or the shared mode) whose editor writes every change to all groups at once; then one cell per
+  group with live dot + name (pencil to rename, F2), 30px light duty figure, mono mode label, 8px
+  luminous bar over the group's envelope; sliding lit underline; sticky "New group".
 - **Curve editor**: heat-zone plot with mono axes, group-coloured monotone curve, the sensor-mix reading
   driving the hysteresis band and operating point (CPU shown as a secondary marker when it differs),
   preset chips with curve thumbnails, numeric entry and undo.

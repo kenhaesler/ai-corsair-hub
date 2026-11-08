@@ -31,13 +31,19 @@
   interface Props {
     group: FanGroupConfig;
     color: string;
+    /** 'all': this editor drives every group at once (membership is read-only, no delete) */
+    scope?: 'group' | 'all';
+    groupCount?: number;
+    /** true when the groups currently differ, so the first group's settings are shown as the starting point */
+    groupsDiffer?: boolean;
     availableHubs: HubSnapshot[];
     availableSensors: string[];
     presets: FanPresetDef[];
     onchange: (g: FanGroupConfig) => void;
     ondelete: () => void;
   }
-  let { group, color, availableHubs, availableSensors, presets, onchange, ondelete }: Props = $props();
+  let { group, color, scope = 'group', groupCount = 1, groupsDiffer = false, availableHubs, availableSensors, presets, onchange, ondelete }: Props = $props();
+  const all = $derived(scope === 'all');
 
   // ------------------------------------------------------------------ undo
   let history = $state<string[]>([]);
@@ -197,7 +203,11 @@
       <section class="seg mem" aria-label="Membership">
         <span class="tile" aria-hidden="true"><Fan size={14} strokeWidth={2.25} /></span>
         <span class="mlabel">Devices <span class="t3 num">{memberCount}</span></span>
-        {#if members.length}
+        {#if all}
+          <span class="allnote">
+            Every change here sets all <b class="num">{groupCount}</b> groups.{#if groupsDiffer}{' '}They differ right now; the first group's settings are the starting point.{/if}
+          </span>
+        {:else if members.length}
           <ul class="chips-m" aria-label={membership} title={membership}>
             {#each members as d (d.id)}
               <li class="dchip">
@@ -208,10 +218,12 @@
         {:else}
           <span class="msub" title={membership}>{membership}</span>
         {/if}
-        <div class="mbtns">
-          <Button size="sm" icon={ListChecks} onclick={openPicker} title="Edit devices in this group">Edit devices</Button>
-          <IconButton icon={Trash2} size="sm" label="Delete this fan group" class="del-btn" onclick={ondelete} />
-        </div>
+        {#if !all}
+          <div class="mbtns">
+            <Button size="sm" icon={ListChecks} onclick={openPicker} title="Edit devices in this group">Edit devices</Button>
+            <IconButton icon={Trash2} size="sm" label="Delete this fan group" class="del-btn" onclick={ondelete} />
+          </div>
+        {/if}
       </section>
       <section class="seg mode" aria-label="Mode" title={MODE_BLURB[modeType]}>
         <span class="mlabel">Mode</span>
@@ -468,6 +480,17 @@
     flex: none;
     display: flex;
     gap: 6px;
+  }
+  .allnote {
+    flex: 1;
+    min-width: 0;
+    font-size: 12.5px;
+    line-height: 17px;
+    color: var(--t2);
+  }
+  .allnote b {
+    color: var(--t1);
+    font-weight: 600;
   }
   .mbtns :global(.del-btn) {
     color: var(--error-text);
