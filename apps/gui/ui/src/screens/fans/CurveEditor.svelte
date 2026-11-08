@@ -509,10 +509,6 @@
           <circle class="op-halo" r="11" />
           <circle class="op-dot" r="5" />
         </g>
-        <g transform="translate({Math.min(lx + 12, ML + pw - 44)},{ly - 26 < MT + 4 ? ly + 8 : ly - 26})" aria-hidden="true">
-          <rect class="op-pill" width="42" height="20" rx="10" />
-          <text class="op-t" x="21" y="14">{liveDutyLabel}%</text>
-        </g>
         <g transform="translate({clampN(x(liveT), ML + 34, ML + pw - 34)},{MT - 19})" aria-hidden="true">
           <rect class="cpu-pill" x="-34" y="0" width="68" height="18" rx="9" />
           <text class="cpu-t" x="0" y="13">{mixTemp !== null ? driveLabel : 'CPU'} {(driveTemp ?? 0).toFixed(1)}°</text>
@@ -551,6 +547,18 @@
           </g>
         {/if}
       {/each}
+      <!-- live duty pill: drawn above the handles, on whichever side is clear of them -->
+      {#if hasLive}
+        {@const lx = x(liveT)}
+        {@const ly = y(liveDutyShown)}
+        {@const nearRight = pathPts.some(([px, py]) => px > lx && px < lx + 60 && Math.abs(py - ly) < 28)}
+        {@const px0 = nearRight ? Math.max(ML + 2, lx - 54) : Math.min(lx + 12, ML + pw - 44)}
+        <g class="op-label" transform="translate({px0},{ly - 26 < MT + 4 ? ly + 8 : ly - 26})" aria-hidden="true">
+          <rect class="op-pill" width="42" height="20" rx="10" />
+          <text class="op-t" x="21" y="14">{liveDutyLabel}%</text>
+        </g>
+      {/if}
+
     </svg>
 
     {#if tipPoint}

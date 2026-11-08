@@ -72,7 +72,11 @@
   });
 
   // ---- "All fans": a virtual group whose settings are written to the groups
-  const groupsDiffer = $derived(new Set(groups.map((g) => JSON.stringify(g.mode))).size > 1);
+  const groupsDiffer = $derived.by(() => {
+    const curves = groups.filter((g) => g.mode.type === 'curve');
+    const pool = curves.length ? curves : groups;
+    return new Set(pool.map((g) => JSON.stringify(g.mode))).size > 1;
+  });
   const mixedModes = $derived(new Set(groups.map((g) => g.mode.type)).size > 1);
   /** The All editor starts from a curve group when there is one (presets are curves). */
   const allLead = $derived(groups.find((g) => g.mode.type === 'curve') ?? groups[0]);
@@ -429,7 +433,7 @@
 <ConfirmDialog
   bind:open={convertOpen}
   title="Switch every group to {convertPending ? ({ fixed: 'Fixed', curve: 'Curve', pid: 'PID' } as const)[convertPending.mode.type] : ''} mode?"
-  message={`These groups use a different mode and will be converted: ${convertList}. A pump group would then follow this setting instead of its own.`}
+  message={`These groups use a different mode and will be converted: ${convertList}. Groups already in this mode keep their own settings.`}
   confirmLabel="Convert"
   focusCancel
   onconfirm={confirmConvert}

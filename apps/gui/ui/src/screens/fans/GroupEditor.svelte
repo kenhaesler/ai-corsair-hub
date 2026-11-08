@@ -258,11 +258,11 @@
         {#if all}
           <span class="allnote">
             {#if mixedModes}
-              The <b class="num">{groupCount}</b> groups use different modes. Edits here reach the groups already in <b>{MODE_LABEL[modeType]}</b> mode; pick a mode to convert the rest (you will be asked first).
+              Mixed modes: edits reach the <b>{MODE_LABEL[modeType]}</b> groups. Pick a mode to convert the rest.
             {:else}
               Every change here sets all <b class="num">{groupCount}</b> groups.
             {/if}
-            {#if groupsDiffer && leadName}{' '}Their settings differ; <b>{leadName}</b>'s are shown as the starting point. Whatever you change (the curve, noise behaviour or sensor mix) replaces theirs; everything else stays as each group has it.{/if}
+            {#if groupsDiffer && leadName}<span class="t3" title="Whatever you change (the curve, noise behaviour or sensor mix) replaces theirs; everything else stays as each group has it.">{' '}Showing <b>{leadName}</b>'s settings; only what you change is written.</span>{/if}
           </span>
         {:else if members.length}
           <ul class="chips-m" aria-label={membership} title={membership}>

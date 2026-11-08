@@ -31,12 +31,19 @@
   // On Fan Control the selected group's editor shows the sensors it listens
   // to (curve marker / PID track), so those are hidden here. A fixed group
   // shows none, so nothing is hidden.
-  const fanHidden = $derived.by((): string[] => {
-    const g = configStore.config?.fan_groups.find((x) => x.name === ui.fanSelectedGroup);
-    if (!g || g.mode.type === 'fixed') return [];
-    const src = g.mode.temp_source.sensors;
+  const sensorsOf = (g: { mode: { type: string; temp_source?: { sensors: string[] } } }): string[] => {
+    if (g.mode.type === 'fixed' || !g.mode.temp_source) return [];
     // the curve editor's secondary marker is the raw CPU reading
-    return g.mode.type === 'curve' ? [...new Set([...src, 'cpu'])] : [...src];
+    return g.mode.type === 'curve' ? [...new Set([...g.mode.temp_source.sensors, 'cpu'])] : [...g.mode.temp_source.sensors];
+  };
+  const fanHidden = $derived.by((): string[] => {
+    const groups = configStore.config?.fan_groups ?? [];
+    if (ui.fanSelectedGroup === null && ui.activeTab === 'fans' && groups.length > 1) {
+      // All fans: the editor shows the union of what the groups listen to
+      return [...new Set(groups.flatMap(sensorsOf))];
+    }
+    const g = groups.find((x) => x.name === ui.fanSelectedGroup);
+    return g ? sensorsOf(g) : [];
   });
   const hide = $derived<Hide>(ui.activeTab === 'fans' ? { ...HIDE.fans, temps: fanHidden } : HIDE[ui.activeTab]);
   const s = $derived(display.snapshot);

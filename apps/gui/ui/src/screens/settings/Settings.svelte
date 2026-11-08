@@ -109,7 +109,7 @@
         <AppMark size={64} />
         <div class="abt">
           <p class="t-title3">{appVersion ? `Corsair Hub v${appVersion}` : 'Corsair Hub'}</p>
-          <p class="t-callout desc">Lightweight replacement for iCUE — smart fan control for custom water cooling</p>
+          <p class="t-callout desc">Lightweight replacement for iCUE — smart fan control and lighting for iCUE LINK builds</p>
           <p class="t-callout lic">Apache 2.0 License</p>
         </div>
       </div>

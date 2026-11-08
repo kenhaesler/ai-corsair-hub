@@ -96,7 +96,7 @@
       type="button"
       role="radio"
       aria-checked={o.value === value}
-      tabindex={o.value === value ? 0 : -1}
+      tabindex={o.value === value || (i === 0 && !options.some((x) => x.value === value)) ? 0 : -1}
       class="opt"
       class:sel={o.value === value}
       disabled={disabled || o.disabled}

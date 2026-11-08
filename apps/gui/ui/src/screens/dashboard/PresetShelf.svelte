@@ -173,7 +173,7 @@
               {/if}
             </div>
             <span class="desc">{p.description}</span>
-            <span class="meta num">hy:{p.hysteresis}° ↑{p.ramp_up}%/s ↓{p.ramp_down}%/s</span>
+            <span class="meta num">hy {p.hysteresis}° · ↑{p.ramp_up}%/s · ↓{p.ramp_down}%/s</span>
             {#if (on.length > 0 && on.length < groupNames.length) || (st === 'modified' && applying === null)}
             <div class="foot">
               {#if on.length > 0 && on.length < groupNames.length}

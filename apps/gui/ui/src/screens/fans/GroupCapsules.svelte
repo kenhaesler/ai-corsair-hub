@@ -233,7 +233,7 @@
               <!-- svelte-ignore a11y_no_static_element_interactions -->
               <span class="name renamable" title="Click to rename group" onclick={() => startRename(i)}>
                 <span class="name-t">{g.name}</span>
-                <Pencil size={12} strokeWidth={2.25} class="pencil" />
+                <span class="pencil-wrap" aria-hidden="true"><Pencil size={12} strokeWidth={2.25} class="pencil" /></span>
               </span>
             {:else}
               <span class="name"><span class="name-t">{g.name}</span></span>
@@ -258,9 +258,9 @@
         </div>
       {/each}
     </div>
-    <button type="button" class="new" title="Create a new fan group" onclick={onnew}>
+    <button type="button" class="new" title="Create a new fan group" aria-label="New group" onclick={onnew}>
       <span class="plus"><Plus size={15} strokeWidth={2.25} /></span>
-      <span>New group</span>
+      <span class="new-l">New group</span>
     </button>
   </div>
 </div>
@@ -402,14 +402,29 @@
     white-space: nowrap;
   }
   .renamable {
+    position: relative;
     cursor: text;
   }
-  .renamable :global(.pencil) {
-    flex: none;
+  /* the pencil overlays the name's end so it costs no width; shown on hover/focus */
+  .pencil-wrap {
+    position: absolute;
+    right: -2px;
+    top: 50%;
+    translate: 100% -50%;
+    display: grid;
+    padding: 2px 4px;
+    border-radius: 4px;
+    background: rgba(16, 18, 22, 0.9);
     color: var(--t3);
-    transition: color var(--dur-fast) ease-out;
+    opacity: 0;
+    transition: opacity var(--dur-fast) ease-out;
+    pointer-events: none;
   }
-  .renamable:hover :global(.pencil) {
+  .cell:hover .pencil-wrap,
+  .cell:focus-within .pencil-wrap {
+    opacity: 1;
+  }
+  .renamable:hover .pencil-wrap {
     color: var(--t1);
   }
   .edited {
@@ -458,9 +473,28 @@
     text-transform: uppercase;
     color: var(--t3);
   }
-  @container (max-width: 158px) {
+  @container (max-width: 150px) {
     .mode {
       display: none;
+    }
+  }
+  @container (max-width: 160px) {
+    .cell {
+      padding-left: 14px;
+      padding-right: 14px;
+    }
+  }
+  @media (max-width: 1180px) {
+    .strip .new {
+      width: 56px;
+      padding: 0;
+    }
+    .new-l {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
     }
   }
   .bar {
