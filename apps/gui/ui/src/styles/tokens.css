@@ -49,9 +49,15 @@
 
   /* ---- Series (Health category colours) ---- */
   --s-cpu: #5aa9ff;
+  --s-cpu-ccd: #93c5fd;
   --s-gpu: #34d399;
-  --s-psu-vrm: #fbbf24;
-  --s-psu-case: #fb7185;
+  --s-gpu-memory: #a3e635;
+  --s-board: #fbbf24;
+  --s-chipset: #fb923c;
+  --s-vrm: #fb7185;
+  --s-dimm: #e879f9;
+  --s-psu-vrm: #fde047;
+  --s-psu-case: #f87171;
   --s-water: #5ee1e6;
   --s-other: #a78bfa;
   --s-power: #ffd60a;

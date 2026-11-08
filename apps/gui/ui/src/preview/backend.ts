@@ -111,7 +111,21 @@ let diagnostic: { until: number; frames: (now: number) => RgbFrameDto[] } | null
 // ---------------------------------------------------------------- simulation
 
 function readings(): Record<string, number> {
-  return { cpu: sim.cpuTemp, gpu: sim.gpuTemp, psu_vrm: sim.psuVrm, psu_case: sim.psuCase };
+  // Board-side sources mirror what LibreHardwareMonitor exposes on a desktop
+  // board: they lag the CPU and sit a few degrees apart from each other.
+  const board = 40 + (sim.cpuTemp - 40) * 0.45;
+  return {
+    cpu: sim.cpuTemp,
+    cpu_ccd: sim.cpuTemp - 4.5,
+    gpu: sim.gpuTemp,
+    gpu_memory: sim.gpuTemp + 9,
+    board_system: board,
+    chipset: board + 4,
+    vrm: board - 23,
+    dimm: board - 1,
+    psu_vrm: sim.psuVrm,
+    psu_case: sim.psuCase,
+  };
 }
 
 function fusedTemp(src: TempSourceConfig): number {

@@ -5,11 +5,19 @@ import type { SystemSnapshot } from './types';
 // ---------------------------------------------------------------------------
 // Series colours (DESIGN.md "Series")
 // ---------------------------------------------------------------------------
+// Families share a hue: CPU blues, GPU greens, board warm tones, PSU
+// yellow/red, coolant cyan. Unknown sources fall back to violet.
 const SOURCE_COLORS: Record<string, string> = {
   cpu: '#5AA9FF',
+  cpu_ccd: '#93C5FD',
   gpu: '#34D399',
-  psu_vrm: '#FBBF24',
-  psu_case: '#FB7185',
+  gpu_memory: '#A3E635',
+  board_system: '#FBBF24',
+  chipset: '#FB923C',
+  vrm: '#FB7185',
+  dimm: '#E879F9',
+  psu_vrm: '#FDE047',
+  psu_case: '#F87171',
 };
 export const WATER_COLOR = '#5EE1E6';
 export const OTHER_COLOR = '#A78BFA';

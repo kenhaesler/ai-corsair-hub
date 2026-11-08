@@ -19,10 +19,17 @@ colors:
   heat-amber: "#ffc36b"
   heat-red: "#ff6a55"
   series-cpu: "#5aa9ff"
+  series-cpu-ccd: "#93c5fd"
   series-gpu: "#34d399"
-  series-psu-vrm: "#fbbf24"
-  series-psu-case: "#fb7185"
+  series-gpu-memory: "#a3e635"
+  series-board: "#fbbf24"
+  series-chipset: "#fb923c"
+  series-vrm: "#fb7185"
+  series-dimm: "#e879f9"
+  series-psu-vrm: "#fde047"
+  series-psu-case: "#f87171"
   series-water: "#5ee1e6"
+  series-other: "#a78bfa"
   series-power: "#ffd60a"
   ok: "#32d74b"
   warn: "#ff9f0a"
@@ -143,8 +150,10 @@ warms.
   2. **The state light** `--sc`: set on `:root` by `Ambient.svelte` from the thermal state (silver-blue →
      violet → orange, red in emergency). The nebula, tab underlines, headline emphasis, live markers and
      active preset tile all take their tint from it.
-  3. **Series colours** (CPU blue, GPU green, PSU amber/rose, water cyan, power yellow) for chart lines
-     and their legends only.
+  3. **Series colours** for chart lines and their legends only. Families share a hue so a legend of
+     eight sources still reads: CPU blues (package, cores), GPU greens (core, memory), board warm tones
+     (board amber, chipset orange, VRM rose, memory fuchsia), PSU yellow/red, coolant cyan, power yellow.
+     Sources the app does not know fall back to violet.
 - Status greens/ambers/reds are reserved for live dots, banners and validation.
 - Text: `#eef0f4` primary, `#a7acb6` secondary, `#7b808a` tertiary. Tertiary is for micro-labels and
   hints, never body copy. All body text meets 4.5:1 on the panel.
