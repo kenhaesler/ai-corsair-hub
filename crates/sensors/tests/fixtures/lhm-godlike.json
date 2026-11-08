@@ -1,0 +1,979 @@
+{
+ "id": 0,
+ "Text": "Sensor",
+ "Min": "Min",
+ "Value": "Value",
+ "Max": "Max",
+ "ImageURL": "",
+ "Children": [
+  {
+   "id": 1,
+   "Text": "SPECTRUM",
+   "Min": "",
+   "Value": "",
+   "Max": "",
+   "ImageURL": "images_icon/computer.png",
+   "Children": [
+    {
+     "id": 2,
+     "Text": "MSI MEG X870E GODLIKE (MS-7E48)",
+     "Min": "",
+     "Value": "",
+     "Max": "",
+     "HardwareId": "/motherboard",
+     "ImageURL": "images_icon/mainboard.png",
+     "Children": [
+      {
+       "id": 3,
+       "Text": "Nuvoton NCT6687D-R",
+       "Min": "",
+       "Value": "",
+       "Max": "",
+       "HardwareId": "/lpc/nct6687dr/0",
+       "ImageURL": "images_icon/chip.png",
+       "Children": [
+        {
+         "id": 18,
+         "Text": "Temperatures",
+         "Min": "",
+         "Value": "",
+         "Max": "",
+         "ImageURL": "images_icon/temperature.png",
+         "Children": [
+          {
+           "id": 19,
+           "Text": "CPU Core",
+           "Min": "43.0 \u00b0C",
+           "Value": "70.0 \u00b0C",
+           "Max": "75.0 \u00b0C",
+           "SensorId": "/lpc/nct6687dr/0/temperature/0",
+           "Type": "Temperature",
+           "RawMin": "43.0 \u00b0C",
+           "RawValue": "70.0 \u00b0C",
+           "RawMax": "75.0 \u00b0C",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 20,
+           "Text": "System",
+           "Min": "36.0 \u00b0C",
+           "Value": "56.0 \u00b0C",
+           "Max": "57.0 \u00b0C",
+           "SensorId": "/lpc/nct6687dr/0/temperature/1",
+           "Type": "Temperature",
+           "RawMin": "36.0 \u00b0C",
+           "RawValue": "56.0 \u00b0C",
+           "RawMax": "57.0 \u00b0C",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 21,
+           "Text": "VRM MOS",
+           "Min": "31.0 \u00b0C",
+           "Value": "31.0 \u00b0C",
+           "Max": "31.0 \u00b0C",
+           "SensorId": "/lpc/nct6687dr/0/temperature/2",
+           "Type": "Temperature",
+           "RawMin": "31.0 \u00b0C",
+           "RawValue": "31.0 \u00b0C",
+           "RawMax": "31.0 \u00b0C",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 22,
+           "Text": "Chipset",
+           "Min": "38.0 \u00b0C",
+           "Value": "60.0 \u00b0C",
+           "Max": "61.0 \u00b0C",
+           "SensorId": "/lpc/nct6687dr/0/temperature/3",
+           "Type": "Temperature",
+           "RawMin": "38.0 \u00b0C",
+           "RawValue": "60.0 \u00b0C",
+           "RawMax": "61.0 \u00b0C",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 23,
+           "Text": "PCIe x1",
+           "Min": "35.5 \u00b0C",
+           "Value": "55.5 \u00b0C",
+           "Max": "56.5 \u00b0C",
+           "SensorId": "/lpc/nct6687dr/0/temperature/5",
+           "Type": "Temperature",
+           "RawMin": "35.5 \u00b0C",
+           "RawValue": "55.5 \u00b0C",
+           "RawMax": "56.5 \u00b0C",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 24,
+           "Text": "Thermistor Sensor",
+           "Min": "-40.0 \u00b0C",
+           "Value": "-40.0 \u00b0C",
+           "Max": "-40.0 \u00b0C",
+           "SensorId": "/lpc/nct6687dr/0/temperature/6",
+           "Type": "Temperature",
+           "RawMin": "-40.0 \u00b0C",
+           "RawValue": "-40.0 \u00b0C",
+           "RawMax": "-40.0 \u00b0C",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          }
+         ]
+        },
+        {
+         "id": 25,
+         "Text": "Fans",
+         "Min": "",
+         "Value": "",
+         "Max": "",
+         "ImageURL": "images_icon/fan.png",
+         "Children": [
+          {
+           "id": 26,
+           "Text": "CPU Fan",
+           "Min": "0 RPM",
+           "Value": "0 RPM",
+           "Max": "0 RPM",
+           "SensorId": "/lpc/nct6687dr/0/fan/0",
+           "Type": "Fan",
+           "RawMin": "0 RPM",
+           "RawValue": "0 RPM",
+           "RawMax": "0 RPM",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 27,
+           "Text": "Pump Fan #1",
+           "Min": "3380 RPM",
+           "Value": "4428 RPM",
+           "Max": "4761 RPM",
+           "SensorId": "/lpc/nct6687dr/0/fan/1",
+           "Type": "Fan",
+           "RawMin": "3380 RPM",
+           "RawValue": "4428 RPM",
+           "RawMax": "4761 RPM",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 28,
+           "Text": "Chipset Fan",
+           "Min": "0 RPM",
+           "Value": "0 RPM",
+           "Max": "0 RPM",
+           "SensorId": "/lpc/nct6687dr/0/fan/2",
+           "Type": "Fan",
+           "RawMin": "0 RPM",
+           "RawValue": "0 RPM",
+           "RawMax": "0 RPM",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 29,
+           "Text": "EZ-Connect Fan",
+           "Min": "0 RPM",
+           "Value": "0 RPM",
+           "Max": "0 RPM",
+           "SensorId": "/lpc/nct6687dr/0/fan/3",
+           "Type": "Fan",
+           "RawMin": "0 RPM",
+           "RawValue": "0 RPM",
+           "RawMax": "0 RPM",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 30,
+           "Text": "System Fan #7",
+           "Min": "0 RPM",
+           "Value": "0 RPM",
+           "Max": "0 RPM",
+           "SensorId": "/lpc/nct6687dr/0/fan/9",
+           "Type": "Fan",
+           "RawMin": "0 RPM",
+           "RawValue": "0 RPM",
+           "RawMax": "0 RPM",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 31,
+           "Text": "System Fan #1",
+           "Min": "0 RPM",
+           "Value": "0 RPM",
+           "Max": "0 RPM",
+           "SensorId": "/lpc/nct6687dr/0/fan/10",
+           "Type": "Fan",
+           "RawMin": "0 RPM",
+           "RawValue": "0 RPM",
+           "RawMax": "0 RPM",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 32,
+           "Text": "System Fan #2",
+           "Min": "0 RPM",
+           "Value": "0 RPM",
+           "Max": "0 RPM",
+           "SensorId": "/lpc/nct6687dr/0/fan/11",
+           "Type": "Fan",
+           "RawMin": "0 RPM",
+           "RawValue": "0 RPM",
+           "RawMax": "0 RPM",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 33,
+           "Text": "System Fan #3",
+           "Min": "0 RPM",
+           "Value": "0 RPM",
+           "Max": "0 RPM",
+           "SensorId": "/lpc/nct6687dr/0/fan/12",
+           "Type": "Fan",
+           "RawMin": "0 RPM",
+           "RawValue": "0 RPM",
+           "RawMax": "0 RPM",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 34,
+           "Text": "System Fan #4",
+           "Min": "0 RPM",
+           "Value": "0 RPM",
+           "Max": "0 RPM",
+           "SensorId": "/lpc/nct6687dr/0/fan/13",
+           "Type": "Fan",
+           "RawMin": "0 RPM",
+           "RawValue": "0 RPM",
+           "RawMax": "0 RPM",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 35,
+           "Text": "System Fan #5",
+           "Min": "0 RPM",
+           "Value": "0 RPM",
+           "Max": "0 RPM",
+           "SensorId": "/lpc/nct6687dr/0/fan/14",
+           "Type": "Fan",
+           "RawMin": "0 RPM",
+           "RawValue": "0 RPM",
+           "RawMax": "0 RPM",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 36,
+           "Text": "System Fan #6",
+           "Min": "0 RPM",
+           "Value": "0 RPM",
+           "Max": "0 RPM",
+           "SensorId": "/lpc/nct6687dr/0/fan/15",
+           "Type": "Fan",
+           "RawMin": "0 RPM",
+           "RawValue": "0 RPM",
+           "RawMax": "0 RPM",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          }
+         ]
+        },
+        {
+         "id": 37,
+         "Text": "Controls",
+         "Min": "",
+         "Value": "",
+         "Max": "",
+         "ImageURL": "images_icon/control.png",
+         "Children": [
+          {
+           "id": 38,
+           "Text": "CPU Fan",
+           "Min": "35.0 %",
+           "Value": "78.0 %",
+           "Max": "90.0 %",
+           "SensorId": "/lpc/nct6687dr/0/control/0",
+           "Type": "Control",
+           "RawMin": "35.0 %",
+           "RawValue": "78.0 %",
+           "RawMax": "90.0 %",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 39,
+           "Text": "Pump Fan",
+           "Min": "69.0 %",
+           "Value": "89.0 %",
+           "Max": "95.0 %",
+           "SensorId": "/lpc/nct6687dr/0/control/1",
+           "Type": "Control",
+           "RawMin": "69.0 %",
+           "RawValue": "89.0 %",
+           "RawMax": "95.0 %",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 40,
+           "Text": "Chipset Fan",
+           "Min": "100.0 %",
+           "Value": "100.0 %",
+           "Max": "100.0 %",
+           "SensorId": "/lpc/nct6687dr/0/control/2",
+           "Type": "Control",
+           "RawMin": "100.0 %",
+           "RawValue": "100.0 %",
+           "RawMax": "100.0 %",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 41,
+           "Text": "EZ-Connect Fan",
+           "Min": "60.0 %",
+           "Value": "60.0 %",
+           "Max": "60.0 %",
+           "SensorId": "/lpc/nct6687dr/0/control/3",
+           "Type": "Control",
+           "RawMin": "60.0 %",
+           "RawValue": "60.0 %",
+           "RawMax": "60.0 %",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 42,
+           "Text": "System Fan #7",
+           "Min": "60.0 %",
+           "Value": "60.0 %",
+           "Max": "60.0 %",
+           "SensorId": "/lpc/nct6687dr/0/control/9",
+           "Type": "Control",
+           "RawMin": "60.0 %",
+           "RawValue": "60.0 %",
+           "RawMax": "60.0 %",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 43,
+           "Text": "System Fan #1",
+           "Min": "60.0 %",
+           "Value": "60.0 %",
+           "Max": "60.0 %",
+           "SensorId": "/lpc/nct6687dr/0/control/10",
+           "Type": "Control",
+           "RawMin": "60.0 %",
+           "RawValue": "60.0 %",
+           "RawMax": "60.0 %",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 44,
+           "Text": "System Fan #2",
+           "Min": "60.0 %",
+           "Value": "60.0 %",
+           "Max": "60.0 %",
+           "SensorId": "/lpc/nct6687dr/0/control/11",
+           "Type": "Control",
+           "RawMin": "60.0 %",
+           "RawValue": "60.0 %",
+           "RawMax": "60.0 %",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 45,
+           "Text": "System Fan #3",
+           "Min": "60.0 %",
+           "Value": "60.0 %",
+           "Max": "60.0 %",
+           "SensorId": "/lpc/nct6687dr/0/control/12",
+           "Type": "Control",
+           "RawMin": "60.0 %",
+           "RawValue": "60.0 %",
+           "RawMax": "60.0 %",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 46,
+           "Text": "System Fan #4",
+           "Min": "60.0 %",
+           "Value": "60.0 %",
+           "Max": "60.0 %",
+           "SensorId": "/lpc/nct6687dr/0/control/13",
+           "Type": "Control",
+           "RawMin": "60.0 %",
+           "RawValue": "60.0 %",
+           "RawMax": "60.0 %",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 47,
+           "Text": "System Fan #5",
+           "Min": "60.0 %",
+           "Value": "60.0 %",
+           "Max": "60.0 %",
+           "SensorId": "/lpc/nct6687dr/0/control/14",
+           "Type": "Control",
+           "RawMin": "60.0 %",
+           "RawValue": "60.0 %",
+           "RawMax": "60.0 %",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          },
+          {
+           "id": 48,
+           "Text": "System Fan #6",
+           "Min": "60.0 %",
+           "Value": "60.0 %",
+           "Max": "60.0 %",
+           "SensorId": "/lpc/nct6687dr/0/control/15",
+           "Type": "Control",
+           "RawMin": "60.0 %",
+           "RawValue": "60.0 %",
+           "RawMax": "60.0 %",
+           "ImageURL": "images/transparent.png",
+           "Children": []
+          }
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": 49,
+     "Text": "AMD Ryzen 9 9950X3D",
+     "Min": "",
+     "Value": "",
+     "Max": "",
+     "HardwareId": "/amdcpu/0",
+     "ImageURL": "images_icon/cpu.png",
+     "Children": [
+      {
+       "id": 67,
+       "Text": "Powers",
+       "Min": "",
+       "Value": "",
+       "Max": "",
+       "ImageURL": "images_icon/power.png",
+       "Children": [
+        {
+         "id": 68,
+         "Text": "Package",
+         "Min": "39.9 W",
+         "Value": "133.4 W",
+         "Max": "165.3 W",
+         "SensorId": "/amdcpu/0/power/0",
+         "Type": "Power",
+         "RawMin": "39.9 W",
+         "RawValue": "133.4 W",
+         "RawMax": "165.3 W",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        }
+       ]
+      },
+      {
+       "id": 121,
+       "Text": "Temperatures",
+       "Min": "",
+       "Value": "",
+       "Max": "",
+       "ImageURL": "images_icon/temperature.png",
+       "Children": [
+        {
+         "id": 122,
+         "Text": "Core (Tctl/Tdie)",
+         "Min": "43.5 \u00b0C",
+         "Value": "69.5 \u00b0C",
+         "Max": "75.4 \u00b0C",
+         "SensorId": "/amdcpu/0/temperature/2",
+         "Type": "Temperature",
+         "RawMin": "43.5 \u00b0C",
+         "RawValue": "69.5 \u00b0C",
+         "RawMax": "75.4 \u00b0C",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        },
+        {
+         "id": 123,
+         "Text": "CCD1 (Tdie)",
+         "Min": "33.9 \u00b0C",
+         "Value": "65.6 \u00b0C",
+         "Max": "74.4 \u00b0C",
+         "SensorId": "/amdcpu/0/temperature/3",
+         "Type": "Temperature",
+         "RawMin": "33.9 \u00b0C",
+         "RawValue": "65.6 \u00b0C",
+         "RawMax": "74.4 \u00b0C",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        },
+        {
+         "id": 124,
+         "Text": "CCD2 (Tdie)",
+         "Min": "30.8 \u00b0C",
+         "Value": "63.4 \u00b0C",
+         "Max": "78.1 \u00b0C",
+         "SensorId": "/amdcpu/0/temperature/4",
+         "Type": "Temperature",
+         "RawMin": "30.8 \u00b0C",
+         "RawValue": "63.4 \u00b0C",
+         "RawMax": "78.1 \u00b0C",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        },
+        {
+         "id": 125,
+         "Text": "CCDs Max (Tdie)",
+         "Min": "33.9 \u00b0C",
+         "Value": "65.6 \u00b0C",
+         "Max": "78.1 \u00b0C",
+         "SensorId": "/amdcpu/0/temperature/5",
+         "Type": "Temperature",
+         "RawMin": "33.9 \u00b0C",
+         "RawValue": "65.6 \u00b0C",
+         "RawMax": "78.1 \u00b0C",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        },
+        {
+         "id": 126,
+         "Text": "CCDs Average (Tdie)",
+         "Min": "32.6 \u00b0C",
+         "Value": "64.5 \u00b0C",
+         "Max": "71.8 \u00b0C",
+         "SensorId": "/amdcpu/0/temperature/6",
+         "Type": "Temperature",
+         "RawMin": "32.6 \u00b0C",
+         "RawValue": "64.5 \u00b0C",
+         "RawMax": "71.8 \u00b0C",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": 191,
+     "Text": "Corsair - CMP96GX5M2B6400C32 (#1)",
+     "Min": "",
+     "Value": "",
+     "Max": "",
+     "HardwareId": "/memory/dimm/1",
+     "ImageURL": "images_icon/ram.png",
+     "Children": [
+      {
+       "id": 192,
+       "Text": "Temperatures",
+       "Min": "",
+       "Value": "",
+       "Max": "",
+       "ImageURL": "images_icon/temperature.png",
+       "Children": [
+        {
+         "id": 193,
+         "Text": "DIMM #1",
+         "Min": "29.3 \u00b0C",
+         "Value": "56.8 \u00b0C",
+         "Max": "56.8 \u00b0C",
+         "SensorId": "/memory/dimm/1/temperature/0",
+         "Type": "Temperature",
+         "RawMin": "29.3 \u00b0C",
+         "RawValue": "56.8 \u00b0C",
+         "RawMax": "56.8 \u00b0C",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": 216,
+     "Text": "Corsair - CMP96GX5M2B6400C32 (#3)",
+     "Min": "",
+     "Value": "",
+     "Max": "",
+     "HardwareId": "/memory/dimm/3",
+     "ImageURL": "images_icon/ram.png",
+     "Children": [
+      {
+       "id": 217,
+       "Text": "Temperatures",
+       "Min": "",
+       "Value": "",
+       "Max": "",
+       "ImageURL": "images_icon/temperature.png",
+       "Children": [
+        {
+         "id": 218,
+         "Text": "DIMM #3",
+         "Min": "29.3 \u00b0C",
+         "Value": "57.5 \u00b0C",
+         "Max": "57.5 \u00b0C",
+         "SensorId": "/memory/dimm/3/temperature/0",
+         "Type": "Temperature",
+         "RawMin": "29.3 \u00b0C",
+         "RawValue": "57.5 \u00b0C",
+         "RawMax": "57.5 \u00b0C",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": 241,
+     "Text": "NVIDIA GeForce RTX 5090",
+     "Min": "",
+     "Value": "",
+     "Max": "",
+     "HardwareId": "/gpu-nvidia/0",
+     "ImageURL": "images_icon/nvidia.png",
+     "Children": [
+      {
+       "id": 244,
+       "Text": "Powers",
+       "Min": "",
+       "Value": "",
+       "Max": "",
+       "ImageURL": "images_icon/power.png",
+       "Children": [
+        {
+         "id": 245,
+         "Text": "GPU Package",
+         "Min": "41.9 W",
+         "Value": "80.7 W",
+         "Max": "104.5 W",
+         "SensorId": "/gpu-nvidia/0/power/0",
+         "Type": "Power",
+         "RawMin": "41.9 W",
+         "RawValue": "80.7 W",
+         "RawMax": "104.5 W",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        }
+       ]
+      },
+      {
+       "id": 249,
+       "Text": "Temperatures",
+       "Min": "",
+       "Value": "",
+       "Max": "",
+       "ImageURL": "images_icon/temperature.png",
+       "Children": [
+        {
+         "id": 250,
+         "Text": "GPU Core",
+         "Min": "25.0 \u00b0C",
+         "Value": "34.9 \u00b0C",
+         "Max": "35.7 \u00b0C",
+         "SensorId": "/gpu-nvidia/0/temperature/0",
+         "Type": "Temperature",
+         "RawMin": "25.0 \u00b0C",
+         "RawValue": "34.9 \u00b0C",
+         "RawMax": "35.7 \u00b0C",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        },
+        {
+         "id": 251,
+         "Text": "GPU Memory Junction",
+         "Min": "34.0 \u00b0C",
+         "Value": "44.0 \u00b0C",
+         "Max": "44.0 \u00b0C",
+         "SensorId": "/gpu-nvidia/0/temperature/3",
+         "Type": "Temperature",
+         "RawMin": "34.0 \u00b0C",
+         "RawValue": "44.0 \u00b0C",
+         "RawMax": "44.0 \u00b0C",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        }
+       ]
+      },
+      {
+       "id": 277,
+       "Text": "Fans",
+       "Min": "",
+       "Value": "",
+       "Max": "",
+       "ImageURL": "images_icon/fan.png",
+       "Children": [
+        {
+         "id": 278,
+         "Text": "GPU Fan 1",
+         "Min": "0 RPM",
+         "Value": "0 RPM",
+         "Max": "0 RPM",
+         "SensorId": "/gpu-nvidia/0/fan/1",
+         "Type": "Fan",
+         "RawMin": "0 RPM",
+         "RawValue": "0 RPM",
+         "RawMax": "0 RPM",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        },
+        {
+         "id": 279,
+         "Text": "GPU Fan 2",
+         "Min": "0 RPM",
+         "Value": "0 RPM",
+         "Max": "0 RPM",
+         "SensorId": "/gpu-nvidia/0/fan/2",
+         "Type": "Fan",
+         "RawMin": "0 RPM",
+         "RawValue": "0 RPM",
+         "RawMax": "0 RPM",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        },
+        {
+         "id": 280,
+         "Text": "GPU Fan 3",
+         "Min": "0 RPM",
+         "Value": "0 RPM",
+         "Max": "0 RPM",
+         "SensorId": "/gpu-nvidia/0/fan/3",
+         "Type": "Fan",
+         "RawMin": "0 RPM",
+         "RawValue": "0 RPM",
+         "RawMax": "0 RPM",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        }
+       ]
+      },
+      {
+       "id": 281,
+       "Text": "Controls",
+       "Min": "",
+       "Value": "",
+       "Max": "",
+       "ImageURL": "images_icon/control.png",
+       "Children": [
+        {
+         "id": 282,
+         "Text": "GPU Fan 1",
+         "Min": "0.0 %",
+         "Value": "0.0 %",
+         "Max": "0.0 %",
+         "SensorId": "/gpu-nvidia/0/control/1",
+         "Type": "Control",
+         "RawMin": "0.0 %",
+         "RawValue": "0.0 %",
+         "RawMax": "0.0 %",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        },
+        {
+         "id": 283,
+         "Text": "GPU Fan 2",
+         "Min": "0.0 %",
+         "Value": "0.0 %",
+         "Max": "0.0 %",
+         "SensorId": "/gpu-nvidia/0/control/2",
+         "Type": "Control",
+         "RawMin": "0.0 %",
+         "RawValue": "0.0 %",
+         "RawMax": "0.0 %",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        },
+        {
+         "id": 284,
+         "Text": "GPU Fan 3",
+         "Min": "0.0 %",
+         "Value": "0.0 %",
+         "Max": "0.0 %",
+         "SensorId": "/gpu-nvidia/0/control/3",
+         "Type": "Control",
+         "RawMin": "0.0 %",
+         "RawValue": "0.0 %",
+         "RawMax": "0.0 %",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": 332,
+     "Text": "Corsair Power Su HX1500i Power Su",
+     "Min": "",
+     "Value": "",
+     "Max": "",
+     "HardwareId": "/psu/corsair/0",
+     "ImageURL": "images_icon/power-supply.png",
+     "Children": [
+      {
+       "id": 342,
+       "Text": "Powers",
+       "Min": "",
+       "Value": "",
+       "Max": "",
+       "ImageURL": "images_icon/power.png",
+       "Children": [
+        {
+         "id": 343,
+         "Text": "+12V",
+         "Min": "126.0 W",
+         "Value": "242.0 W",
+         "Max": "362.0 W",
+         "SensorId": "/psu/corsair/0/power/10",
+         "Type": "Power",
+         "RawMin": "126.0 W",
+         "RawValue": "242.0 W",
+         "RawMax": "362.0 W",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        },
+        {
+         "id": 344,
+         "Text": "+5V",
+         "Min": "50.0 W",
+         "Value": "60.5 W",
+         "Max": "63.0 W",
+         "SensorId": "/psu/corsair/0/power/11",
+         "Type": "Power",
+         "RawMin": "50.0 W",
+         "RawValue": "60.5 W",
+         "RawMax": "63.0 W",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        },
+        {
+         "id": 345,
+         "Text": "+3.3V",
+         "Min": "11.0 W",
+         "Value": "11.5 W",
+         "Max": "14.5 W",
+         "SensorId": "/psu/corsair/0/power/12",
+         "Type": "Power",
+         "RawMin": "11.0 W",
+         "RawValue": "11.5 W",
+         "RawMax": "14.5 W",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        },
+        {
+         "id": 346,
+         "Text": "Total watts",
+         "Min": "190.0 W",
+         "Value": "334.0 W",
+         "Max": "432.0 W",
+         "SensorId": "/psu/corsair/0/power/13",
+         "Type": "Power",
+         "RawMin": "190.0 W",
+         "RawValue": "334.0 W",
+         "RawMax": "432.0 W",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        },
+        {
+         "id": 347,
+         "Text": "Total Output",
+         "Min": "-",
+         "Value": "314.0 W",
+         "Max": "-",
+         "SensorId": "/psu/corsair/0/power/14",
+         "Type": "Power",
+         "RawMin": " W",
+         "RawValue": "314.0 W",
+         "RawMax": " W",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        }
+       ]
+      },
+      {
+       "id": 348,
+       "Text": "Temperatures",
+       "Min": "",
+       "Value": "",
+       "Max": "",
+       "ImageURL": "images_icon/temperature.png",
+       "Children": [
+        {
+         "id": 349,
+         "Text": "VRM",
+         "Min": "36.5 \u00b0C",
+         "Value": "55.0 \u00b0C",
+         "Max": "55.0 \u00b0C",
+         "SensorId": "/psu/corsair/0/temperature/0",
+         "Type": "Temperature",
+         "RawMin": "36.5 \u00b0C",
+         "RawValue": "55.0 \u00b0C",
+         "RawMax": "55.0 \u00b0C",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        },
+        {
+         "id": 350,
+         "Text": "Case",
+         "Min": "31.3 \u00b0C",
+         "Value": "56.0 \u00b0C",
+         "Max": "56.0 \u00b0C",
+         "SensorId": "/psu/corsair/0/temperature/1",
+         "Type": "Temperature",
+         "RawMin": "31.3 \u00b0C",
+         "RawValue": "56.0 \u00b0C",
+         "RawMax": "56.0 \u00b0C",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        }
+       ]
+      },
+      {
+       "id": 351,
+       "Text": "Fans",
+       "Min": "",
+       "Value": "",
+       "Max": "",
+       "ImageURL": "images_icon/fan.png",
+       "Children": [
+        {
+         "id": 352,
+         "Text": "Case",
+         "Min": "0 RPM",
+         "Value": "0 RPM",
+         "Max": "0 RPM",
+         "SensorId": "/psu/corsair/0/fan/2",
+         "Type": "Fan",
+         "RawMin": "0 RPM",
+         "RawValue": "0 RPM",
+         "RawMax": "0 RPM",
+         "ImageURL": "images/transparent.png",
+         "Children": []
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

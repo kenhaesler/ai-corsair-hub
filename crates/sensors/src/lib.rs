@@ -1,6 +1,7 @@
 pub mod cpu;
 pub mod gpu;
 pub mod lhm;
+pub mod lhm_registry;
 pub mod psu;
 
 pub use gpu::{GpuMetrics, GpuSensor};

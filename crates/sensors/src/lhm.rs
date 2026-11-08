@@ -14,7 +14,7 @@ use corsair_hid::{PsuStatus, RailReading};
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 
-const LHM_URL: &str = "http://127.0.0.1:8085/data.json";
+pub(crate) const LHM_URL: &str = "http://127.0.0.1:8085/data.json";
 pub(crate) const HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
