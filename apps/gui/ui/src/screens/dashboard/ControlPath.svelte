@@ -61,6 +61,12 @@
 
   const icon = (src: string) => (src === 'cpu' ? Cpu : src === 'gpu' ? Microchip : src.startsWith('water') ? Droplet : Thermometer);
   const loadT = $derived(display.thermalT);
+  // Pulse speed follows load/duty, but a running CSS animation jumps whenever
+  // its duration changes, so durations are quantised to 0.5 s steps and only
+  // move when the value crosses a step.
+  const q = (s: number) => (Math.round(s * 2) / 2).toFixed(1);
+  const inDur = $derived(q(3.4 - loadT * 1.6));
+  const outDur = (duty: number) => q(3.6 - (duty / 100) * 2.4);
 </script>
 
 <div class="body" bind:clientWidth={w} bind:clientHeight={h}>
@@ -90,7 +96,7 @@
         class="pulse"
         style:offset-path="path('{inPath(inY[i])}')"
         style:--c={t === null ? 'var(--sc)' : heatColor(t)}
-        style:animation-duration="{(3.4 - loadT * 1.6).toFixed(2)}s"
+        style:animation-duration="{inDur}s"
         style:animation-delay="{-i * 0.7}s"
       ></i>
     {/each}
@@ -124,7 +130,7 @@
         class="pulse"
         style:offset-path="path('{outPath(outY[i])}')"
         style:--c={dutyColor(g.duty_percent)}
-        style:animation-duration="{(3.6 - (g.duty_percent / 100) * 2.4).toFixed(2)}s"
+        style:animation-duration="{outDur(g.duty_percent)}s"
         style:animation-delay="{-i * 0.5}s"
       ></i>
     {/each}

@@ -16,6 +16,9 @@ import { listen } from '@tauri-apps/api/event';
 import type { SystemSnapshot } from '../types';
 
 export const MAX_HISTORY = 300; // 5 min at 1/sec
+/** The history is a 1 Hz ring whatever rate the backend emits at (it can be many updates per second). */
+const HISTORY_STEP_MS = 950;
+const SNAPSHOT_STEP_MS = 240;
 const SESSION_STEP_MS = 5000;
 const MAX_SESSION = 1440; // 2 h at 5 s
 const RECOVERED_DISMISS_MS = 5000;
@@ -46,8 +49,16 @@ export async function initSensorListener() {
 
   await listen<SystemSnapshot>('sensor-update', (event) => {
     const snap = event.payload;
-    sensors.snapshot = snap;
-    sensors.history = [...sensors.history.slice(-(MAX_HISTORY - 1)), snap];
+    // The worker emits on every loop tick (up to the RGB frame rate). The UI
+    // follows at ~4 Hz: smooth enough to read, cheap enough to never matter.
+    if (!sensors.snapshot || snap.timestamp_ms - sensors.snapshot.timestamp_ms >= SNAPSHOT_STEP_MS) sensors.snapshot = snap;
+    const lastHist = sensors.history[sensors.history.length - 1];
+    if (!lastHist || snap.timestamp_ms - lastHist.timestamp_ms >= HISTORY_STEP_MS) {
+      sensors.history = [...sensors.history.slice(-(MAX_HISTORY - 1)), snap];
+    } else {
+      // same second: the newest reading replaces the provisional last sample, so the live end stays current
+      sensors.history = [...sensors.history.slice(0, -1), snap];
+    }
     const lastSession = sensors.session[sensors.session.length - 1];
     if (!lastSession || snap.timestamp_ms - lastSession.timestamp_ms >= SESSION_STEP_MS) {
       sensors.session = [...sensors.session.slice(-(MAX_SESSION - 1)), snap];
