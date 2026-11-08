@@ -9,11 +9,11 @@
 
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use corsair_common::Temperature;
 
-use crate::lhm_registry::{is_connected_thermistor, LhmCache, LhmKind, LhmSensor};
 use crate::TemperatureSource;
+use crate::lhm_registry::{LhmCache, LhmKind, LhmSensor, is_connected_thermistor};
 
 /// How several matching sensors collapse into one reading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +45,9 @@ fn is_gpu(s: &LhmSensor) -> bool {
 }
 
 fn sel_board_system(s: &LhmSensor) -> bool {
-    is_temp(s) && on_superio(s) && (s.name == "System" || s.name == "Motherboard" || s.name == "System Temperature")
+    is_temp(s)
+        && on_superio(s)
+        && (s.name == "System" || s.name == "Motherboard" || s.name == "System Temperature")
 }
 fn sel_chipset(s: &LhmSensor) -> bool {
     is_temp(s) && on_superio(s) && s.name.starts_with("Chipset")
@@ -55,7 +57,9 @@ fn sel_vrm(s: &LhmSensor) -> bool {
 }
 fn sel_dimm(s: &LhmSensor) -> bool {
     is_temp(s)
-        && (s.hardware_id.starts_with("/memory/") || s.hardware_id.starts_with("/ram/") || s.name.starts_with("DIMM"))
+        && (s.hardware_id.starts_with("/memory/")
+            || s.hardware_id.starts_with("/ram/")
+            || s.name.starts_with("DIMM"))
         && !s.name.contains("Limit")
         && !s.name.contains("Resolution")
 }
@@ -72,7 +76,9 @@ fn sel_ccd_any(s: &LhmSensor) -> bool {
 fn sel_water(s: &LhmSensor) -> bool {
     is_temp(s)
         && on_superio(s)
-        && (s.name.contains("Thermistor") || s.name.contains("T_Sensor") || s.name.contains("Water"))
+        && (s.name.contains("Thermistor")
+            || s.name.contains("T_Sensor")
+            || s.name.contains("Water"))
         && is_connected_thermistor(s.value)
 }
 fn sel_gpu_memory(s: &LhmSensor) -> bool {
@@ -84,18 +90,57 @@ fn sel_gpu_hotspot(s: &LhmSensor) -> bool {
 
 /// The derived sources, in the order they are offered to the user.
 pub const LHM_TEMP_SPECS: &[LhmTempSpec] = &[
-    LhmTempSpec { id: "board_system", label: "Board", select: sel_board_system, reduce: Reduce::First },
-    LhmTempSpec { id: "chipset", label: "Chipset", select: sel_chipset, reduce: Reduce::First },
-    LhmTempSpec { id: "vrm", label: "VRM", select: sel_vrm, reduce: Reduce::Max },
-    LhmTempSpec { id: "dimm", label: "Memory", select: sel_dimm, reduce: Reduce::Max },
-    LhmTempSpec { id: "cpu_ccd", label: "CPU cores", select: sel_ccd_average, reduce: Reduce::First },
-    LhmTempSpec { id: "water_inline", label: "Coolant", select: sel_water, reduce: Reduce::First },
-    LhmTempSpec { id: "gpu_memory", label: "GPU memory", select: sel_gpu_memory, reduce: Reduce::First },
+    LhmTempSpec {
+        id: "board_system",
+        label: "Board",
+        select: sel_board_system,
+        reduce: Reduce::First,
+    },
+    LhmTempSpec {
+        id: "chipset",
+        label: "Chipset",
+        select: sel_chipset,
+        reduce: Reduce::First,
+    },
+    LhmTempSpec {
+        id: "vrm",
+        label: "VRM",
+        select: sel_vrm,
+        reduce: Reduce::Max,
+    },
+    LhmTempSpec {
+        id: "dimm",
+        label: "Memory",
+        select: sel_dimm,
+        reduce: Reduce::Max,
+    },
+    LhmTempSpec {
+        id: "cpu_ccd",
+        label: "CPU cores",
+        select: sel_ccd_average,
+        reduce: Reduce::First,
+    },
+    LhmTempSpec {
+        id: "water_inline",
+        label: "Coolant",
+        select: sel_water,
+        reduce: Reduce::First,
+    },
+    LhmTempSpec {
+        id: "gpu_memory",
+        label: "GPU memory",
+        select: sel_gpu_memory,
+        reduce: Reduce::First,
+    },
 ];
 
 /// Evaluate a spec against a sensor list. `None` when nothing matches.
 pub fn evaluate(spec: &LhmTempSpec, sensors: &[LhmSensor]) -> Option<f64> {
-    let mut matches: Vec<f64> = sensors.iter().filter(|s| (spec.select)(s)).map(|s| s.value).collect();
+    let mut matches: Vec<f64> = sensors
+        .iter()
+        .filter(|s| (spec.select)(s))
+        .map(|s| s.value)
+        .collect();
     // CPU cores: fall back to the mean of the individual CCDs when the driver
     // offers no "CCDs Average"; GPU memory: fall back to the hot spot.
     if matches.is_empty() {
@@ -141,8 +186,12 @@ impl TemperatureSource for LhmTempSource {
         self.spec.id
     }
     fn read(&self) -> anyhow::Result<Temperature> {
-        let sensors = self.cache.sensors().context("LibreHardwareMonitor unavailable")?;
-        let celsius = evaluate(self.spec, &sensors).ok_or_else(|| anyhow!("{} sensor not connected", self.spec.label))?;
+        let sensors = self
+            .cache
+            .sensors()
+            .context("LibreHardwareMonitor unavailable")?;
+        let celsius = evaluate(self.spec, &sensors)
+            .ok_or_else(|| anyhow!("{} sensor not connected", self.spec.label))?;
         Ok(Temperature { celsius })
     }
 }
@@ -160,14 +209,16 @@ pub fn discover_lhm_temp_sources(cache: Arc<LhmCache>) -> Vec<Box<dyn Temperatur
     LHM_TEMP_SPECS
         .iter()
         .filter(|spec| evaluate(spec, &sensors).is_some())
-        .map(|spec| Box::new(LhmTempSource::new(spec, Arc::clone(&cache))) as Box<dyn TemperatureSource>)
+        .map(|spec| {
+            Box::new(LhmTempSource::new(spec, Arc::clone(&cache))) as Box<dyn TemperatureSource>
+        })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lhm_registry::{parse_lhm_tree, FIXTURE};
+    use crate::lhm_registry::{FIXTURE, parse_lhm_tree};
     use std::collections::BTreeSet;
 
     fn fixture() -> Vec<LhmSensor> {
@@ -180,12 +231,25 @@ mod tests {
     #[test]
     fn discovers_expected_ids() {
         let cache = Arc::new(LhmCache::with_sensors(fixture()));
-        let ids: BTreeSet<String> = discover_lhm_temp_sources(cache).iter().map(|s| s.name().to_string()).collect();
-        let want: BTreeSet<String> = ["board_system", "chipset", "vrm", "dimm", "cpu_ccd", "gpu_memory"]
-            .into_iter()
-            .map(String::from)
+        let ids: BTreeSet<String> = discover_lhm_temp_sources(cache)
+            .iter()
+            .map(|s| s.name().to_string())
             .collect();
-        assert_eq!(ids, want, "water_inline must be absent while the thermistor reads -40");
+        let want: BTreeSet<String> = [
+            "board_system",
+            "chipset",
+            "vrm",
+            "dimm",
+            "cpu_ccd",
+            "gpu_memory",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(
+            ids, want,
+            "water_inline must be absent while the thermistor reads -40"
+        );
     }
 
     #[test]
@@ -200,9 +264,15 @@ mod tests {
 
     #[test]
     fn ccd_falls_back_to_mean_of_ccds() {
-        let list: Vec<LhmSensor> = fixture().into_iter().filter(|s| s.name != "CCDs Average (Tdie)").collect();
+        let list: Vec<LhmSensor> = fixture()
+            .into_iter()
+            .filter(|s| s.name != "CCDs Average (Tdie)")
+            .collect();
         let v = evaluate(spec("cpu_ccd"), &list).unwrap();
-        assert!((v - 64.5).abs() < 0.01, "mean of CCD1 65.6 and CCD2 63.4, got {v}");
+        assert!(
+            (v - 64.5).abs() < 0.01,
+            "mean of CCD1 65.6 and CCD2 63.4, got {v}"
+        );
     }
 
     #[test]

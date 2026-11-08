@@ -31,7 +31,7 @@ use crate::diagnostics::{self, LedMarkerReport, MarkerMode};
 use crate::dto::{
     detected_devices, devices_not_ready, recheck_not_ready, topology_events, CpuMetricsDto, DetectedDeviceDto,
     DetectionOutput, DeviceStatus, DeviceTree, GpuMetricsDto, LinkSubdevicesChangedDto,
-    RgbFrameDto, SystemSnapshot, TopologyEventDto,
+    RgbFrameDto, SystemSnapshot, TopologyEventDto, PumpReadingDto,
 };
 use crate::state::{ChannelIdentity, HwCommand};
 use crate::worker_env::{
@@ -742,6 +742,25 @@ impl Worker {
         // fallback backends (root\WMI, CIMV2) this stays `None` and
         // the dashboard hides the CPU extras strip.
         let cpu_metrics = self.env.telemetry.read_cpu_metrics();
+        // Pumps: motherboard headers via LHM, plus LINK pumps from this
+        // cycle's speeds (no extra HID traffic).
+        let mut pumps = self.env.telemetry.read_motherboard_pumps();
+        let types = self.control_loop.device_type_map();
+        for (serial, speeds) in &cycle_result.fan_speeds {
+            for sp in speeds {
+                if let Some((dt, _)) = types.get(&(serial.clone(), sp.channel)) {
+                    if dt.is_pump() {
+                        pumps.push(PumpReadingDto {
+                            id: format!("link:{serial}:{}", sp.channel),
+                            name: format!("{} · Ch {}", dt.name(), sp.channel),
+                            rpm: sp.rpm as f64,
+                            duty_pct: None,
+                            source: "link",
+                        });
+                    }
+                }
+            }
+        }
         let snapshot = SystemSnapshot::from_cycle(
             &cycle_result,
             &cycle_result.fan_speeds,
@@ -749,6 +768,7 @@ impl Worker {
             &device_id_map,
             gpu_metrics,
             cpu_metrics,
+            pumps,
         );
         emit(&*self.env.events, "sensor-update", &snapshot);
 
@@ -979,6 +999,10 @@ impl Telemetry for RealTelemetry {
             power_watts: m.power_watts,
             clock_mhz: m.clock_mhz,
         })
+    }
+
+    fn read_motherboard_pumps(&self) -> Vec<PumpReadingDto> {
+        corsair_sensors::pump::read_motherboard_pumps_now().into_iter().map(Into::into).collect()
     }
 }
 
@@ -1519,6 +1543,7 @@ fn build_snapshot(
         &device_id_map,
         None,
         None,
+        telemetry.read_motherboard_pumps(),
     ))
 }
 

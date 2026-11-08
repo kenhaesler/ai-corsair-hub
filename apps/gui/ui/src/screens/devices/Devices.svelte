@@ -30,6 +30,8 @@
   import Notice from './Notice.svelte';
   import HubSection from './HubSection.svelte';
   import PsuCard from './PsuCard.svelte';
+  import PumpCard from './PumpCard.svelte';
+  import { display } from '../../lib/stores/scrub.svelte';
   import DetectedList from './DetectedList.svelte';
 
   let devices = $state<DeviceTree | null>(null);
@@ -194,6 +196,10 @@
 
       {#if devices.psu}
         <div class="psu"><PsuCard psu={devices.psu} /></div>
+      {/if}
+
+      {#if display.snapshot?.pumps?.length}
+        <div class="psu"><PumpCard pumps={display.snapshot.pumps} /></div>
       {/if}
 
       {#if devices.hubs.length === 0 && !devices.psu}

@@ -33,6 +33,38 @@ pub struct SystemSnapshot {
     /// isn't running or doesn't have a `/amdcpu` / `/intelcpu` node.
     /// Added in v0.4.
     pub cpu_metrics: Option<CpuMetricsDto>,
+    /// Pumps we can see: motherboard headers (via LibreHardwareMonitor) and
+    /// LINK-attached pumps. Empty when none is detected. Added in v0.5.
+    #[serde(default)]
+    pub pumps: Vec<PumpReadingDto>,
+}
+
+/// One pump's live telemetry.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PumpReadingDto {
+    /// LHM sensor id for motherboard pumps, `link:<serial>:<channel>` for LINK pumps.
+    pub id: String,
+    pub name: String,
+    pub rpm: f64,
+    /// Duty the controlling side applies, when known.
+    pub duty_pct: Option<f64>,
+    /// `"motherboard"` or `"link"`.
+    pub source: &'static str,
+}
+
+impl From<corsair_sensors::PumpReading> for PumpReadingDto {
+    fn from(p: corsair_sensors::PumpReading) -> Self {
+        Self {
+            id: p.id,
+            name: p.name,
+            rpm: p.rpm,
+            duty_pct: p.duty_pct,
+            source: match p.source {
+                corsair_sensors::PumpSource::Motherboard => "motherboard",
+                corsair_sensors::PumpSource::Link => "link",
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -460,6 +492,7 @@ impl SystemSnapshot {
         device_id_map: &std::collections::HashMap<(String, u8), String>,
         gpu_metrics: Option<GpuMetricsDto>,
         cpu_metrics: Option<CpuMetricsDto>,
+        pumps: Vec<PumpReadingDto>,
     ) -> Self {
         let timestamp_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -576,6 +609,7 @@ impl SystemSnapshot {
             hub_health,
             gpu_metrics,
             cpu_metrics,
+            pumps,
         }
     }
 }

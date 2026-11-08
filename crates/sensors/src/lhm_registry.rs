@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use crate::lhm::{bounded_get_string, HTTP_TIMEOUT, LHM_URL};
+use crate::lhm::{HTTP_TIMEOUT, LHM_URL, bounded_get_string};
 
 /// The sensor classes LHM reports (its `Type` field), collapsed to what we use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,7 +134,10 @@ pub struct LhmCache {
 
 impl LhmCache {
     pub fn new(ttl: Duration) -> Self {
-        Self { ttl, state: Mutex::new(None) }
+        Self {
+            ttl,
+            state: Mutex::new(None),
+        }
     }
 
     pub fn sensors(&self) -> anyhow::Result<Arc<Vec<LhmSensor>>> {
@@ -180,7 +183,11 @@ mod tests {
         let list = fixture();
         let fan = find(&list, LhmKind::Fan, "Pump Fan #1");
         assert_eq!(fan.value, 4428.0);
-        assert!(fan.hardware_name.starts_with("Nuvoton"), "{}", fan.hardware_name);
+        assert!(
+            fan.hardware_name.starts_with("Nuvoton"),
+            "{}",
+            fan.hardware_name
+        );
         assert!(fan.hardware_id.starts_with("/lpc/"), "{}", fan.hardware_id);
         let ctl = find(&list, LhmKind::Control, "Pump Fan");
         assert_eq!(ctl.value, 89.0);
@@ -198,7 +205,11 @@ mod tests {
         assert_eq!(t("CCDs Average (Tdie)"), 64.5);
         assert_eq!(t("GPU Memory Junction"), 44.0);
         assert_eq!(t("Thermistor Sensor"), -40.0);
-        assert!(find(&list, LhmKind::Temperature, "DIMM #1").hardware_id.starts_with("/memory/"));
+        assert!(
+            find(&list, LhmKind::Temperature, "DIMM #1")
+                .hardware_id
+                .starts_with("/memory/")
+        );
     }
 
     #[test]

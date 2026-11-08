@@ -289,6 +289,16 @@ function step(dt: number): SystemSnapshot {
     hub_health: hubs.map((h) => ({ serial: h.serial, healthy: true, consecutive_failures: 0 })),
     gpu_metrics,
     cpu_metrics,
+    // one D5-class pump on a motherboard header, modulated by the BIOS
+    pumps: [
+      {
+        id: '/lpc/preview/0/fan/1',
+        name: 'Pump Fan #1',
+        rpm: Math.round(2600 + 1400 * Math.min(1, Math.max(0, (sim.cpuTemp - 45) / 35)) + noise(25)),
+        duty_pct: Math.round(60 + 35 * Math.min(1, Math.max(0, (sim.cpuTemp - 45) / 35))),
+        source: 'motherboard',
+      },
+    ],
   };
   sim.last = snap;
   return snap;

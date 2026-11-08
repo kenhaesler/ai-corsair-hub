@@ -12,6 +12,7 @@
   import Fan from 'lucide-svelte/icons/fan';
   import Zap from 'lucide-svelte/icons/zap';
   import Activity from 'lucide-svelte/icons/activity';
+  import Droplet from 'lucide-svelte/icons/droplet';
   import Cpu from 'lucide-svelte/icons/cpu';
   import Microchip from 'lucide-svelte/icons/microchip';
   import Eye from 'lucide-svelte/icons/eye';
@@ -141,22 +142,39 @@
     }
     // speeds: one shared, honest scale (pumps spin faster than fans)
     const rpms = s.group_duties.map((g) => ({ g, rpm: groupRpm(s, g.name) }));
-    const top = Math.max(2000, ...rpms.map((x) => x.rpm ?? 0));
+    const pumps = s.pumps ?? [];
+    const top = Math.max(2000, ...rpms.map((x) => x.rpm ?? 0), ...pumps.map((p) => p.rpm));
     const scale = Math.ceil((top * 1.1) / 500) * 500;
-    return rpms.map(({ g, rpm }) => ({
-      key: `rpm:${g.name}`,
-      hl: null,
-      icon: Activity,
-      name: g.name,
-      sub: plural(s.fans.filter((f) => f.group_name === g.name).length, 'device'),
-      value: rpm ?? 0,
-      dec: 0,
-      unit: 'rpm',
-      min: 0,
-      max: scale,
-      env: null,
-      color: dutyColor(dutyOf(s, g.name) ?? 0),
-    }));
+    return [
+      ...rpms.map(({ g, rpm }) => ({
+        key: `rpm:${g.name}`,
+        hl: null,
+        icon: Activity,
+        name: g.name,
+        sub: plural(s.fans.filter((f) => f.group_name === g.name).length, 'device'),
+        value: rpm ?? 0,
+        dec: 0,
+        unit: 'rpm',
+        min: 0,
+        max: scale,
+        env: null,
+        color: dutyColor(dutyOf(s, g.name) ?? 0),
+      })),
+      ...pumps.map((p) => ({
+        key: `pump:${p.id}`,
+        hl: null,
+        icon: Droplet,
+        name: p.name,
+        sub: `${p.source === 'link' ? 'LINK pump' : 'Motherboard header'}${p.duty_pct !== null ? ` · ${Math.round(p.duty_pct)}% duty` : ''}`,
+        value: p.rpm,
+        dec: 0,
+        unit: 'rpm',
+        min: 0,
+        max: scale,
+        env: null,
+        color: 'var(--s-water)',
+      })),
+    ];
   });
 
   // Pins: order + hide (temps, groups, PSU total), preserved from the previous Summary.

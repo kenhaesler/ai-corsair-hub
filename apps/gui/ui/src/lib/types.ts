@@ -21,6 +21,18 @@ export interface SystemSnapshot {
    * doesn't expose a `/amdcpu` / `/intelcpu` node. Added in v0.4.
    */
   cpu_metrics: CpuMetricsDto | null;
+  /** Pumps we can see: motherboard headers (via LHM) and LINK pumps. Empty when none. Added in v0.5. */
+  pumps: PumpReading[];
+}
+
+export interface PumpReading {
+  /** LHM sensor id for motherboard pumps, `link:<serial>:<channel>` for LINK pumps */
+  id: string;
+  name: string;
+  rpm: number;
+  /** duty the controlling side applies, when known */
+  duty_pct: number | null;
+  source: 'motherboard' | 'link';
 }
 
 export interface GpuMetricsDto {

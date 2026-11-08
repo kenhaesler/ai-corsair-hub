@@ -128,6 +128,10 @@ pub trait Telemetry {
     fn read_psu_hid(&self) -> Option<anyhow::Result<PsuStatus>>;
     fn read_gpu_metrics(&self) -> Option<GpuMetricsDto>;
     fn read_cpu_metrics(&self) -> Option<CpuMetricsDto>;
+    /// Motherboard-header pumps (LHM). Default: none; the fake telemetry keeps it.
+    fn read_motherboard_pumps(&self) -> Vec<crate::dto::PumpReadingDto> {
+        Vec::new()
+    }
 }
 
 /// Hub re-open (recovery) and device-tree discovery.
