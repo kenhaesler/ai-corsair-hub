@@ -140,11 +140,13 @@
         })),
       ];
     }
-    // speeds: one shared, honest scale (pumps spin faster than fans)
+    // speeds: one shared, honest scale (pumps spin faster than fans). The
+    // scale only ever grows during a session: a pump wandering around a
+    // rounding boundary must not make every bar jump each second.
     const rpms = s.group_duties.map((g) => ({ g, rpm: groupRpm(s, g.name) }));
     const pumps = s.pumps ?? [];
     const top = Math.max(2000, ...rpms.map((x) => x.rpm ?? 0), ...pumps.map((p) => p.rpm));
-    const scale = Math.ceil((top * 1.1) / 500) * 500;
+    const scale = Math.max(speedScale, Math.ceil((top * 1.15) / 500) * 500);
     return [
       ...rpms.map(({ g, rpm }) => ({
         key: `rpm:${g.name}`,
@@ -175,6 +177,14 @@
         color: 'var(--s-water)',
       })),
     ];
+  });
+
+  // Sticky rpm scale for the Speeds tab (grows, never shrinks, within a session).
+  let speedScale = $state(0);
+  $effect(() => {
+    if (tab !== 'speeds') return;
+    const m = rows.reduce((acc, r) => Math.max(acc, r.max), 0);
+    if (m > speedScale) speedScale = m;
   });
 
   // Pins: order + hide (temps, groups, PSU total), preserved from the previous Summary.
