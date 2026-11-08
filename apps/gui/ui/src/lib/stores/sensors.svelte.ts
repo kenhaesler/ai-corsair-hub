@@ -42,6 +42,7 @@ class SensorStore {
 export const sensors = new SensorStore();
 
 let initialized = false;
+let lastHistoryTs = -Infinity;
 
 export async function initSensorListener() {
   if (initialized) return;
@@ -52,12 +53,12 @@ export async function initSensorListener() {
     // The worker emits on every loop tick (up to the RGB frame rate). The UI
     // follows at ~4 Hz: smooth enough to read, cheap enough to never matter.
     if (!sensors.snapshot || snap.timestamp_ms - sensors.snapshot.timestamp_ms >= SNAPSHOT_STEP_MS) sensors.snapshot = snap;
-    const lastHist = sensors.history[sensors.history.length - 1];
-    if (!lastHist || snap.timestamp_ms - lastHist.timestamp_ms >= HISTORY_STEP_MS) {
+    // 1 Hz ring: a sample is committed once a second has passed since the
+    // last committed one (comparing against the committed sample, never
+    // against a reading that arrived in between).
+    if (snap.timestamp_ms - lastHistoryTs >= HISTORY_STEP_MS) {
+      lastHistoryTs = snap.timestamp_ms;
       sensors.history = [...sensors.history.slice(-(MAX_HISTORY - 1)), snap];
-    } else {
-      // same second: the newest reading replaces the provisional last sample, so the live end stays current
-      sensors.history = [...sensors.history.slice(0, -1), snap];
     }
     const lastSession = sensors.session[sensors.session.length - 1];
     if (!lastSession || snap.timestamp_ms - lastSession.timestamp_ms >= SESSION_STEP_MS) {
