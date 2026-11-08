@@ -138,12 +138,20 @@ Protocol is fully documented in liquidctl's `corsair_hid_psu` driver. We can rea
 ### Level 4: Multi-sensor Weighted PID with Acoustic Optimization
 
 ```
-Sensor Fusion:
-  CPU Tctl, CCD0, CCD1 → weighted avg → T_cpu
-  GPU Core, Hotspot    → weighted avg → T_gpu
-  Water In/Out (later) → weighted avg → T_water
+Sensor Fusion (ids a fan group may list in temp_source.sensors):
+  cpu           CPU Tctl/Tdie (LHM, WMI fallback)
+  cpu_ccd       CCDs Average (Tdie): smoother than Tctl         (LHM)
+  gpu           GPU core (NVML)      gpu_memory  memory junction (LHM)
+  board_system / chipset / vrm / dimm   motherboard sensors        (LHM)
+  water_inline  coolant thermistor on a board header, when connected (LHM)
+  psu_vrm / psu_case                   PSU internals             (HID)
 
-  T_effective = w1*T_cpu + w2*T_gpu + w3*T_water
+  T_effective = Σ wᵢ·Tᵢ / Σ wᵢ   over the listed sensors that read this tick
+  Curve mode may add power feed-forward:
+    T_curve = T_effective + clamp(k · (P_cpu+gpu − P̄₆₀ₛ)/100 W, 0, 15 °C)
+
+Safety: CPU ≥ 95 °C or GPU ≥ 90 °C, or every visible pump below
+general.pump_min_rpm for 5 ticks → emergency 100 % (LINK pumps keep ≥ 50 %).
 
 PID Controller:
   target: T_target (user-configurable)
@@ -187,8 +195,9 @@ Fan Groups (per-group PID):
 - [x] CPU temperature via LibreHardwareMonitor HTTP API
 - [x] GPU temperature via NVML
 - [x] HX1500i PSU monitoring (power, temp, fan) via HID + LHM
-- [ ] Motherboard sensors (VRM, chipset) via WMI
-- [ ] Water temperature (when user adds inline sensor)
+- [x] Motherboard sensors (board, chipset, VRM, memory, CCD average) via LHM
+- [x] Water temperature when an inline sensor is connected to a board header (LHM thermistor)
+- [x] Pump rpm/duty from motherboard headers (LHM) and LINK pumps; pump stall watchdog
 
 ### Phase 3: Fan Control Service (COMPLETE)
 - [x] Wire PID controller to real sensor inputs

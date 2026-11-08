@@ -58,12 +58,15 @@ the LINK System Hub.
 - **Fan control:**
   - fixed, curve (draggable editor) and PID modes per fan group;
   - acoustic filter (asymmetric ramps, hysteresis, minimum duty);
-  - Silent/Balanced/Performance presets;
-  - emergency 100% override;
-  - weighted multi-sensor temperature sources.
+  - Silent/Balanced/Gaming/Performance/Benchmark/Water Priority/Case airflow presets;
+  - emergency 100% override (critical CPU/GPU temperature, or a stalled pump);
+  - weighted multi-sensor temperature sources: CPU, CPU cores, GPU, GPU memory, motherboard,
+    chipset, VRM, memory, coolant (inline sensor), PSU;
+  - optional power anticipation on curves (fans start when CPU+GPU power rises, before the
+    coolant warms).
 - **Monitoring:**
-  - CPU/GPU/PSU temperatures;
-  - per-fan RPM and duty;
+  - CPU/GPU/PSU and motherboard temperatures;
+  - per-fan RPM and duty; pump RPM and duty (motherboard header or LINK);
   - PSU power, rails, VRM/case temperatures and fan;
   - 60-second history;
   - hub health.
@@ -87,7 +90,7 @@ the LINK System Hub.
 - **Feature parity:** a redesign must never drop a capability or a piece of information. The authoritative
   checklist is `prototypes/INVENTORY.md` on branch `proto/base`.
 - **Undecided:** tray/background service mode (the Windows service is a stub), installer and auto-update
-  rollout (Phase 6), and pump/coolant sensor support.
+  rollout (Phase 6), and writing the pump duty from the app (reading and a stall alarm exist).
 
 ## Brand Commitments
 

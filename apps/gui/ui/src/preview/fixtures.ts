@@ -203,6 +203,7 @@ export const FAN_PRESETS: FanPresetDef[] = [
     cpu_weight: 0.6,
     gpu_weight: 0.4,
     water_weight: 0.0,
+    power_feed_forward: 2.0,
     points: [
       { temp: 30, duty: 20 },
       { temp: 50, duty: 30 },
@@ -215,30 +216,32 @@ export const FAN_PRESETS: FanPresetDef[] = [
     id: 'balanced',
     name: 'Balanced',
     description: 'Daily driver — quiet at idle, cool under load',
-    hysteresis: 3.0,
-    ramp_up: 5.0,
-    ramp_down: 3.0,
-    cpu_weight: 0.6,
-    gpu_weight: 0.4,
+    hysteresis: 4.0,
+    ramp_up: 4.0,
+    ramp_down: 2.0,
+    cpu_weight: 0.5,
+    gpu_weight: 0.5,
     water_weight: 0.0,
+    power_feed_forward: 4.0,
     points: [
-      { temp: 30, duty: 25 },
-      { temp: 45, duty: 35 },
-      { temp: 60, duty: 55 },
-      { temp: 75, duty: 80 },
-      { temp: 85, duty: 100 },
+      { temp: 30, duty: 22 },
+      { temp: 50, duty: 32 },
+      { temp: 65, duty: 55 },
+      { temp: 78, duty: 85 },
+      { temp: 88, duty: 100 },
     ],
   },
   {
     id: 'gaming',
     name: 'Gaming',
-    description: 'GPU-weighted, responsive to frametime spikes',
+    description: 'GPU-weighted, ramps early on power spikes',
     hysteresis: 3.0,
     ramp_up: 6.0,
     ramp_down: 3.0,
     cpu_weight: 0.4,
     gpu_weight: 0.6,
     water_weight: 0.0,
+    power_feed_forward: 6.0,
     points: [
       { temp: 30, duty: 25 },
       { temp: 50, duty: 40 },
@@ -257,6 +260,7 @@ export const FAN_PRESETS: FanPresetDef[] = [
     cpu_weight: 0.5,
     gpu_weight: 0.5,
     water_weight: 0.0,
+    power_feed_forward: 6.0,
     points: [
       { temp: 30, duty: 30 },
       { temp: 40, duty: 50 },
@@ -275,6 +279,7 @@ export const FAN_PRESETS: FanPresetDef[] = [
     cpu_weight: 0.5,
     gpu_weight: 0.5,
     water_weight: 0.0,
+    power_feed_forward: 8.0,
     points: [
       { temp: 30, duty: 50 },
       { temp: 45, duty: 70 },
@@ -286,13 +291,14 @@ export const FAN_PRESETS: FanPresetDef[] = [
   {
     id: 'water_priority',
     name: 'Water Priority',
-    description: 'Preview — targets coolant temp; falls back to CPU/GPU without a water sensor',
+    description: 'Targets coolant temperature — the right control variable for a custom loop; falls back to CPU/GPU without a coolant sensor',
     hysteresis: 2.0,
     ramp_up: 6.0,
     ramp_down: 3.0,
     cpu_weight: 0.6,
     gpu_weight: 0.4,
     water_weight: 1.0,
+    power_feed_forward: 3.0,
     points: [
       { temp: 28, duty: 30 },
       { temp: 34, duty: 55 },
@@ -300,10 +306,29 @@ export const FAN_PRESETS: FanPresetDef[] = [
       { temp: 45, duty: 100 },
     ],
   },
+  {
+    id: 'case_airflow',
+    name: 'Case airflow',
+    description: 'For exhaust fans: follows motherboard temperature, keeps memory and chipset cool',
+    hysteresis: 2.0,
+    ramp_up: 4.0,
+    ramp_down: 2.0,
+    cpu_weight: 0.0,
+    gpu_weight: 0.0,
+    water_weight: 0.0,
+    board_weight: 1.0,
+    power_feed_forward: 0.0,
+    points: [
+      { temp: 35, duty: 30 },
+      { temp: 45, duty: 45 },
+      { temp: 55, duty: 65 },
+      { temp: 65, duty: 100 },
+    ],
+  },
 ];
 
 /** Sensors the mock control loop has initialized (sorted). */
-export const AVAILABLE_SENSORS = ['cpu', 'gpu', 'psu_case', 'psu_vrm'];
+export const AVAILABLE_SENSORS = ['board_system', 'chipset', 'cpu', 'cpu_ccd', 'dimm', 'gpu', 'gpu_memory', 'psu_case', 'psu_vrm', 'vrm'];
 
 function refs(hubs: MockHub[], pred: (d: MockDevice) => boolean): RgbDeviceRef[] {
   return hubs.flatMap((h) =>
