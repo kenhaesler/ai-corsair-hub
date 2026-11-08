@@ -217,7 +217,7 @@
                 {/if}
               </td>
               {#if mode === 'idle'}
-                <td class="num t2">{hex(device.model)}</td>
+                <td class="mono t2">{hex(device.model)}</td>
                 <td class="mono t2">{device.device_id.slice(0, 12)}...</td>
               {:else if mode === 'identify'}
                 <td class="dg">

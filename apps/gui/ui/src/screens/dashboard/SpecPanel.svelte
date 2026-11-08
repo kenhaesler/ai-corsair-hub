@@ -58,7 +58,7 @@
 
   const s = $derived(display.snapshot);
   const emergency = $derived(!!sensors.snapshot?.emergency && !display.scrubbing);
-  const cfg = $derived(configStore.config);
+  const cfg = $derived(configStore.saved);
 
   function tempSub(src: string): string {
     if (!s) return '';
@@ -70,8 +70,8 @@
       const m = s.gpu_metrics;
       return `Utilisation ${Math.round(m.utilization_pct)}% · ${Math.round(m.power_watts)} W · ${(m.memory_used_mb / 1024).toFixed(1)} GB`;
     }
-    if (src === 'psu_vrm') return 'Power supply · voltage regulators';
-    if (src === 'psu_case') return 'Power supply · case';
+    if (src === 'psu_vrm') return 'Voltage regulators';
+    if (src === 'psu_case') return 'Case interior';
     if (src.startsWith('water')) return 'Coolant';
     return 'Sensor';
   }
@@ -117,20 +117,6 @@
       if (!s.psu) return [];
       const p = s.psu;
       return [
-        {
-          key: 'power:psu',
-          hl: 'power:psu',
-          icon: Zap,
-          name: 'Total output',
-          sub: `PSU fan ${Math.round(p.fan_rpm).toLocaleString('en-US')} rpm`,
-          value: p.total_power,
-          dec: 0,
-          unit: 'W',
-          min: 0,
-          max: PSU_SCALE,
-          env: null,
-          color: powerColor(p.total_power, PSU_SCALE),
-        },
         ...p.rails.map((r) => ({
           key: `rail:${r.name}`,
           hl: null,
@@ -189,7 +175,7 @@
   const ticks = $derived.by(() => {
     const r = visible[0];
     if (!r || tab === 'power') return [];
-    const n = tab === 'temps' ? 8 : tab === 'groups' ? 10 : 8;
+    const n = tab === 'temps' ? 4 : tab === 'groups' ? 5 : 4;
     return Array.from({ length: n + 1 }, (_, i) => Math.round(r.min + ((r.max - r.min) * i) / n));
   });
   const frac = (r: Row, v: number) => Math.max(0, Math.min(1, (v - r.min) / (r.max - r.min)));

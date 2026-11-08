@@ -10,7 +10,8 @@
   import { onMount } from 'svelte';
   import RotateCcw from 'lucide-svelte/icons/rotate-ccw';
   import { applyPresetToGroup, getFanPresets } from '../../lib/api';
-  import { configStore, mergeGroupsFromBackend } from '../../lib/stores/config.svelte';
+  import { configStore, mergeGroupsFromBackend, saveGroups } from '../../lib/stores/config.svelte';
+  import type { FanGroupConfig } from '../../lib/types';
   import { toasts } from '../../lib/stores/toasts.svelte';
   import { computePresetState, groupMatchesPreset, type PresetState } from '../../lib/presets';
   import type { FanPresetDef } from '../../lib/types';
@@ -38,25 +39,57 @@
     if (selectedGroup && !groupNames.includes(selectedGroup)) selectedGroup = null;
   });
 
+  // Presets are curves; fixed and PID groups are never touched by "All groups".
+  const saved = $derived(configStore.saved);
+  const curveGroups = $derived((saved?.fan_groups ?? []).filter((g) => g.mode.type === 'curve').map((g) => g.name));
+
+  /** Tag state against the saved config (what runs), scoped to the selected group or to the curve groups. */
   function stateFor(p: FanPresetDef): PresetState {
-    return computePresetState(configStore.config, p, selectedGroup);
+    if (selectedGroup) return computePresetState(saved, p, selectedGroup);
+    // All-groups view: "active" only when every curve group runs it; a partial apply is just "On X"
+    const tagged = (saved?.fan_groups ?? []).filter((g) => g.mode.type === 'curve' && g.preset_applied === p.id);
+    if (tagged.length === 0) return 'off';
+    if (tagged.some((g) => !groupMatchesPreset(g, p))) return 'modified';
+    return tagged.length === curveGroups.length ? 'active' : 'off';
   }
   function activeOn(p: FanPresetDef): string[] {
-    return (configStore.config?.fan_groups ?? [])
+    return (saved?.fan_groups ?? [])
       .filter((g) => g.preset_applied === p.id && groupMatchesPreset(g, p))
       .map((g) => g.name);
   }
+  /** Groups tagged with this preset whose values drifted (what Revert restores). */
+  function driftedOn(p: FanPresetDef): string[] {
+    return (saved?.fan_groups ?? [])
+      .filter((g) => g.preset_applied === p.id && !groupMatchesPreset(g, p))
+      .filter((g) => !selectedGroup || g.name === selectedGroup)
+      .map((g) => g.name);
+  }
 
-  async function doApply(p: FanPresetDef) {
+  async function applyTo(p: FanPresetDef, names: string[], detail: string) {
+    if (names.length === 0) return;
     applying = p.id;
+    const before = (saved?.fan_groups ?? []).filter((g) => names.includes(g.name)).map((g) => structuredClone($state.snapshot(g)) as FanGroupConfig);
     try {
-      await applyPresetToGroup(p.id, selectedGroup);
-      await mergeGroupsFromBackend(selectedGroup ? [selectedGroup] : null);
-      toasts.success(`${p.name} applied`, { detail: selectedGroup ?? 'All groups' });
+      for (const n of names) await applyPresetToGroup(p.id, n);
+      await mergeGroupsFromBackend(names);
+      toasts.success(`${p.name} applied`, {
+        detail,
+        timeout: 7000,
+        action: { label: 'Undo', run: () => void saveGroups(before) },
+      });
     } catch (e) {
       toasts.error(`Could not apply ${p.name}`, { detail: String(e) });
     }
     applying = null;
+  }
+  function doApply(p: FanPresetDef) {
+    if (selectedGroup) return applyTo(p, [selectedGroup], selectedGroup);
+    const skipped = (saved?.fan_groups.length ?? 0) - curveGroups.length;
+    return applyTo(p, curveGroups, `All ${curveGroups.length} curve group${curveGroups.length === 1 ? '' : 's'}${skipped ? ` · ${skipped} fixed/PID left alone` : ''}`);
+  }
+  function doRevert(p: FanPresetDef) {
+    const names = driftedOn(p);
+    return applyTo(p, names, `Reverted ${names.join(', ')}`);
   }
 </script>
 
@@ -94,7 +127,7 @@
               class="hit"
               disabled={applying !== null}
               title={p.description}
-              aria-label="Apply {p.name}{selectedGroup ? ` to ${selectedGroup}` : ' to all groups'}"
+              aria-label="Apply {p.name}{selectedGroup ? ` to ${selectedGroup}` : ' to all curve groups'}"
               aria-pressed={st === 'active'}
               onclick={() => doApply(p)}
             ></button>
@@ -126,8 +159,8 @@
                 <button
                   type="button"
                   class="revert"
-                  title="Revert this group back to {p.name}'s canonical values"
-                  onclick={() => doApply(p)}
+                  title="Revert {driftedOn(p).join(', ')} back to {p.name}'s canonical values"
+                  onclick={() => doRevert(p)}
                 >
                   <RotateCcw size={11} strokeWidth={2.5} />
                   Revert

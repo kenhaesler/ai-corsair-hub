@@ -17,10 +17,12 @@
     color?: string;
     /** live mix temperature (°C) or null */
     liveTemp: number | null;
+    /** "Mix", or the sensor's name when a single sensor drives the loop */
+    liveLabel?: string;
     onchange: (v: Vals) => void;
     oncheckpoint?: (key: string) => void;
   }
-  let { targetTemp, kp, ki, kd, minDuty, maxDuty, color = 'var(--accent)', liveTemp, onchange, oncheckpoint }: Props =
+  let { targetTemp, kp, ki, kd, minDuty, maxDuty, color = 'var(--accent)', liveTemp, liveLabel = 'Mix', onchange, oncheckpoint }: Props =
     $props();
 
   function emit(over: Partial<Vals>, key: string) {
@@ -70,7 +72,7 @@
       {#if liveTemp !== null}
         <div class="marker" style:left="{markerX}px" style:--lc={thermalColor(liveTemp)} aria-hidden="true">
           <span class="mdot"></span>
-          <span class="mlabel num">Mix {liveTemp.toFixed(1)}°{outOfRange ? (liveTemp < T0 ? ' ‹' : ' ›') : ''}</span>
+          <span class="mlabel num">{liveLabel} {liveTemp.toFixed(1)}°{outOfRange ? (liveTemp < T0 ? ' ‹' : ' ›') : ''}</span>
         </div>
       {/if}
     </div>

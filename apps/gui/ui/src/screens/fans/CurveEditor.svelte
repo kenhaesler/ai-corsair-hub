@@ -38,6 +38,8 @@
     currentTemp: number | null;
     /** live sensor-mix temperature (°C): where the control loop actually reads */
     mixTemp?: number | null;
+    /** label of the driving reading: "Mix", or the sensor's name when only one drives the curve */
+    driveLabel?: string;
     height?: number;
     canUndo?: boolean;
     onchange: (points: CurvePoint[]) => void;
@@ -50,6 +52,7 @@
     color = 'var(--accent)',
     currentTemp,
     mixTemp = null,
+    driveLabel = 'Mix',
     height = 380,
     canUndo = false,
     onchange,
@@ -182,7 +185,7 @@
   const liveT = $derived(clampN(tempSpring.current, T0, T1));
   const liveDutyShown = $derived(curveAt(sp, liveT));
   const mixSpring = followSpring(() => currentTemp ?? 0, springs.bar);
-  const showMix = $derived(mixTemp !== null && currentTemp !== null && Math.abs(mixTemp - currentTemp) >= 0.5 && points.length >= 2);
+  const showMix = $derived(mixTemp !== null && currentTemp !== null && Math.abs(mixTemp - currentTemp) >= 2 && points.length >= 2);
   const mixT = $derived(clampN(mixSpring.current, T0, T1));
   const liveDutyLabel = $derived(driveTemp !== null ? Math.round(curveAt(points, driveTemp)) : 0);
 
@@ -492,7 +495,7 @@
         </g>
         <g transform="translate({clampN(x(liveT), ML + 34, ML + pw - 34)},{MT - 19})" aria-hidden="true">
           <rect class="cpu-pill" x="-34" y="0" width="68" height="18" rx="9" />
-          <text class="cpu-t" x="0" y="13">{mixTemp !== null ? 'Mix' : 'CPU'} {(driveTemp ?? 0).toFixed(1)}°</text>
+          <text class="cpu-t" x="0" y="13">{mixTemp !== null ? driveLabel : 'CPU'} {(driveTemp ?? 0).toFixed(1)}°</text>
         </g>
       {/if}
 

@@ -24,7 +24,7 @@
   let h = $state(360);
 
   const s = $derived(display.snapshot);
-  const cfg = $derived(configStore.config);
+  const cfg = $derived(configStore.saved);
   const emergency = $derived(!!sensors.snapshot?.emergency && !display.scrubbing);
   const sources = $derived(s ? pathSources(cfg, s) : []);
   const groups = $derived(s?.group_duties ?? []);
@@ -293,12 +293,12 @@
   .hublab {
     position: absolute;
     translate: -50% 0;
-    padding: 2px 6px;
+    padding: 2px 5px;
     border-radius: 4px;
     background: var(--bg-0);
     white-space: nowrap;
-    font: 500 10.5px var(--font-mono);
-    letter-spacing: 0.12em;
+    font: 500 10px var(--font-mono);
+    letter-spacing: 0.06em;
     text-transform: uppercase;
     color: var(--t3);
   }

@@ -24,7 +24,7 @@
   import { displayName, isFanGroupV2 } from '../../lib/identity';
   import { tempOf } from '../../lib/format';
   import { computePresetState, groupMatchesPreset } from '../../lib/presets';
-  import { defaultMode, MODE_BLURB, MODE_OPTIONS, mixTemp, type ModeType } from './fanModes';
+  import { defaultMode, MODE_BLURB, MODE_OPTIONS, mixTemp, sensorLabel, type ModeType } from './fanModes';
   import { dutyColor } from '../dashboard/overview';
   import type { FanGroupConfig, FanMode, FanPresetDef, HubSnapshot, TempSourceConfig } from '../../lib/types';
 
@@ -172,6 +172,12 @@
 
   // ------------------------------------------------------------------ live
   const cpu = $derived(tempOf(snap, 'cpu'));
+  /** "Mix" for a weighted mix, the sensor's own name when only one sensor drives the group. */
+  const driveLabel = $derived.by(() => {
+    if (group.mode.type === 'fixed') return 'Mix';
+    const s = group.mode.temp_source.sensors;
+    return s.length === 1 ? sensorLabel(s[0]) : 'Mix';
+  });
   const mix = $derived(group.mode.type === 'fixed' ? null : mixTemp(group.mode.temp_source, snap?.temperatures));
   const mixMeta = $derived.by(() => {
     if (group.mode.type === 'fixed') return '';
@@ -249,6 +255,7 @@
           {color}
           currentTemp={cpu}
           mixTemp={mix}
+          driveLabel={driveLabel}
           canUndo={history.length > 0}
           onundo={undo}
           oncheckpoint={checkpoint}
@@ -272,7 +279,7 @@
 
       <InsetGroup title="Sensor Mix">
         {#snippet action()}<span class="sec-meta num">{mixMeta}</span>{/snippet}
-        <SensorMix source={m.temp_source} {availableSensors} onchange={setSource} oncheckpoint={checkpoint} />
+        <SensorMix source={m.temp_source} {availableSensors} temps={snap?.temperatures} onchange={setSource} oncheckpoint={checkpoint} />
       </InsetGroup>
     {:else}
       {@const m = group.mode}
@@ -285,6 +292,7 @@
           minDuty={m.min_duty}
           maxDuty={m.max_duty}
           liveTemp={mix}
+          liveLabel={driveLabel}
           oncheckpoint={checkpoint}
           onchange={(v) =>
             onchange({
@@ -304,7 +312,7 @@
 
       <InsetGroup title="Sensor Mix">
         {#snippet action()}<span class="sec-meta num">{mixMeta}</span>{/snippet}
-        <SensorMix source={m.temp_source} {availableSensors} onchange={setSource} oncheckpoint={checkpoint} />
+        <SensorMix source={m.temp_source} {availableSensors} temps={snap?.temperatures} onchange={setSource} oncheckpoint={checkpoint} />
       </InsetGroup>
     {/if}
 

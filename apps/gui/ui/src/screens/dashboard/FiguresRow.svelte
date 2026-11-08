@@ -14,6 +14,7 @@
   import { meanDuty } from '../../lib/format';
   import AnimatedNumber from '../../components/ui/AnimatedNumber.svelte';
   import { CRITICAL_CPU, CRITICAL_GPU, dutyColor, headroom, heatColor, meanGroupRpm, powerColor, srcLong } from './overview';
+  import { ui } from '../../lib/stores/ui.svelte';
 
   interface Props {
     onpresets: () => void;
@@ -34,7 +35,7 @@
   const hr = $derived(s ? headroom(s) : null);
 
   const preset = $derived.by(() => {
-    const groups = configStore.config?.fan_groups ?? [];
+    const groups = configStore.saved?.fan_groups ?? [];
     if (!groups.length) return { name: 'None', note: 'No fan groups' };
     const ids = [...new Set(groups.map((g) => g.preset_applied ?? null))];
     if (ids.length > 1) return { name: 'Mixed', note: 'Groups use different presets' };
@@ -46,15 +47,25 @@
 </script>
 
 <div class="figs">
-  <div class="fig" style:--c={s?.psu ? powerColor(s.psu.total_power, 1600) : 'var(--t3)'}>
+  <button
+    type="button"
+    class="fig link"
+    style:--c={s?.psu ? powerColor(s.psu.total_power, 1600) : 'var(--t3)'}
+    disabled={!s?.psu}
+    title={s?.psu ? 'Open power supply details' : undefined}
+    onclick={(e) => {
+      ui.detailOpener = e.currentTarget as HTMLElement;
+      ui.openDetail('power:psu');
+    }}
+  >
     <span class="k">Power draw</span>
     {#if s?.psu}
       <span class="n"><AnimatedNumber value={s.psu.total_power} decimals={0} /><small>W</small></span>
-      <span class="d">Input {s.psu.input_voltage.toFixed(0)} V · {s.psu.rails.length} rails</span>
+      <span class="d">Input {s.psu.input_voltage.toFixed(0)} V · PSU fan {Math.round(s.psu.fan_rpm).toLocaleString('en-US')} rpm</span>
     {:else}
       <span class="n dim">–</span><span class="d">No Corsair PSU detected</span>
     {/if}
-  </div>
+  </button>
   <div class="fig" style:--c={dutyColor(duty)}>
     <span class="k">Average fan</span>
     <span class="n"><AnimatedNumber value={duty} decimals={0} /><small>%</small></span>
@@ -144,13 +155,23 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .preset {
+  .preset,
+  .link:not(:disabled) {
     cursor: pointer;
-    border-radius: 0 16px 16px 0;
     transition: background-color 0.2s;
   }
-  .preset:hover {
+  .preset {
+    border-radius: 0 16px 16px 0;
+  }
+  .link {
+    border-radius: 16px 0 0 16px;
+  }
+  .preset:hover,
+  .link:not(:disabled):hover {
     background: rgba(255, 255, 255, 0.03);
+  }
+  .link:focus-visible {
+    box-shadow: inset var(--focus-ring);
   }
   .pn {
     display: flex;

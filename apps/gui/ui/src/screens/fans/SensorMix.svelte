@@ -20,10 +20,13 @@
   interface Props {
     source: TempSourceConfig;
     availableSensors: string[];
+    /** live readings, so each sensor in the mix shows what it reads right now */
+    temps?: { source: string; celsius: number }[];
     onchange: (s: TempSourceConfig) => void;
     oncheckpoint?: (key: string) => void;
   }
-  let { source, availableSensors, onchange, oncheckpoint }: Props = $props();
+  let { source, availableSensors, temps = [], onchange, oncheckpoint }: Props = $props();
+  const readingOf = (id: string) => temps.find((t) => t.source === id)?.celsius ?? null;
 
   interface Row {
     id: string;
@@ -101,7 +104,7 @@
   <div class="weights" role="group" aria-label="Sensors in the mix">
     {#each active as r (r.id)}
       <div class="wrow" style:--c={sourceColor(r.id)}>
-        <span class="wl">{@render chip(r)}</span>
+        <span class="wl">{@render chip(r)}{#if readingOf(r.id) !== null}<span class="wread num">{readingOf(r.id)!.toFixed(1)}°</span>{/if}</span>
         <div class="ws">
           <Slider
             label="{sensorLabel(r.id)} weight"
@@ -223,7 +226,7 @@
   }
   .wrow {
     display: grid;
-    grid-template-columns: 150px minmax(0, 1fr) 44px;
+    grid-template-columns: 196px minmax(0, 1fr) 44px;
     align-items: center;
     gap: 16px;
     min-height: 36px;
@@ -233,6 +236,12 @@
     align-items: center;
     gap: 8px;
     min-width: 0;
+  }
+  .wread {
+    font-size: 13px;
+    font-weight: 500;
+    color: color-mix(in oklab, var(--c) 45%, #fff);
+    white-space: nowrap;
   }
   .wshare {
     font-size: 12px;

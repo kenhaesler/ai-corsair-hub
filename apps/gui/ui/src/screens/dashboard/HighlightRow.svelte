@@ -51,7 +51,7 @@
   const snap = $derived(display.snapshot);
   const value = $derived(snap ? h.pick(snap) : null);
   const spark = $derived(display.series(h.pick, 300));
-  const sentence = $derived(snap ? contextSentence(h, snap, display.timeline, configStore.config) : '');
+  const sentence = $derived(snap ? contextSentence(h, snap, display.timeline, configStore.saved) : '');
   const rpm = $derived(h.kind === 'group' && snap ? groupRpm(snap, h.id) : null);
   const cpu = $derived(h.kind === 'temp' && h.id === 'cpu' ? snap?.cpu_metrics : null);
   const gpu = $derived(h.kind === 'temp' && h.id === 'gpu' ? snap?.gpu_metrics : null);

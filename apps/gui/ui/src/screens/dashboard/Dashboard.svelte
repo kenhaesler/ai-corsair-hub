@@ -35,8 +35,8 @@
   // Emergency / stale are owned by their alert rows; the reason line steps aside.
   const alertOwnsState = $derived(!!sensors.snapshot?.emergency || !!sensors.snapshot?.any_stale);
   const hl = $derived(s ? headline(s, emergency, meanDuty(s)) : { lead: '', em: '', tail: '' });
-  const why = $derived(s ? reason(s, configStore.config, emergency) : []);
-  const nSources = $derived(s ? pathSources(configStore.config, s).length : 0);
+  const why = $derived(s ? reason(s, configStore.saved, emergency) : []);
+  const nSources = $derived(s ? pathSources(configStore.saved, s).length : 0);
 
   let presetsEl = $state<HTMLElement>();
   let historyEl = $state<HTMLElement>();

@@ -3,7 +3,7 @@
 //  - toasts on save success/failure (the real app only sets `error`)
 
 import { getConfig, saveConfig as apiSaveConfig, validateConfig } from '../api';
-import type { AppConfig } from '../types';
+import type { AppConfig, FanGroupConfig } from '../types';
 import { toasts } from './toasts.svelte';
 
 class ConfigStore {
@@ -14,6 +14,15 @@ class ConfigStore {
   baseline = $state<string>('');
   /** Unsaved edits present. */
   dirty = $derived(this.config !== null && JSON.stringify(this.config) !== this.baseline);
+  /** The last saved config: what the control loop is actually running (never the unsaved draft). */
+  saved = $derived.by((): AppConfig | null => {
+    if (!this.baseline) return this.config;
+    try {
+      return JSON.parse(this.baseline) as AppConfig;
+    } catch {
+      return this.config;
+    }
+  });
 }
 
 export const configStore = new ConfigStore();
@@ -143,6 +152,33 @@ export async function mergeGroupsFromBackend(names: string[] | null) {
     configStore.baseline = JSON.stringify(base);
   } catch {
     configStore.baseline = JSON.stringify(fresh);
+  }
+}
+
+/**
+ * Persist exactly these fan groups (by name) on top of the last saved
+ * config, leaving every other unsaved edit alone; then merge them into
+ * config and baseline. Used by Undo after a Quick Preset.
+ */
+export async function saveGroups(groups: FanGroupConfig[]): Promise<boolean> {
+  if (!configStore.config) return false;
+  configStore.saving = true;
+  try {
+    const base = configStore.baseline ? (JSON.parse(configStore.baseline) as AppConfig) : ($state.snapshot(configStore.config) as AppConfig);
+    const payload: AppConfig = {
+      ...base,
+      fan_groups: base.fan_groups.map((g) => groups.find((x) => x.name === g.name) ?? g),
+    };
+    await validateConfig(payload);
+    await apiSaveConfig(payload);
+    await mergeGroupsFromBackend(groups.map((g) => g.name));
+    return true;
+  } catch (e) {
+    configStore.error = String(e);
+    toasts.error('Could not save fan groups', { detail: String(e) });
+    return false;
+  } finally {
+    configStore.saving = false;
   }
 }
 
