@@ -628,7 +628,7 @@
     box-shadow: none;
   }
   .surface {
-    fill: rgba(0, 0, 0, 0.16);
+    fill: rgba(0, 0, 0, 0.22);
   }
   .z-ok {
     fill: rgba(50, 215, 75, 0.045);
@@ -640,9 +640,10 @@
     fill: rgba(255, 69, 58, 0.095);
   }
   .zl {
+    font-family: var(--font-mono);
     font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.06em;
+    font-weight: 500;
+    letter-spacing: 0.14em;
     text-transform: uppercase;
     pointer-events: none;
   }
@@ -670,8 +671,9 @@
   }
   .mix text {
     fill: var(--t2);
-    font-size: 10.5px;
-    font-weight: 600;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 500;
     text-anchor: middle;
     font-variant-numeric: tabular-nums;
     font-feature-settings: 'tnum';
@@ -700,8 +702,10 @@
   }
   .ax {
     fill: var(--t3);
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
     font-weight: 500;
+    letter-spacing: 0.04em;
     font-variant-numeric: tabular-nums;
     font-feature-settings: 'tnum';
   }
@@ -715,19 +719,19 @@
     transition: opacity var(--dur-fast) ease-out;
   }
   .hyst {
-    fill: var(--accent);
-    opacity: 0.09;
+    fill: var(--sc);
+    opacity: 0.07;
   }
   .hyst-edge {
-    stroke: var(--accent);
-    stroke-opacity: 0.22;
+    stroke: var(--sc);
+    stroke-opacity: 0.3;
     stroke-width: 1;
   }
   .live-line {
-    stroke: var(--accent-strong);
-    stroke-width: 1.25;
+    stroke: color-mix(in oklab, var(--sc) 70%, #fff);
+    stroke-width: 1;
     stroke-dasharray: 4 4;
-    opacity: 0.75;
+    opacity: 0.8;
   }
   .fill {
     pointer-events: none;
@@ -775,7 +779,7 @@
   }
 
   .op-halo {
-    fill: var(--accent);
+    fill: var(--sc);
     opacity: 0.18;
     transform-box: fill-box;
     transform-origin: center;
@@ -802,19 +806,20 @@
   .op-t {
     fill: var(--accent-ink);
     font-size: 11.5px;
-    font-weight: 700;
+    font-weight: 600;
     text-anchor: middle;
     font-variant-numeric: tabular-nums;
     font-feature-settings: 'tnum';
   }
   .cpu-pill {
-    fill: rgba(20, 23, 32, 0.92);
-    stroke: rgba(124, 156, 255, 0.4);
+    fill: rgba(16, 18, 22, 0.94);
+    stroke: color-mix(in oklab, var(--sc) 55%, transparent);
   }
   .cpu-t {
-    fill: var(--accent-strong);
-    font-size: 10.5px;
-    font-weight: 600;
+    fill: color-mix(in oklab, var(--sc) 60%, #fff);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 500;
     text-anchor: middle;
     font-variant-numeric: tabular-nums;
     font-feature-settings: 'tnum';
@@ -890,8 +895,8 @@
     position: absolute;
     transform: translate(-50%, calc(-100% - 16px));
     padding: 4px 9px;
-    border-radius: 8px;
-    background: rgba(28, 31, 40, 0.92);
+    border-radius: 7px;
+    background: rgba(16, 18, 22, 0.94);
     -webkit-backdrop-filter: blur(12px);
     backdrop-filter: blur(12px);
     box-shadow:
@@ -938,6 +943,9 @@
   .hints {
     font-size: 12px;
     color: var(--t3);
+  }
+  .plot {
+    padding: 0 6px;
   }
   .foot-r {
     flex: none;

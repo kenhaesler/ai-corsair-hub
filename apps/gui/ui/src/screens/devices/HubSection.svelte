@@ -287,12 +287,13 @@
     font-size: 11px;
     overflow-wrap: anywhere;
   }
+  .head :global(h3) {
+    font-weight: 500;
+  }
   .panel {
-    border-radius: var(--r-row);
-    background: var(--mat-2);
-    box-shadow:
-      inset 0 0 0 1px var(--hair),
-      var(--hair-inner);
+    border-radius: var(--r-panel);
+    background: var(--panel-bg);
+    box-shadow: var(--panel-shadow);
     overflow: hidden;
   }
   .scroll {
@@ -307,12 +308,11 @@
     line-height: 18px;
   }
   th {
-    padding: 10px 14px 8px;
+    padding: 12px 14px 10px;
     text-align: left;
-    font-size: 11px;
+    font: 500 10.5px var(--font-mono);
     line-height: 14px;
-    font-weight: 600;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.16em;
     text-transform: uppercase;
     color: var(--t3);
     white-space: nowrap;

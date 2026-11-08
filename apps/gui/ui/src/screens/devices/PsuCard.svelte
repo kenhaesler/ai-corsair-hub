@@ -40,11 +40,9 @@
     align-items: center;
     gap: var(--sp-4);
     padding: var(--sp-4) var(--sp-5);
-    border-radius: var(--r-row);
-    background: var(--mat-2);
-    box-shadow:
-      inset 0 0 0 1px var(--hair),
-      var(--hair-inner);
+    border-radius: var(--r-panel);
+    background: var(--panel-bg);
+    box-shadow: var(--panel-shadow);
   }
   .tile {
     flex: none;
@@ -88,18 +86,26 @@
   .fig {
     display: inline-flex;
     align-items: baseline;
-    gap: 2px;
-    color: var(--t1);
+    gap: 4px;
+    color: color-mix(in oklab, var(--s-power) 35%, #fff);
+    text-shadow: 0 0 24px color-mix(in oklab, var(--s-power) 40%, transparent);
+  }
+  .fig :global(.t-figure-m) {
+    font-weight: 300;
+    font-size: 30px;
+    letter-spacing: -0.035em;
   }
   .u {
     font-size: 13px;
-    font-weight: 600;
-    color: var(--t2);
+    font-weight: 400;
+    color: var(--t3);
+    text-shadow: none;
   }
   .cap {
-    font-size: 11px;
+    font: 500 10.5px var(--font-mono);
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
     line-height: 14px;
     color: var(--t3);
-    font-weight: 500;
   }
 </style>

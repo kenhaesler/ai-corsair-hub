@@ -39,7 +39,7 @@
   <div class="rw">
     <InsetRow
       icon={ScanLine}
-      iconColor="var(--s-group-3)"
+     
       label="Channel identification"
     >
       <Button size="sm" onclick={() => diag.runIdentify()} disabled={diag.busy} loading={diag.identifyRunning}>
@@ -54,7 +54,7 @@
   <div class="rw">
     <InsetRow
       icon={Crosshair}
-      iconColor="var(--s-group-4)"
+     
       label="LED slot markers"
     >
       <Select
@@ -75,7 +75,7 @@
 
   {#if diag.modeKind === 'walk'}
     <div class="walk" transition:slide={slideOpts}>
-      <InsetRow icon={Footprints} iconColor="var(--s-group-5)" label="Walk target">
+      <InsetRow icon={Footprints} label="Walk target">
         <Select size="sm" label="Walk device" options={deviceOptions} bind:value={diag.walkDeviceId} disabled={diag.busy} />
         <NumberField
           label="Walk step (ms)"

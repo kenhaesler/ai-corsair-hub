@@ -209,7 +209,7 @@
   </div>
 </ToolbarActions>
 
-<LargeTitlePage title="Fan Control" {subtitle}>
+<LargeTitlePage title="Fan Control" {subtitle} maxWidth={1440}>
   {#if configStore.error}
     <div class="banner">
       <Banner tone="error" ondismiss={() => (configStore.error = null)}>{configStore.error}</Banner>
@@ -332,16 +332,16 @@
   }
   .sk-caps {
     display: grid;
-    grid-template-columns: repeat(3, 212px);
-    gap: 10px;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) 124px;
+    gap: 1px;
   }
   .empty {
     margin-top: 24px;
-    border-radius: var(--r-row);
-    background: var(--mat-2);
+    border-radius: 16px;
+    background: var(--panel-grid), var(--panel);
     box-shadow:
-      inset 0 0 0 1px var(--hair),
-      var(--hair-inner);
+      inset 0 0 0 1px var(--hair-strong),
+      0 24px 48px -32px rgb(0 0 0 / 0.9);
     padding: 32px 0;
   }
   .panel {

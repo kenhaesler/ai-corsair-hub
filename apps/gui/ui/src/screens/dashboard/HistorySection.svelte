@@ -93,11 +93,9 @@
   }
   .panel {
     padding: 16px 16px 14px 12px;
-    border-radius: var(--r-row);
-    background: var(--mat-2);
-    box-shadow:
-      inset 0 0 0 1px var(--hair),
-      var(--hair-inner);
+    border-radius: var(--r-panel);
+    background: var(--panel-bg);
+    box-shadow: var(--panel-shadow);
   }
   .legend {
     display: flex;

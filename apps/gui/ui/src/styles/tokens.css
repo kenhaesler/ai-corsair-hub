@@ -18,6 +18,11 @@
   --mat-sheet: rgba(14, 15, 19, 0.9);
   --panel: linear-gradient(180deg, rgba(16, 18, 22, 0.9), rgba(12, 13, 16, 0.9));
   --panel-grid: repeating-linear-gradient(90deg, transparent 0 77px, rgba(255, 255, 255, 0.028) 77px 78px);
+  --panel-bg: var(--panel-grid), var(--panel);
+  --panel-shadow:
+    inset 0 0 0 1px var(--hair-strong),
+    0 24px 48px -32px rgb(0 0 0 / 0.9);
+  --r-panel: 16px;
 
   /* ---- Hairlines ---- */
   --hair: rgba(255, 255, 255, 0.07);

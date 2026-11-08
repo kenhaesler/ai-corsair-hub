@@ -21,12 +21,12 @@
     for?: string;
     children?: Snippet;
   }
-  let { label, sublabel, icon: Icon, iconColor = 'var(--accent)', stacked = false, onclick, for: forId, children }: Props = $props();
+  let { label, sublabel, icon: Icon, iconColor = 'var(--t1)', stacked = false, onclick, for: forId, children }: Props = $props();
 </script>
 
 {#snippet lead()}
   {#if Icon}
-    <span class="tile" style:background={iconColor} aria-hidden="true"><Icon size={14} strokeWidth={2.25} /></span>
+    <span class="tile" style:color={iconColor} aria-hidden="true"><Icon size={14} strokeWidth={2} /></span>
   {/if}
   <span class="labels">
     {#if forId}
@@ -94,12 +94,13 @@
   }
   .tile {
     flex: none;
-    width: 24px;
-    height: 24px;
-    border-radius: 6px;
+    width: 26px;
+    height: 26px;
+    border-radius: 8px;
     display: grid;
     place-items: center;
-    color: #0b0d12;
+    background: rgba(255, 255, 255, 0.05);
+    box-shadow: inset 0 0 0 1px var(--hair-strong);
   }
   .labels {
     display: flex;

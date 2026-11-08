@@ -41,7 +41,7 @@
   ];
 </script>
 
-<LargeTitlePage title="Settings" maxWidth={800}>
+<LargeTitlePage title="Settings" maxWidth={960}>
   {#if configStore.error}
     <div class="banner"><Banner tone="error">{configStore.error}</Banner></div>
   {/if}
@@ -52,7 +52,7 @@
         {@const general = configStore.config.general}
         <InsetRow
           icon={Gauge}
-          iconColor="var(--s-cpu)"
+         
           label="Poll Interval"
           sublabel="How often the hardware sensors are read"
           for="poll-interval"
@@ -70,10 +70,10 @@
             />
           </div>
         </InsetRow>
-        <InsetRow icon={ScrollText} iconColor="var(--s-other)" label="Log Level" sublabel="Detail written to the log file">
+        <InsetRow icon={ScrollText} label="Log Level" sublabel="Detail written to the log file">
           <Select label="Log Level" size="sm" options={LOG_LEVELS} bind:value={general.log_level} />
         </InsetRow>
-        <InsetRow icon={Cpu} iconColor="var(--s-water)" label="LibreHardwareMonitor" sublabel="Executable used for CPU sensors; edit config.toml to change">
+        <InsetRow icon={Cpu} label="LibreHardwareMonitor" sublabel="Executable used for CPU sensors; edit config.toml to change">
           <span class="path mono" class:unset={!general.lhm_exe_path}>{general.lhm_exe_path ?? 'Not set'}</span>
         </InsetRow>
         <div class="save">

@@ -102,7 +102,7 @@
               <CurveThumb
                 points={p.points}
                 height={60}
-                color={st === 'active' ? 'var(--accent-strong)' : st === 'modified' ? 'var(--warn)' : 'rgba(176,196,255,0.78)'}
+                color={st === 'active' ? 'var(--sc)' : st === 'modified' ? 'var(--warn)' : 'rgba(200,210,230,0.6)'}
               />
             </div>
             <div class="name-row">
@@ -170,11 +170,9 @@
     gap: 4px;
     padding: 12px 12px 12px;
     border: 0;
-    border-radius: var(--r-row);
-    background: var(--mat-2);
-    box-shadow:
-      inset 0 0 0 1px var(--hair),
-      var(--hair-inner);
+    border-radius: var(--r-panel);
+    background: var(--panel-bg);
+    box-shadow: var(--panel-shadow);
     color: var(--t1);
     text-align: left;
     cursor: pointer;
@@ -186,7 +184,9 @@
       opacity var(--dur-fast) ease-out;
   }
   .tile:not(.busy):hover {
-    background: var(--mat-2-hover);
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.2),
+      0 24px 48px -32px rgb(0 0 0 / 0.9);
   }
   .tile:not(.busy):has(.hit:active) {
     transform: scale(0.98);
@@ -215,10 +215,13 @@
     box-shadow: none;
   }
   .tile.active {
-    background: linear-gradient(180deg, rgba(124, 156, 255, 0.14), rgba(124, 156, 255, 0.05));
+    background:
+      linear-gradient(180deg, color-mix(in oklab, var(--sc) 14%, transparent), transparent 60%),
+      var(--panel-bg);
     box-shadow:
-      inset 0 0 0 1px rgba(124, 156, 255, 0.55),
-      0 10px 30px -12px rgba(124, 156, 255, 0.55);
+      inset 0 0 0 1px color-mix(in oklab, var(--sc) 55%, transparent),
+      inset 0 1px 0 color-mix(in oklab, var(--sc) 70%, #fff),
+      0 16px 40px -20px color-mix(in oklab, var(--sc) 60%, transparent);
   }
   .tile.modified {
     box-shadow: none;
@@ -231,8 +234,8 @@
   @keyframes pulse {
     50% {
       box-shadow:
-        inset 0 0 0 1px rgba(124, 156, 255, 0.8),
-        0 0 0 4px rgba(124, 156, 255, 0.18);
+        inset 0 0 0 1px color-mix(in oklab, var(--sc) 80%, transparent),
+        0 0 0 4px color-mix(in oklab, var(--sc) 20%, transparent);
     }
   }
   .thumb {
@@ -279,13 +282,14 @@
   .meta {
     margin-top: auto;
     padding-top: 6px;
-    font-size: 11px;
+    font: 500 10.5px var(--font-mono);
+    letter-spacing: 0.04em;
     color: var(--t3);
     white-space: nowrap;
   }
   .on-groups {
     font-size: 11px;
-    color: var(--accent-strong);
+    color: color-mix(in oklab, var(--sc) 60%, #fff);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -337,7 +341,7 @@
   @media (prefers-reduced-motion: reduce) {
     .tile.applying {
       animation: none;
-      box-shadow: inset 0 0 0 1px rgba(124, 156, 255, 0.8);
+      box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--sc) 80%, transparent);
     }
   }
 </style>

@@ -1,13 +1,14 @@
 <!--
-  Source list on top (inventory 2.1 group list): one capsule per group with
-  name, mode (fixed / curve / pid), live duty % (display.snapshot, so it
-  follows the scrub) and a status dot (green when live duty exists, else
-  grey). A selection plate slides between capsules on a spring. "+ New Group"
-  sits at the end (tooltip "Create a new fan group").
-  The selected capsule is also the group's name editor (inventory 2.2): click
+  Group strip (inventory 2.1 group list), "technical luminous": one graphite
+  panel of cells, one per group. Each cell: live dot + name, the live duty as
+  a light figure glowing in its duty colour (display.snapshot, so it follows
+  the scrub), the mode as a mono micro-label (hidden on the selected cell:
+  the Mode control below is that datum's single home), and a luminous bar
+  over the group's ghost operating envelope. A lit underline slides to the
+  selected cell on a spring. "+ New group" is the last cell.
+  The selected cell is also the group's name editor (inventory 2.2): click
   its name (pencil, tooltip "Click to rename group") or press F2 to rename
-  inline (max 64, Enter/blur commits, Escape cancels). Its mode label is
-  hidden because the Mode control below is that datum's single home.
+  inline (max 64, Enter/blur commits, Escape cancels).
   Keyboard: tablist semantics, ←/→/Home/End, F2 rename.
 -->
 <script lang="ts">
@@ -18,7 +19,8 @@
   import AnimatedNumber from '../../components/ui/AnimatedNumber.svelte';
   import { createSpring, springTo, springs } from '../../lib/motion.svelte';
   import { display } from '../../lib/stores/scrub.svelte';
-  import { dutyOf, groupColor } from '../../lib/format';
+  import { dutyOf } from '../../lib/format';
+  import { dutyColor, groupEnvelope } from '../dashboard/overview';
   import type { FanGroupConfig } from '../../lib/types';
   import { MODE_LABEL } from './fanModes';
 
@@ -67,16 +69,18 @@
   });
 
   let row: HTMLDivElement;
+  let overflowing = $state(false);
   const tabs: HTMLDivElement[] = $state([]);
-  const plate = createSpring({ x: 0, w: 0 }, springs.tab);
+  const line = createSpring({ x: 0, w: 0 }, springs.tab);
   let ready = $state(false);
 
   function measure(instant = false) {
+    if (row) overflowing = row.scrollWidth > row.clientWidth + 1;
     const b = tabs[selected];
     if (!b) return;
-    springTo(plate, { x: b.offsetLeft, w: b.offsetWidth }, instant || !ready);
+    springTo(line, { x: b.offsetLeft, w: b.offsetWidth }, instant || !ready);
     ready = true;
-    // keep the selected capsule in view
+    // keep the selected cell in view
     const l = b.offsetLeft;
     const r = l + b.offsetWidth;
     if (l < row.scrollLeft) row.scrollTo({ left: l - 8, behavior: 'smooth' });
@@ -111,26 +115,22 @@
     onselect(j);
     tabs[j]?.focus();
   }
+  const pct = (v: number) => `${Math.max(0, Math.min(100, v))}%`;
 </script>
 
-<div class="wrap">
-  <div class="row" bind:this={row}>
+<div class="strip" class:overflowing>
+  <div class="row" bind:this={row} onscroll={() => measure(true)}>
     <div class="track" role="tablist" aria-label="Fan groups" tabindex="-1" onkeydown={onKey}>
-      <span
-        class="plate"
-        class:ready
-        style:transform="translateX({plate.current.x}px)"
-        style:width="{plate.current.w}px"
-        aria-hidden="true"
-      ></span>
+      <i class="uline" class:ready style:transform="translateX({line.current.x}px)" style:width="{line.current.w}px" aria-hidden="true"></i>
       {#each groups as g, i (i)}
         {@const duty = dutyOf(display.snapshot, g.name)}
-        {@const c = groupColor(i)}
+        {@const c = dutyColor(duty ?? 0)}
+        {@const env = groupEnvelope(g)}
         {@const sel = i === selected}
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <div
           role="tab"
-          class="capsule"
+          class="cell"
           class:sel
           aria-selected={sel}
           aria-controls={panelId}
@@ -185,117 +185,116 @@
             {:else if edited.has(g.name)}
               <span class="edited" title="Unsaved changes"></span>
             {/if}
-            <span class="duty num" aria-hidden="true">
-              {#if duty !== null}<AnimatedNumber value={duty} /><span class="pct">%</span>{:else}<span class="t3">—</span>{/if}
-            </span>
           </span>
-          <span class="bottom" aria-hidden="true">
+          <span class="mid" aria-hidden="true">
+            <span class="duty">
+              {#if duty !== null}<AnimatedNumber value={duty} /><small>%</small>{:else}<span class="nd">–</span>{/if}
+            </span>
             {#if !sel}<span class="mode">{MODE_LABEL[g.mode.type]}</span>{/if}
-            <span class="meter"><span class="fill" style:transform="scaleX({(duty ?? 0) / 100})"></span></span>
+          </span>
+          <span class="bar" aria-hidden="true">
+            {#if env}<i class="env" style:left={pct(env[0])} style:width={pct(env[1] - env[0])}></i>{/if}
+            <i class="fill" style:transform="scaleX({(duty ?? 0) / 100})"></i>
+            {#if duty !== null}<i class="cap" style:left="calc({pct(duty)} - 1px)"></i>{/if}
           </span>
         </div>
       {/each}
     </div>
     <button type="button" class="new" title="Create a new fan group" onclick={onnew}>
-      <Plus size={16} strokeWidth={2.25} />
-      <span>New Group</span>
+      <span class="plus"><Plus size={15} strokeWidth={2.25} /></span>
+      <span>New group</span>
     </button>
   </div>
 </div>
 
 <style>
-  .wrap {
-    position: relative;
-    margin: 0 calc(var(--gutter) * -1) 20px;
+  .strip {
+    margin-bottom: 20px;
+    border-radius: 16px;
+    background: var(--panel-grid), var(--panel);
+    box-shadow:
+      inset 0 0 0 1px var(--hair-strong),
+      0 24px 48px -32px rgb(0 0 0 / 0.9);
+    overflow: hidden;
   }
   .row {
     display: flex;
     align-items: stretch;
-    gap: 10px;
     overflow-x: auto;
-    padding: 4px var(--gutter) 10px;
     scrollbar-width: none;
-    mask-image: linear-gradient(to right, transparent 0, #000 var(--gutter), #000 calc(100% - var(--gutter)), transparent 100%);
   }
   .row::-webkit-scrollbar {
     display: none;
   }
+  .overflowing .new {
+    box-shadow: -16px 0 24px -12px rgb(0 0 0 / 0.8);
+  }
   .track {
     position: relative;
     display: flex;
-    gap: 10px;
+    flex: 1 1 auto;
     isolation: isolate;
   }
-  .plate {
+  .uline {
     position: absolute;
-    top: 0;
-    bottom: 0;
     left: 0;
-    z-index: -1;
-    border-radius: var(--r-row);
-    background: var(--mat-raised-hover);
+    bottom: 0;
+    height: 2px;
+    z-index: 1;
+    border-radius: 2px 2px 0 0;
+    background: linear-gradient(90deg, transparent 4%, color-mix(in oklab, var(--sc) 55%, #fff), transparent 96%);
     box-shadow:
-      inset 0 0 0 1px var(--hair-strong),
-      inset 0 1px 0 rgba(255, 255, 255, 0.08),
-      var(--sh-2);
+      0 0 14px var(--sc),
+      0 -8px 24px -6px color-mix(in oklab, var(--sc) 60%, transparent);
     opacity: 0;
+    will-change: transform, width;
   }
-  .plate.ready {
+  .uline.ready {
     opacity: 1;
   }
-  .capsule {
+  .cell {
     position: relative;
-    flex: none;
-    width: 212px;
-    height: 64px;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: 7px;
-    padding: 0 14px;
-    border: 0;
-    border-radius: var(--r-row);
-    background: var(--mat-2);
-    box-shadow:
-      inset 0 0 0 1px var(--hair),
-      var(--hair-inner);
+    flex: 1 1 200px;
+    min-width: 172px;
+    display: grid;
+    gap: 10px;
+    padding: 16px 18px 18px;
+    border-left: 1px solid var(--hair);
     color: var(--t1);
     text-align: left;
     cursor: pointer;
-    overflow: hidden;
-    transition:
-      background-color var(--dur-fast) ease-out,
-      transform var(--dur-press) ease-out;
+    transition: background-color var(--dur-fast) ease-out;
   }
-  .capsule:hover:not(.sel) {
-    background: var(--mat-2-hover);
+  .cell:first-child {
+    border-left: 0;
   }
-  .capsule:active {
-    transform: scale(0.98);
+  .cell:hover:not(.sel) {
+    background: rgba(255, 255, 255, 0.025);
   }
-  .capsule.sel {
-    background: transparent;
-    box-shadow: none;
+  .cell.sel {
+    background: rgba(255, 255, 255, 0.035);
   }
-  .capsule:focus-visible {
-    box-shadow: var(--focus-ring);
+  .cell:focus-visible {
+    box-shadow: inset var(--focus-ring);
+    border-radius: 0;
   }
   .top {
     display: flex;
     align-items: center;
     gap: 8px;
     min-width: 0;
+    min-height: 20px;
   }
   .dot {
     flex: none;
-    width: 7px;
-    height: 7px;
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
-    background: rgba(255, 255, 255, 0.28);
+    background: rgba(255, 255, 255, 0.25);
   }
   .dot.live {
-    background: var(--ok);
-    box-shadow: 0 0 0 3px rgba(50, 215, 75, 0.16);
+    background: #55e39a;
+    box-shadow: 0 0 8px #55e39a;
   }
   .name-input {
     flex: 1;
@@ -305,13 +304,13 @@
     padding: 0 6px;
     border: 0;
     border-radius: 6px;
-    background: rgba(0, 0, 0, 0.32);
+    background: rgba(0, 0, 0, 0.4);
     box-shadow:
       inset 0 0 0 1px var(--accent),
       var(--focus-ring);
     color: var(--t1);
     font-size: 14px;
-    font-weight: 600;
+    font-weight: 500;
   }
   .name {
     flex: 1;
@@ -319,12 +318,10 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 14px;
+    font-size: 14.5px;
     line-height: 20px;
-    font-weight: 600;
+    font-weight: 500;
     letter-spacing: -0.006em;
-    overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
   }
   .name-t {
@@ -335,7 +332,6 @@
   }
   .renamable {
     cursor: text;
-    border-radius: 6px;
   }
   .renamable :global(.pencil) {
     flex: none;
@@ -350,91 +346,143 @@
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: var(--accent);
+    background: var(--warn);
+    box-shadow: 0 0 6px var(--warn);
   }
   .bad {
     flex: none;
     display: grid;
     color: var(--error);
   }
-  .bottom {
+  .mid {
     display: flex;
-    min-height: 16px;
-    align-items: center;
+    align-items: baseline;
+    justify-content: space-between;
     gap: 10px;
-    padding-left: 15px;
-  }
-  .mode {
-    flex: none;
-    min-width: 34px;
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--t3);
   }
   .duty {
-    flex: none;
-    font-size: 17px;
-    line-height: 20px;
-    font-weight: 600;
-    letter-spacing: -0.01em;
-    color: var(--t1);
+    font-weight: 300;
+    font-size: 30px;
+    line-height: 1;
+    letter-spacing: -0.035em;
+    font-variant-numeric: tabular-nums;
+    color: color-mix(in oklab, var(--c) 40%, #fff);
+    text-shadow: 0 0 22px color-mix(in oklab, var(--c) 45%, transparent);
+    transition: color 0.9s;
   }
-  .pct {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--t2);
-    margin-left: 1px;
+  .duty small {
+    font-size: 13px;
+    color: var(--t3);
+    margin-left: 3px;
     letter-spacing: 0;
+    text-shadow: none;
   }
-  .meter {
-    flex: 1;
-    height: 3px;
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.07);
-    overflow: hidden;
+  .nd {
+    color: var(--t3);
+    text-shadow: none;
+  }
+  .mode {
+    font: 500 10.5px var(--font-mono);
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--t3);
+  }
+  .bar {
+    position: relative;
+    display: block;
+    height: 8px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.03);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  }
+  .env {
+    position: absolute;
+    top: -2px;
+    bottom: -2px;
+    border: 1px solid rgba(255, 255, 255, 0.26);
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.025);
+    transition:
+      left 0.6s,
+      width 0.6s;
   }
   .fill {
-    display: block;
-    height: 100%;
-    background: var(--c);
-    transform-origin: left center;
-    transition: transform 600ms var(--ease-out-expo);
+    position: absolute;
+    inset: 0;
+    transform-origin: left;
+    border-radius: 2px;
+    background: linear-gradient(
+      90deg,
+      color-mix(in oklab, var(--c) 18%, #15171c),
+      color-mix(in oklab, var(--c) 75%, #1a1c22) 70%,
+      color-mix(in oklab, var(--c) 40%, #fff)
+    );
+    box-shadow: 0 0 16px -3px color-mix(in oklab, var(--c) 70%, transparent);
+    transition:
+      transform 0.9s cubic-bezier(0.2, 0.8, 0.2, 1),
+      background 0.9s;
+  }
+  .cap {
+    position: absolute;
+    top: -3px;
+    bottom: -3px;
+    width: 2px;
+    border-radius: 2px;
+    background: #fff;
+    box-shadow: 0 0 8px 1px color-mix(in oklab, var(--c) 85%, #fff);
+    transition: left 0.9s cubic-bezier(0.2, 0.8, 0.2, 1);
   }
   .new {
+    position: sticky;
+    right: 0;
+    z-index: 2;
     flex: none;
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 6px;
-    height: 64px;
-    padding: 0 18px;
+    gap: 8px;
+    width: 104px;
+    padding: 0 12px;
     border: 0;
-    border-radius: var(--r-row);
-    background: transparent;
-    outline: 1px dashed var(--hair-strong);
-    outline-offset: -1px;
+    border-left: 1px solid var(--hair);
+    background: #0e1014;
     color: var(--t2);
     font-size: 13px;
-    font-weight: 600;
+    font-weight: 500;
     cursor: pointer;
     transition:
       background-color var(--dur-fast) ease-out,
-      color var(--dur-fast) ease-out,
-      transform var(--dur-press) ease-out;
+      color var(--dur-fast) ease-out;
+  }
+  .plus {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.05);
+    box-shadow: inset 0 0 0 1px var(--hair-strong);
+    transition: background-color var(--dur-fast) ease-out;
   }
   .new:hover {
-    background: var(--accent-softer);
-    color: var(--accent-strong);
-    outline-color: rgba(124, 156, 255, 0.45);
+    background: #13161b;
+    color: var(--t1);
   }
-  .new:active {
-    transform: scale(0.97);
+  .new:hover .plus {
+    background: var(--accent);
+    color: var(--accent-ink);
+  }
+  .new:active .plus {
+    transform: scale(0.95);
   }
   .new:focus-visible {
-    box-shadow: var(--focus-ring);
+    box-shadow: inset var(--focus-ring);
   }
   @media (prefers-reduced-motion: reduce) {
-    .fill {
+    .fill,
+    .cap,
+    .env {
       transition: none;
     }
   }

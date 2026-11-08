@@ -122,7 +122,16 @@
 
 <style>
   .noise {
-    padding: 6px 14px;
+    padding: 4px 18px 6px;
+  }
+  .noise :global(.trigger .t-headline) {
+    font: 500 11px var(--font-mono);
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--t2);
+  }
+  .noise :global(.trigger) {
+    min-height: 36px;
   }
   .body {
     display: grid;

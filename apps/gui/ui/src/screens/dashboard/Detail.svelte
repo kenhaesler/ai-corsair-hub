@@ -267,12 +267,9 @@
 <style>
   .hero {
     padding: 22px 24px 20px;
-    border-radius: var(--r-row);
-    background: var(--mat-2);
-    box-shadow:
-      inset 0 0 0 1px var(--hair),
-      var(--hair-inner),
-      var(--sh-1);
+    border-radius: var(--r-panel);
+    background: var(--panel-bg);
+    box-shadow: var(--panel-shadow);
   }
   .hero-top {
     display: flex;
@@ -289,14 +286,20 @@
   .fig {
     display: flex;
     align-items: baseline;
-    gap: 4px;
+    gap: 6px;
     margin-top: 6px;
     width: fit-content;
+    text-shadow: 0 0 32px color-mix(in oklab, currentColor 35%, transparent);
+  }
+  .fig :global(.t-figure-xl) {
+    font-weight: 300;
+    letter-spacing: -0.045em;
   }
   .unit {
-    font-size: 24px;
-    font-weight: 600;
-    color: var(--t2);
+    font-size: 20px;
+    font-weight: 400;
+    color: var(--t3);
+    text-shadow: none;
   }
   .sentence {
     margin-top: 8px;
@@ -315,11 +318,9 @@
     margin: 8px -4px 0 -8px;
   }
   .feed {
-    border-radius: var(--r-row);
-    background: var(--mat-2);
-    box-shadow:
-      inset 0 0 0 1px var(--hair),
-      var(--hair-inner);
+    border-radius: var(--r-panel);
+    background: var(--panel-bg);
+    box-shadow: var(--panel-shadow);
     overflow: hidden;
   }
   .rrow {
@@ -350,12 +351,17 @@
   .rfig {
     display: flex;
     align-items: baseline;
-    gap: 3px;
+    gap: 4px;
+  }
+  .rfig :global(.t-figure-m) {
+    font-weight: 300;
+    font-size: 28px;
+    letter-spacing: -0.03em;
   }
   .runit {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--t2);
+    font-size: 13px;
+    font-weight: 400;
+    color: var(--t3);
   }
   .rsent {
     margin-top: 4px;
@@ -369,22 +375,23 @@
   .rail {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    padding: 12px 14px;
+    gap: 4px;
+    padding: 14px 16px;
     border-radius: 12px;
-    background: var(--mat-2);
-    box-shadow: inset 0 0 0 1px var(--hair);
+    background: var(--panel-bg);
+    box-shadow: var(--panel-shadow);
   }
   .rn {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--t2);
+    font: 500 10.5px var(--font-mono);
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--t3);
   }
   .rv {
-    font-size: var(--fs-figure-m);
-    line-height: var(--lh-figure-m);
-    font-weight: 600;
-    letter-spacing: var(--ls-figure-m);
+    font-size: 26px;
+    line-height: 30px;
+    font-weight: 300;
+    letter-spacing: -0.03em;
   }
   .rs {
     font-size: 12px;
@@ -394,11 +401,9 @@
     list-style: none;
     margin: 0;
     padding: 0;
-    border-radius: var(--r-row);
-    background: var(--mat-2);
-    box-shadow:
-      inset 0 0 0 1px var(--hair),
-      var(--hair-inner);
+    border-radius: var(--r-panel);
+    background: var(--panel-bg);
+    box-shadow: var(--panel-shadow);
     overflow: hidden;
   }
   .fan {
@@ -447,7 +452,8 @@
     font-weight: 600;
   }
   .empty-wrap {
-    border-radius: var(--r-row);
-    background: var(--mat-2);
+    border-radius: var(--r-panel);
+    background: var(--panel-bg);
+    box-shadow: var(--panel-shadow);
   }
 </style>

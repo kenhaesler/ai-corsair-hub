@@ -24,6 +24,7 @@
   import { tempOf } from '../../lib/format';
   import { computePresetState, groupMatchesPreset } from '../../lib/presets';
   import { defaultMode, MODE_BLURB, MODE_OPTIONS, mixTemp, type ModeType } from './fanModes';
+  import { dutyColor } from '../dashboard/overview';
   import type { FanGroupConfig, FanMode, FanPresetDef, HubSnapshot, TempSourceConfig } from '../../lib/types';
 
   interface Props {
@@ -213,10 +214,10 @@
 
     {#if group.mode.type === 'fixed'}
       {@const m = group.mode}
-      <InsetGroup title="Duty">
+      <InsetGroup title="Duty" footer={MODE_BLURB.fixed}>
         <div class="fixed">
-          <div class="fixed-fig">
-            <span class="t-figure-l num">{m.duty_percent}</span><span class="unit">%</span>
+          <div class="fixed-fig" style:--c={dutyColor(m.duty_percent)}>
+            <span class="num">{m.duty_percent}</span><span class="unit">%</span>
           </div>
           <div class="fixed-sl">
             <Slider
@@ -342,38 +343,40 @@
   }
   .dchip {
     display: inline-flex;
-    align-items: baseline;
-    gap: 6px;
-    height: 24px;
-    padding: 0 9px;
+    gap: 7px;
+    height: 26px;
+    padding: 0 10px;
     align-items: center;
-    border-radius: var(--r-pill);
-    background: rgba(255, 255, 255, 0.05);
-    box-shadow: inset 0 0 0 1px var(--hair);
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.04);
+    box-shadow: inset 0 0 0 1px var(--hair-strong);
     font-size: 12px;
     white-space: nowrap;
   }
   .dname {
     color: var(--t1);
+    font-weight: 500;
   }
   .drpm {
+    font: 500 10.5px var(--font-mono);
+    letter-spacing: 0.04em;
     color: var(--t3);
   }
   .strip {
     display: flex;
     align-items: stretch;
-    min-height: 52px;
-    border-radius: var(--r-row);
-    background: var(--mat-2);
+    min-height: 56px;
+    border-radius: 16px;
+    background: var(--panel-grid), var(--panel);
     box-shadow:
-      inset 0 0 0 1px var(--hair),
-      var(--hair-inner);
+      inset 0 0 0 1px var(--hair-strong),
+      0 24px 48px -32px rgb(0 0 0 / 0.9);
   }
   .seg {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 8px 14px;
+    gap: 12px;
+    padding: 8px 18px;
     min-width: 0;
   }
   .seg.mem {
@@ -382,7 +385,7 @@
   .seg.mode {
     flex: none;
     box-shadow: inset 1px 0 0 var(--hair);
-    padding-left: 16px;
+    padding-left: 18px;
   }
   .seg .msub {
     flex: 1;
@@ -396,38 +399,47 @@
   .seg .mlabel {
     flex: none;
   }
-  .mode .mlabel {
+  .mode .mlabel,
+  .mem .mlabel {
+    font: 500 11px var(--font-mono);
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
     color: var(--t2);
+  }
+  .mem .mlabel .num {
+    color: var(--t1);
+    margin-left: 2px;
   }
 
   .sections {
     display: flex;
     flex-direction: column;
-    gap: 24px;
+    gap: 20px;
   }
   .sec-meta {
-    font-size: 12px;
-    font-weight: 500;
+    font: 500 11px var(--font-mono);
+    letter-spacing: 0.08em;
     color: var(--t3);
   }
   .panel {
-    border-radius: var(--r-row);
-    background: var(--mat-2);
+    border-radius: 16px;
+    background: var(--panel-grid), var(--panel);
     box-shadow:
-      inset 0 0 0 1px var(--hair),
-      var(--hair-inner);
-    margin-top: -12px;
+      inset 0 0 0 1px var(--hair-strong),
+      0 24px 48px -32px rgb(0 0 0 / 0.9);
+    margin-top: -8px;
   }
 
   .tile {
     flex: none;
     width: 26px;
     height: 26px;
-    border-radius: 7px;
+    border-radius: 8px;
     display: grid;
     place-items: center;
-    background: var(--gc);
-    color: #0b0d12;
+    background: rgba(255, 255, 255, 0.05);
+    box-shadow: inset 0 0 0 1px var(--hair-strong);
+    color: var(--gc);
   }
   .mlabel {
     font-size: 13px;
@@ -464,16 +476,25 @@
     padding: 18px 20px 20px;
   }
   .fixed-fig .unit {
-    font-weight: 600;
-    color: var(--t2);
-    margin-left: 2px;
-    font-size: 17px;
+    font-weight: 400;
+    color: var(--t3);
+    margin-left: 4px;
+    font-size: 15px;
   }
   .fixed-fig {
     flex: none;
     width: 112px;
     display: flex;
     align-items: baseline;
+  }
+  .fixed-fig .num {
+    font-weight: 300;
+    font-size: 40px;
+    line-height: 1;
+    letter-spacing: -0.04em;
+    color: color-mix(in oklab, var(--c) 35%, #fff);
+    text-shadow: 0 0 28px color-mix(in oklab, var(--c) 40%, transparent);
+    transition: color 0.6s;
   }
   .fixed-sl {
     flex: 1;

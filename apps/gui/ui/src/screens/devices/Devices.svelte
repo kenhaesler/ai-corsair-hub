@@ -243,9 +243,9 @@
   }
   .empty {
     margin-top: var(--sp-6);
-    border-radius: var(--r-row);
-    background: var(--mat-2);
-    box-shadow: inset 0 0 0 1px var(--hair);
+    border-radius: var(--r-panel);
+    background: var(--panel-bg);
+    box-shadow: var(--panel-shadow);
   }
   .skeletons {
     display: flex;
