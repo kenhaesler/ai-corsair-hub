@@ -37,7 +37,7 @@
   inert={!isActive}
   style:visibility={shown ? 'visible' : 'hidden'}
   style:opacity={a.current}
-  style:transform={a.current > 0.999 ? 'none' : `translate3d(${dir * (1 - a.current) * 28}px, 0, 0)`}
+  style:transform={a.current > 0.999 || !shown ? 'none' : `translate3d(${dir * (1 - a.current) * 28}px, 0, 0)`}
   style:z-index={isActive ? 2 : 1}
 >
   {@render children()}

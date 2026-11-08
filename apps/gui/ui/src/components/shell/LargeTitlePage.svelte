@@ -106,11 +106,14 @@
     overflow-x: hidden;
     scroll-padding-top: calc(var(--toolbar-h) + 16px);
     overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    /* content fades out as it passes under the floating toolbar */
+    mask-image: linear-gradient(to bottom, transparent 10px, #000 calc(var(--toolbar-h) + 18px));
   }
   .page-inner {
     max-width: calc(var(--content-max) + var(--gutter) * 2);
     margin: 0 auto;
-    padding: calc(var(--toolbar-h) + 20px) var(--gutter) 64px;
+    padding: calc(var(--toolbar-h) + 32px) var(--gutter) 64px;
   }
   .lt-head {
     display: flex;

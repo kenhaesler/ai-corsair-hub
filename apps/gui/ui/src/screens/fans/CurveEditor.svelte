@@ -174,14 +174,17 @@
   // ---------------------------------------------------------------------
   // Live marker
   // ---------------------------------------------------------------------
-  const tempSpring = followSpring(() => currentTemp ?? 0, springs.bar);
-  const hasLive = $derived(currentTemp !== null && points.length >= 2);
+  // The loop reads the sensor mix, so that is what the band, the live line and
+  // the operating point follow; the raw CPU reading is a secondary marker.
+  const driveTemp = $derived(mixTemp ?? currentTemp);
+  const tempSpring = followSpring(() => driveTemp ?? 0, springs.bar);
+  const hasLive = $derived(driveTemp !== null && points.length >= 2);
   const liveT = $derived(clampN(tempSpring.current, T0, T1));
   const liveDutyShown = $derived(curveAt(sp, liveT));
-  const mixSpring = followSpring(() => mixTemp ?? 0, springs.bar);
+  const mixSpring = followSpring(() => currentTemp ?? 0, springs.bar);
   const showMix = $derived(mixTemp !== null && currentTemp !== null && Math.abs(mixTemp - currentTemp) >= 0.5 && points.length >= 2);
   const mixT = $derived(clampN(mixSpring.current, T0, T1));
-  const liveDutyLabel = $derived(currentTemp !== null ? Math.round(curveAt(points, currentTemp)) : 0);
+  const liveDutyLabel = $derived(driveTemp !== null ? Math.round(curveAt(points, driveTemp)) : 0);
 
   // ---------------------------------------------------------------------
   // Interaction state
@@ -470,7 +473,7 @@
           <circle cx={mx} cy={my} r="4.5" />
           <g transform="translate({mx},{MT + ph - 24})">
             <rect x="-34" width="68" height="18" rx="9" />
-            <text x="0" y="13">Mix {(mixTemp ?? 0).toFixed(1)}°</text>
+            <text x="0" y="13">CPU {(currentTemp ?? 0).toFixed(1)}°</text>
           </g>
         </g>
       {/if}
@@ -489,7 +492,7 @@
         </g>
         <g transform="translate({clampN(x(liveT), ML + 34, ML + pw - 34)},{MT - 19})" aria-hidden="true">
           <rect class="cpu-pill" x="-34" y="0" width="68" height="18" rx="9" />
-          <text class="cpu-t" x="0" y="13">CPU {(currentTemp ?? 0).toFixed(1)}°</text>
+          <text class="cpu-t" x="0" y="13">{mixTemp !== null ? 'Mix' : 'CPU'} {(driveTemp ?? 0).toFixed(1)}°</text>
         </g>
       {/if}
 

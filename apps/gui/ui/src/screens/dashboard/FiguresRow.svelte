@@ -58,7 +58,7 @@
   <div class="fig" style:--c={dutyColor(duty)}>
     <span class="k">Average fan</span>
     <span class="n"><AnimatedNumber value={duty} decimals={0} /><small>%</small></span>
-    <span class="d">{s?.fans.length ?? 0} devices{rpm !== null ? ` · ~${Math.round(rpm).toLocaleString('en-US')} rpm` : ''}</span>
+    <span class="d">{s?.fans.length ?? 0} device{(s?.fans.length ?? 0) === 1 ? '' : 's'}{rpm !== null ? ` · ~${Math.round(rpm).toLocaleString('en-US')} rpm` : ''}</span>
   </div>
   <div class="fig" style:--c={hottest ? heatColor(hottest.celsius) : 'var(--t3)'}>
     <span class="k">Hottest part</span>

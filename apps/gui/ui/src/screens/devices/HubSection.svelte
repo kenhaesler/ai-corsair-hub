@@ -12,7 +12,7 @@
   import Pencil from 'lucide-svelte/icons/pencil';
   import type { HubSnapshot } from '../../lib/types';
   import { displayNameFromTree, shortHubSerial, deviceTypeLabel } from '../../lib/identity';
-  import { configStore, loadConfig } from '../../lib/stores/config.svelte';
+  import { applyDeviceName, configStore, loadConfig } from '../../lib/stores/config.svelte';
   import { display } from '../../lib/stores/scrub.svelte';
   import { toasts } from '../../lib/stores/toasts.svelte';
   import { renameDevice } from '../../lib/api';
@@ -88,7 +88,8 @@
     saving = true;
     try {
       await renameDevice(id, name);
-      await loadConfig();
+      if (configStore.config) applyDeviceName(id, name);
+      else await loadConfig();
       if (name) toasts.success(`Renamed to “${name}”`);
       else toasts.success('Name cleared', { detail: `Showing ${labelOf(id)}` });
     } catch (e) {

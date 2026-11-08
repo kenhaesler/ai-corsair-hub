@@ -71,7 +71,7 @@
   {/if}
 {/snippet}
 
-<LargeTitlePage title="Lighting" subtitle={unzoned === null || lighting.hubs.length === 0 ? undefined : unzonedLine}>
+<LargeTitlePage title="Lighting" subtitle={unzoned === null || lighting.hubs.length === 0 ? undefined : unzonedLine} maxWidth={1440}>
 
   {#if !lighting.loaded}
     <div class="stage-skel" aria-busy="true"><Skeleton height="300px" /></div>
@@ -83,7 +83,6 @@
     <div class="left">
       {#if lighting.loaded}
         <ZonesSection hubs={lighting.hubs} onsave={save} />
-        {#if zone}<PresetsSection />{/if}
       {:else}
         <Skeleton height="180px" />
         <Skeleton height="260px" />
@@ -98,6 +97,7 @@
           <FlowSection {zone} onsave={save} />
           <LayersSection {zone} onsave={save} />
         {/key}
+        <PresetsSection />
       {:else}
         <!-- no zone: Flow/Layers need one; the "No zones configured" state lives in Zones -->
         <PresetsSection />

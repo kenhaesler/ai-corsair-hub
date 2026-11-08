@@ -24,12 +24,23 @@
   let appVersion = $state('');
 
   onMount(() => {
-    loadConfig();
+    // Never clobber unsaved Fan Control edits: load only when nothing is loaded yet.
+    if (!configStore.config) loadConfig();
     getVersion()
       .then((v) => (appVersion = v))
       .catch(() => {
         /* version unavailable: leave blank */
       });
+  });
+
+  /** Only the General section's own edits count here; Fan Control owns its dirty state. */
+  const generalDirty = $derived.by(() => {
+    if (!configStore.config || !configStore.baseline) return false;
+    try {
+      return JSON.stringify(configStore.config.general) !== JSON.stringify(JSON.parse(configStore.baseline).general);
+    } catch {
+      return configStore.dirty;
+    }
   });
 
   const LOG_LEVELS = [
@@ -77,7 +88,7 @@
           <span class="path mono" class:unset={!general.lhm_exe_path}>{general.lhm_exe_path ?? 'Not set'}</span>
         </InsetRow>
         <div class="save">
-          {#if configStore.dirty}<span class="dirty t-callout"><i aria-hidden="true"></i>Unsaved changes</span>{/if}
+          {#if generalDirty}<span class="dirty t-callout"><i aria-hidden="true"></i>Unsaved changes</span>{/if}
           <Button variant="primary" onclick={() => saveCurrentConfig()} loading={configStore.saving}>
             {configStore.saving ? 'Saving...' : 'Save Settings'}
           </Button>

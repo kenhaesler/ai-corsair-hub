@@ -124,7 +124,7 @@
   }
 </script>
 
-<LargeTitlePage title={h.title} back={{ label: 'Summary', onback: () => ui.openDetail(null) }} subtitle={modeSummary || undefined}>
+<LargeTitlePage title={h.title} back={{ label: 'Summary', onback: () => ui.openDetail(null) }} subtitle={modeSummary || undefined} maxWidth={1440}>
   <AlertRows />
   <div class="hero" style:view-transition-name={vt('card')}>
     <div class="hero-top">

@@ -255,7 +255,8 @@
   .cell {
     position: relative;
     flex: 1 1 200px;
-    min-width: 172px;
+    min-width: 148px;
+    container-type: inline-size;
     display: grid;
     gap: 10px;
     padding: 16px 18px 18px;
@@ -386,6 +387,11 @@
     letter-spacing: 0.16em;
     text-transform: uppercase;
     color: var(--t3);
+  }
+  @container (max-width: 168px) {
+    .mode {
+      display: none;
+    }
   }
   .bar {
     position: relative;

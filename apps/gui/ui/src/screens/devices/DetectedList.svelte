@@ -82,7 +82,7 @@
 {#if excluded > 0}
   <p class="note t-callout">
     <BluetoothOff size={14} strokeWidth={2} />
-    <span><span class="num">{excluded}</span> interfaces filtered (Bluetooth / driver problem)</span>
+    <span><span class="num">{excluded}</span> interface{excluded === 1 ? '' : 's'} filtered (Bluetooth / driver problem)</span>
   </p>
 {/if}
 

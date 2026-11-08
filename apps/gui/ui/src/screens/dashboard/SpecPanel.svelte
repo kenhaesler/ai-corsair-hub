@@ -74,6 +74,7 @@
   }
 
   const PSU_SCALE = 1600;
+  const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
   const rows = $derived.by((): Row[] => {
     if (!s) return [];
     if (tab === 'temps')
@@ -118,7 +119,7 @@
           hl: 'power:psu',
           icon: Zap,
           name: 'Total output',
-          sub: `Input ${p.input_voltage.toFixed(0)} V · PSU fan ${Math.round(p.fan_rpm).toLocaleString('en-US')} rpm`,
+          sub: `PSU fan ${Math.round(p.fan_rpm).toLocaleString('en-US')} rpm`,
           value: p.total_power,
           dec: 0,
           unit: 'W',
@@ -152,7 +153,7 @@
       hl: null,
       icon: Activity,
       name: g.name,
-      sub: `${s.fans.filter((f) => f.group_name === g.name).length} devices · ${Math.round(dutyOf(s, g.name) ?? 0)}% duty`,
+      sub: plural(s.fans.filter((f) => f.group_name === g.name).length, 'device'),
       value: rpm ?? 0,
       dec: 0,
       unit: 'rpm',
@@ -189,6 +190,7 @@
     return Array.from({ length: n + 1 }, (_, i) => Math.round(r.min + ((r.max - r.min) * i) / n));
   });
   const frac = (r: Row, v: number) => Math.max(0, Math.min(1, (v - r.min) / (r.max - r.min)));
+  const fmtTick = (t: number) => (tab === 'speeds' && t >= 1000 ? `${(t / 1000).toLocaleString('en-US', { maximumFractionDigits: 1 })}k` : t.toLocaleString('en-US'));
   const fmtV = (r: Row) => (r.dec ? r.value.toFixed(r.dec) : Math.round(r.value).toLocaleString('en-US'));
 
   let tabEls = $state<HTMLButtonElement[]>([]);
@@ -291,7 +293,7 @@
     {/key}
 
     {#if ticks.length}
-      <div class="axis" aria-hidden="true"><span></span><div class="ticks">{#each ticks as t (t)}<span>{t.toLocaleString('en-US')}</span>{/each}</div><span></span></div>
+      <div class="axis" class:editing={ui.editingPins && canEdit} aria-hidden="true"><span></span><div class="ticks">{#each ticks as t (t)}<span>{fmtTick(t)}</span>{/each}</div><span></span></div>
     {/if}
   </div>
 </div>
@@ -339,7 +341,7 @@
     height: 1px;
     background: linear-gradient(90deg, transparent, color-mix(in oklab, var(--sc) 70%, #fff), transparent);
     box-shadow: 0 0 12px var(--sc);
-    transition: transform 0.55s cubic-bezier(0.3, 1.25, 0.4, 1);
+    transition: transform 0.55s cubic-bezier(0.22, 1, 0.36, 1);
   }
   .panel {
     position: relative;
@@ -587,6 +589,19 @@
     grid-template-columns: 210px minmax(0, 1fr) 82px 22px;
     gap: 16px;
     padding: 0 18px 12px;
+  }
+  .axis.editing {
+    grid-template-columns: 210px minmax(0, 1fr) 82px 92px;
+  }
+  @media (max-width: 1180px) {
+    .r,
+    .axis {
+      grid-template-columns: 170px minmax(0, 1fr) 82px 22px;
+    }
+    .editing .r,
+    .axis.editing {
+      grid-template-columns: 170px minmax(0, 1fr) 82px 92px;
+    }
   }
   .ticks {
     display: flex;

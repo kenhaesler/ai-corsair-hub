@@ -52,12 +52,18 @@
   const tid = `sh-${Math.random().toString(36).slice(2, 8)}`;
   const p = createSpring(0, { ...springs.sheet, precision: 0.002 });
   let mounted = $state(false);
+  let panelEl = $state<HTMLDivElement>();
+  let opener: HTMLElement | null = null;
 
   $effect(() => {
     if (open) {
+      opener = document.activeElement as HTMLElement | null;
       mounted = true;
       springTo(p, 1);
     } else if (mounted) {
+      // Hand focus back as soon as the sheet starts closing, so a parent
+      // dialog receives the very next key press (not only after the spring).
+      if (panelEl?.contains(document.activeElement) && opener && document.contains(opener)) opener.focus({ preventScroll: true });
       springTo(p, 0).then(() => {
         if (!open) mounted = false;
       });
@@ -95,6 +101,7 @@
       style:opacity={backdrop}
       style:transform="translate(-50%, -50%) scale({0.96 + 0.04 * p.current})"
       inert={!open}
+      bind:this={panelEl}
       use:focusTrap
       onkeydown={onKey}
     >

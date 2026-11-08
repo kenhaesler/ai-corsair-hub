@@ -88,7 +88,12 @@
     height: 14px;
   }
   .on .track {
-    background: var(--success);
+    background: var(--accent);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+  }
+  .on .knob {
+    background: var(--accent-ink);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.5);
   }
   .md.on .knob {
     transform: translateX(16px);

@@ -192,7 +192,7 @@
 <ToolbarActions>
   <div class="tb">
     {#if configStore.dirty}
-      <span class="unsaved" role="status"><span class="udot" aria-hidden="true"></span>Unsaved changes</span>
+      <span class="unsaved" role="status" title="Unsaved changes"><span class="udot" aria-hidden="true"></span><span class="utxt">Unsaved changes</span></span>
       <Button variant="plain" size="sm" onclick={revertConfig} disabled={configStore.saving}>Revert</Button>
     {/if}
     <span class="save-wrap" title={saveTip}>
@@ -314,6 +314,19 @@
   }
   .save-wrap {
     display: inline-flex;
+  }
+  @media (max-width: 1240px) {
+    .utxt {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+    }
+    .unsaved {
+      position: relative;
+      padding: 0 2px;
+    }
   }
   .banner {
     margin-bottom: 20px;

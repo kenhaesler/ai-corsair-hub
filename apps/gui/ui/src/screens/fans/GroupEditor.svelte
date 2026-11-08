@@ -12,6 +12,7 @@
   import Segmented from '../../components/ui/Segmented.svelte';
   import Slider from '../../components/ui/Slider.svelte';
   import Button from '../../components/ui/Button.svelte';
+  import IconButton from '../../components/ui/IconButton.svelte';
   import CurveEditor from './CurveEditor.svelte';
   import PresetChips from './PresetChips.svelte';
   import NoiseBehavior from './NoiseBehavior.svelte';
@@ -203,7 +204,7 @@
         {/if}
         <div class="mbtns">
           <Button size="sm" icon={ListChecks} onclick={openPicker} title="Edit devices in this group">Edit devices</Button>
-          <Button size="sm" icon={Trash2} class="del-btn" onclick={ondelete} title="Delete this fan group">Delete</Button>
+          <IconButton icon={Trash2} size="sm" label="Delete this fan group" class="del-btn" onclick={ondelete} />
         </div>
       </section>
       <section class="seg mode" aria-label="Mode" title={MODE_BLURB[modeType]}>
@@ -226,7 +227,6 @@
               min={0}
               max={100}
               step={1}
-              {color}
               value={m.duty_percent}
               format={(v) => `${v}%`}
               oninput={(v) => setMode2({ type: 'fixed', duty_percent: v }, 'fixed-duty')}
@@ -262,7 +262,6 @@
           hysteresis={m.hysteresis}
           rampUp={m.ramp_rate}
           rampDown={m.ramp_down_rate ?? null}
-          {color}
           onchange={(v) =>
             change(
               { ...group, mode: { ...m, hysteresis: v.hysteresis, ramp_rate: v.rampUp, ramp_down_rate: v.rampDown } },
@@ -285,7 +284,6 @@
           kd={m.kd}
           minDuty={m.min_duty}
           maxDuty={m.max_duty}
-          {color}
           liveTemp={mix}
           oncheckpoint={checkpoint}
           onchange={(v) =>

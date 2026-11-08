@@ -97,6 +97,6 @@
   .stage {
     position: relative;
     min-height: 0;
-    overflow: hidden;
+    overflow: clip;
   }
 </style>

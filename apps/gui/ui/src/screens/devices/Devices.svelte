@@ -156,7 +156,7 @@
   </Button>
 </ToolbarActions>
 
-<LargeTitlePage title="USB Devices">
+<LargeTitlePage title="USB Devices" maxWidth={1440}>
   {#if error}
     <div class="gap" transition:slide={slideOpts}>
       <Banner tone="error" ondismiss={() => (error = null)}>{error}</Banner>

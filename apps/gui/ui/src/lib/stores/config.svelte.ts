@@ -18,6 +18,31 @@ class ConfigStore {
 
 export const configStore = new ConfigStore();
 
+/**
+ * Reflect a device rename the backend already saved, without reloading the
+ * whole config (which would discard unsaved Fan Control edits). Updates the
+ * baseline too, so the rename never counts as an unsaved change.
+ */
+export function applyDeviceName(deviceId: string, name: string) {
+  const patch = (cfg: AppConfig | null) => {
+    if (!cfg) return;
+    cfg.devices ??= [];
+    const row = cfg.devices.find((d) => d.device_id === deviceId);
+    if (row) row.name = name || undefined;
+    else if (name) cfg.devices.push({ device_id: deviceId, name });
+  };
+  patch(configStore.config);
+  if (configStore.baseline) {
+    try {
+      const base = JSON.parse(configStore.baseline) as AppConfig;
+      patch(base);
+      configStore.baseline = JSON.stringify(base);
+    } catch {
+      /* keep the old baseline */
+    }
+  }
+}
+
 export async function loadConfig() {
   try {
     const cfg = await getConfig();

@@ -120,7 +120,7 @@
     grid-template-columns: minmax(0, 1fr) 440px;
     gap: 56px;
     align-items: end;
-    padding: 14px 24px 26px;
+    padding: 2px 24px 26px;
   }
   .intro h1 {
     font-weight: 300;
@@ -150,6 +150,29 @@
     gap: 20px;
     height: 452px;
     margin-bottom: 20px;
+  }
+  @media (max-width: 1180px) {
+    .main {
+      grid-template-columns: minmax(0, 1fr);
+      height: auto;
+    }
+    .main .card {
+      height: 452px;
+    }
+    .main .card.path {
+      height: 380px;
+    }
+    .intro {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 12px;
+      padding-bottom: 20px;
+    }
+    .intro h1 {
+      font-size: 40px;
+    }
+    .lede {
+      max-width: 70ch;
+    }
   }
   .card {
     position: relative;
