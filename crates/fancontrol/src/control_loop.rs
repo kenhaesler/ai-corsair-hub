@@ -14,7 +14,7 @@ use corsair_hid::{DeviceScanner, FanSpeed, HubInfo, IcueLinkHub, IcueLinkTranspo
 use corsair_sensors::cpu::CpuSensor;
 use corsair_sensors::gpu::GpuSensor;
 use corsair_sensors::psu::{PsuReading, PsuSensor};
-use corsair_sensors::TemperatureSource;
+use corsair_sensors::{discover_lhm_temp_sources, LhmCache, TemperatureSource};
 
 use crate::acoustic::AcousticFilter;
 use crate::curve::FanCurve;
@@ -205,6 +205,21 @@ impl ControlLoop {
                 sensors.insert("gpu".to_string(), Box::new(gpu));
             }
             Err(e) => warn!("GPU sensor unavailable: {}", e),
+        }
+
+        // Everything else LibreHardwareMonitor publishes that can drive a fan
+        // group: board / chipset / VRM / memory temperatures, the CPU CCD
+        // average, a coolant thermistor, GPU memory junction. One shared cache
+        // so all of them cost one HTTP fetch per tick. Only sources with a
+        // connected reading right now are offered.
+        let lhm_cache = Arc::new(LhmCache::new(Duration::from_millis(400)));
+        for source in discover_lhm_temp_sources(Arc::clone(&lhm_cache)) {
+            let id = source.name().to_string();
+            if sensors.contains_key(&id) {
+                continue;
+            }
+            info!("Temperature source available: {}", id);
+            sensors.insert(id, source);
         }
 
         // Also try PSU sensors if referenced by any fan group

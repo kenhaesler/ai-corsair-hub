@@ -25,7 +25,19 @@ export function groupColor(index: number): string {
   return GROUP_COLORS[((index % GROUP_COLORS.length) + GROUP_COLORS.length) % GROUP_COLORS.length];
 }
 
-const SOURCE_LABEL: Record<string, string> = { cpu: 'CPU', gpu: 'GPU', psu_vrm: 'PSU VRM', psu_case: 'PSU case', water_inline: 'Water' };
+const SOURCE_LABEL: Record<string, string> = {
+  cpu: 'CPU',
+  gpu: 'GPU',
+  psu_vrm: 'PSU VRM',
+  psu_case: 'PSU case',
+  water_inline: 'Coolant',
+  board_system: 'Board',
+  chipset: 'Chipset',
+  vrm: 'VRM',
+  dimm: 'Memory',
+  cpu_ccd: 'CPU cores',
+  gpu_memory: 'GPU memory',
+};
 /** Display label of a temperature source, one spelling everywhere ("PSU case", "Water"). */
 export function sourceLabel(source: string): string {
   return SOURCE_LABEL[source] ?? source.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());

@@ -38,9 +38,28 @@ export const powerColor = (w: number, max: number) => heatColor(35 + (w / max) *
 // ---------------------------------------------------------------------------
 // Names
 // ---------------------------------------------------------------------------
-const NAMES: Record<string, string> = { cpu: 'CPU', gpu: 'GPU', psu_vrm: 'PSU VRM', psu_case: 'PSU case' };
+const NAMES: Record<string, string> = {
+  cpu: 'CPU',
+  gpu: 'GPU',
+  psu_vrm: 'PSU VRM',
+  psu_case: 'PSU case',
+  water_inline: 'Coolant',
+  board_system: 'Board',
+  chipset: 'Chipset',
+  vrm: 'VRM',
+  dimm: 'Memory',
+  cpu_ccd: 'CPU cores',
+  gpu_memory: 'GPU memory',
+};
 export const srcShort = (s: string) => NAMES[s] ?? s.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
-const LONG: Record<string, string> = { cpu: 'CPU package', gpu: 'GPU core' };
+const LONG: Record<string, string> = {
+  cpu: 'CPU package',
+  gpu: 'GPU core',
+  board_system: 'Motherboard',
+  dimm: 'Memory modules',
+  cpu_ccd: 'CPU cores (CCD average)',
+  gpu_memory: 'GPU memory junction',
+};
 export const srcLong = (s: string) => LONG[s] ?? srcShort(s);
 
 /** "63% GPU + 37% CPU", or just "CPU" for a single source. */
@@ -115,7 +134,7 @@ export function pathSources(config: AppConfig | null, snap: SystemSnapshot): str
   const set = new Set<string>();
   for (const g of config?.fan_groups ?? []) if (g.mode.type !== 'fixed') g.mode.temp_source.sensors.forEach((s) => set.add(s));
   if (set.size === 0) snap.temperatures.forEach((t) => set.add(t.source));
-  const rank = (s: string) => (s === 'cpu' ? 0 : s === 'gpu' ? 1 : s.startsWith('water') ? 2 : 3);
+  const rank = (s: string) => (s === 'cpu' ? 0 : s === 'gpu' ? 1 : s.startsWith('water') ? 2 : s === 'cpu_ccd' || s === 'gpu_memory' ? 3 : 4);
   return [...set].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
 }
 

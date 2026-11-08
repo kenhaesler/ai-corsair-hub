@@ -2,10 +2,13 @@ pub mod cpu;
 pub mod gpu;
 pub mod lhm;
 pub mod lhm_registry;
+pub mod lhm_temps;
 pub mod psu;
 
 pub use gpu::{GpuMetrics, GpuSensor};
 pub use lhm::CpuMetrics;
+pub use lhm_registry::{LhmCache, LhmKind, LhmSensor};
+pub use lhm_temps::{discover_lhm_temp_sources, LhmTempSource, LHM_TEMP_SPECS};
 
 use corsair_common::Temperature;
 

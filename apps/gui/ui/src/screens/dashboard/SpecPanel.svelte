@@ -72,7 +72,13 @@
     }
     if (src === 'psu_vrm') return 'Voltage regulators';
     if (src === 'psu_case') return 'Case interior';
-    if (src.startsWith('water')) return 'Coolant';
+    if (src.startsWith('water')) return 'Coolant · inline sensor';
+    if (src === 'board_system') return 'Motherboard ambient';
+    if (src === 'chipset') return 'Chipset';
+    if (src === 'vrm') return 'CPU voltage regulators';
+    if (src === 'dimm') return 'Hottest memory module';
+    if (src === 'cpu_ccd') return 'Average of the core dies';
+    if (src === 'gpu_memory') return 'GPU memory junction';
     return 'Sensor';
   }
 
